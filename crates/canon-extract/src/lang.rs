@@ -48,6 +48,8 @@ pub enum Language {
     Php,
     /// Vue single-file components.
     Vue,
+    /// Embedded Ruby templates.
+    Erb,
 }
 
 impl Language {
@@ -64,6 +66,7 @@ impl Language {
         Self::Rust,
         Self::Php,
         Self::Vue,
+        Self::Erb,
     ];
 
     /// Display name.
@@ -80,6 +83,7 @@ impl Language {
             Self::Rust => "Rust",
             Self::Php => "PHP",
             Self::Vue => "Vue SFC",
+            Self::Erb => "ERB",
         }
     }
 }
@@ -121,11 +125,12 @@ pub fn provider(language: Language) -> Provider {
             Language::Go => (true, Visibility::Capitalisation, &["go"]),
             Language::Rust => (true, Visibility::ModifierDefaultPrivate, &["rs"]),
             Language::Php => (true, Visibility::ModifierDefaultPublic, &["php"]),
-            // Two grammars in one file: `<template>` and `<script lang="ts">`
-            // parse under different languages, so a single pass cannot resolve
-            // the component's public surface. Left explicitly unwired rather
-            // than half-wired.
-            Language::Vue => (false, Visibility::ModifierDefaultPublic, &["vue"]),
+            // Two grammars in one file. Handled by parsing the script block
+            // alone through `set_included_ranges`, so the markup is skipped
+            // rather than fed to a parser that cannot read it.
+            Language::Vue => (true, Visibility::ModifierDefaultPublic, &["vue"]),
+            // Ruby inside markup, same mechanism.
+            Language::Erb => (true, Visibility::SectionKeyword, &["erb", "rhtml"]),
         };
     Provider { language, grammar_ready, visibility, extensions }
 }
@@ -146,7 +151,7 @@ pub fn grammar(language: Language) -> Option<tree_sitter::Language> {
         Language::Go => tree_sitter_go::LANGUAGE.into(),
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
-        Language::Vue => return None,
+        Language::Vue | Language::Erb => return None,
     })
 }
 
@@ -200,11 +205,18 @@ mod tests {
     }
 
     #[test]
-    fn vue_is_declared_unwired_rather_than_omitted() {
-        // A language that is known-but-unsupported must stay in the table so
-        // `canon check` reports it. Silence would read as "not a language".
-        assert!(!provider(Language::Vue).grammar_ready);
-        assert!(!wired().contains(&Language::Vue));
+    fn a_two_grammar_file_is_wired_through_the_language_it_embeds() {
+        // Vue and ERB have no grammar of their own and are still wired: the
+        // script block of one and the tags of the other are parsed by the
+        // language they contain, through included ranges.
+        for language in [Language::Vue, Language::Erb] {
+            assert!(provider(language).grammar_ready, "{} should be wired", language.name());
+            assert!(
+                grammar(language).is_none(),
+                "{} has no grammar of its own; it delegates",
+                language.name()
+            );
+        }
     }
 
     #[test]

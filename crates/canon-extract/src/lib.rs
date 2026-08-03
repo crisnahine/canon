@@ -42,6 +42,7 @@ mod query;
 mod util;
 
 mod ecma;
+mod embedded;
 mod golang;
 mod php;
 mod python;
@@ -131,9 +132,25 @@ pub fn extract(language: Language, source: &str, path: &str) -> Result<FileFacts
     if !provider.grammar_ready {
         return Err(ExtractError::Unsupported { language: language.name() });
     }
-    let grammar =
-        lang::grammar(language).ok_or(ExtractError::Unsupported { language: language.name() })?;
-    let tree = util::parse(&grammar, language.name(), source, path)?;
+    // A file that is two languages at once is parsed as the one canon has
+    // conventions about, restricted to the byte ranges that language occupies.
+    // The tree keeps the original offsets, so a line number still points at
+    // the right line of the file.
+    let (language, tree) = if let Some(found) = embedded::embedded_in(language, source) {
+        let grammar = lang::grammar(found.language)
+            .ok_or(ExtractError::Unsupported { language: found.language.name() })?;
+        let tree =
+            util::parse_ranges(&grammar, found.language.name(), source, path, &found.ranges)?;
+        (found.language, tree)
+    } else if let Some(grammar) = lang::grammar(language) {
+        (language, util::parse(&grammar, language.name(), source, path)?)
+    } else {
+        // A language with no grammar of its own and nothing embedded: an ERB
+        // template that is only markup, or a Vue component that is only a
+        // `<template>`. Both are valid files that declare nothing, which is
+        // not the same as a file canon failed to read.
+        return Ok(FileFacts::default());
+    };
 
     // One parse, two passes over the same tree. The structural pass resolves
     // what is stateful and language-specific; the query pass matches what is a
@@ -147,7 +164,9 @@ pub fn extract(language: Language, source: &str, path: &str) -> Result<FileFacts
         Language::Go => golang::extract(&tree, source),
         Language::Rust => rustlang::extract(&tree, source),
         Language::Php => php::extract(&tree, source),
-        Language::Vue => return Err(ExtractError::Unsupported { language: language.name() }),
+        // Resolved above to the language they embed, or returned already when
+        // the file contained none of it.
+        Language::Vue | Language::Erb => FileFacts::default(),
     };
 
     let found = query::run(language, &tree, source);
@@ -173,9 +192,52 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_unwired_language_errors_rather_than_reporting_no_types() {
-        let err = extract(Language::Vue, "<template></template>", "a.vue").unwrap_err();
-        assert!(matches!(err, ExtractError::Unsupported { .. }));
+    fn a_language_with_no_grammar_errors_rather_than_reporting_no_types() {
+        // Empty facts and "canon could not read this" must never look the
+        // same: a convention derived from files that were never parsed would
+        // be derived from no evidence at all. Every language is wired today,
+        // so this asserts the mechanism rather than a particular language, and
+        // it is what will catch the next one added without a grammar.
+        for language in Language::ALL {
+            if lang::provider(*language).grammar_ready {
+                continue;
+            }
+            let err = extract(*language, "anything", "a.txt").unwrap_err();
+            assert!(matches!(err, ExtractError::Unsupported { .. }), "{}", language.name());
+        }
+    }
+
+    #[test]
+    fn a_template_carrying_no_code_declares_nothing_rather_than_failing() {
+        // Different from the case above. A Vue component that is only markup,
+        // or an ERB template with no tags, was read successfully and genuinely
+        // declares nothing.
+        for (language, source) in
+            [(Language::Vue, "<template><div/></template>"), (Language::Erb, "<p>hi</p>")]
+        {
+            let facts = extract(language, source, "a.tmpl").expect("read, not failed");
+            assert!(facts.is_empty(), "{}", language.name());
+        }
+    }
+
+    #[test]
+    fn an_embedded_file_is_parsed_as_the_language_it_carries() {
+        let erb =
+            extract(Language::Erb, "<div>\n  <% Payment.charge(1) %>\n</div>\n", "show.html.erb")
+                .expect("parses");
+        assert!(
+            erb.calls.iter().any(|c| c.name == "charge"),
+            "the Ruby between the tags was not read: {:?}",
+            erb.calls
+        );
+
+        let vue = extract(
+            Language::Vue,
+            "<template><div/></template>\n<script lang=\"ts\">\nexport class Card { render() {} }\n</script>\n",
+            "Card.vue",
+        )
+        .expect("parses");
+        assert_eq!(vue.types.first().map(|t| t.name.as_str()), Some("Card"));
     }
 
     #[test]
@@ -194,6 +256,9 @@ pub(crate) mod tests {
             if !lang::provider(*lang).grammar_ready {
                 continue;
             }
+            // A delegating language yields empty facts when the host file
+            // contains none of the embedded language, which is correct rather
+            // than a failure to parse.
             for src in &hostile {
                 let got = extract(*lang, src, "hostile.txt");
                 assert!(

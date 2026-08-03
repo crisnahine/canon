@@ -197,7 +197,8 @@ rules.
 | Go | yes | **yes** | the case of the first letter |
 | Rust | yes | **yes** | the `pub` keyword |
 | PHP | yes | **yes** | a modifier, public when absent |
-| Vue SFC | yes | no | needs two-pass extraction |
+| Vue SFC | yes | **yes** | the `<script>` block, as TypeScript or JavaScript |
+| ERB | yes | **yes** | the Ruby between the tags |
 
 Those six visibility rules do not reduce to each other, which is why each
 language resolves its own before the derivation layer ever sees it.
@@ -206,9 +207,17 @@ language resolves its own before the derivation layer ever sees it.
 README cannot drift from what is actually linked, because the binary reports
 itself.
 
-Vue is deliberately blank: `<script lang="ts">` and `<template>` parse under
-different grammars, so it needs two passes rather than one. Left unwired rather
-than half-wired.
+Vue and ERB are two languages in one file, handled by
+`Parser::set_included_ranges`: the same buffer is parsed by the grammar of the
+language canon has conventions about, restricted to the byte ranges that
+language occupies. The markup outside those ranges is treated as absent, and
+the tree keeps the original offsets so a reported line still points at the
+right line of the file.
+
+Templates yield fewer conventions than source files, because they declare
+expressions rather than types and methods. The point is that they are no longer
+invisible: 340 `.erb` files in the repository measured above now contribute to
+the index and have their Ruby read.
 
 Adding a language is one module in `crates/canon-extract/src/`, one arm in
 `lang::provider`, and one `queries/<language>/facts.scm`. The match is

@@ -134,6 +134,7 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(base_class(&dir, &ext, &members, settings));
         out.extend(module_arity(&dir, &ext, &members, settings));
         out.extend(collaborator(&dir, &ext, &members, settings));
+        out.extend(import_source(&dir, &ext, &members, settings));
     }
     out
 }
@@ -378,6 +379,64 @@ fn collaborator(
     })
 }
 
+/// "Files here import from `src/config`."
+///
+/// The highest-value thing canon can say, and the one it had no word for. A
+/// wrong import compiles, type-checks and passes review when a plausible
+/// alternative exists, which makes it the most common way generated code
+/// drifts from a codebase. Nothing else in the vocabulary catches it.
+///
+/// Counted per file, not per occurrence: a file importing four names from one
+/// module is one vote for that module, or a single barrel import would decide
+/// the rule for a whole directory.
+///
+/// Relative paths are excluded. `./thing` names a different module in every
+/// directory, so agreement on the literal string is agreement about nothing.
+fn import_source(
+    dir: &str,
+    ext: &str,
+    members: &[&FactSet],
+    settings: &Settings,
+) -> Option<Convention> {
+    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+        .iter()
+        .map(|s| {
+            let mut shared: Vec<&String> =
+                s.facts.imports.iter().filter(|i| is_shared_module(i)).collect();
+            shared.sort_unstable();
+            shared.dedup();
+            let dominant = shared
+                .into_iter()
+                .max_by_key(|i| s.facts.imports.iter().filter(|x| x == i).count())
+                .cloned();
+            (dominant, s.weight, *s)
+        })
+        .collect();
+
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let module = winner.clone()?;
+    Some(Convention {
+        id: format!("shape.import.{}.{ext}", id_fragment(dir)),
+        statement: format!("Files here import from `{module}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        enforcement: Enforcement::Advisory,
+    })
+}
+
+/// Whether an import names something the whole repository can agree about.
+///
+/// A relative path resolves differently from every directory, so counting the
+/// literal string finds agreement where there is none. A package or an
+/// absolute module path means the same thing everywhere.
+fn is_shared_module(path: &str) -> bool {
+    !path.starts_with('.') && path.len() > 1
+}
+
 /// Absence of raising was tried as a convention and removed. On a 9,546-file
 /// Rails repository it produced six rules, for `spec/`, `vendor/`, `config/`,
 /// `db/` and the whole of `app/`, and every one was arithmetic rather than a
@@ -545,6 +604,55 @@ mod tests {
         let convs = derive_from("sem-chatty", &files);
         let text = joined(&convs);
         assert!(!text.contains("call `Logger`"), "one file dominated the count: {text}");
+    }
+
+    #[test]
+    fn a_shared_import_becomes_a_convention() {
+        // Issue #7. A wrong import compiles and type-checks; nothing else in
+        // the vocabulary catches it.
+        let files = fixture::agreeing(
+            "src/queries",
+            "ts",
+            6,
+            "import { client } from 'src/config';\nexport const q$N = () => client;\n",
+        );
+        let convs = derive_from("sem-import", &files);
+        assert!(joined(&convs).contains("import from `src/config`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_relative_import_is_not_a_convention() {
+        // `./thing` names a different module in every directory, so agreement
+        // on the literal string is agreement about nothing.
+        let files = fixture::agreeing(
+            "src/queries",
+            "ts",
+            6,
+            "import { a } from './thing';\nexport const q$N = () => a;\n",
+        );
+        let convs = derive_from("sem-relimport", &files);
+        assert!(!joined(&convs).contains("import from"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_barrel_import_does_not_decide_the_rule_alone() {
+        // Counted per file, not per occurrence: one file importing six names
+        // from a module must not outvote five files importing another.
+        let mut files: Vec<(String, String)> = (0..5)
+            .map(|i| {
+                (
+                    format!("src/q/a{i}.ts"),
+                    "import { x } from 'pkg-common';\nexport const a = () => x;\n".to_string(),
+                )
+            })
+            .collect();
+        let mut barrel = String::new();
+        for i in 0..6 {
+            barrel.push_str(&format!("import {{ n{i} }} from 'pkg-rare';\n"));
+        }
+        files.push(("src/q/barrel.ts".to_string(), format!("{barrel}export const b = () => 1;\n")));
+        let convs = derive_from("sem-barrel", &files);
+        assert!(!joined(&convs).contains("pkg-rare"), "one file decided it: {}", joined(&convs));
     }
 
     #[test]

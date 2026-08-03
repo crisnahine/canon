@@ -653,7 +653,21 @@ mod tests {
         assert!(text.contains("Ruby"));
         assert!(text.contains("TypeScript"));
         assert!(text.contains("Vue SFC"));
-        assert!(text.contains("tier 0"), "an unwired language must say so");
+        assert!(text.contains("ERB"), "every language canon knows must be listed");
+        // Nothing is tier 0 any more: Vue and ERB are two grammars in one file
+        // and are parsed through included ranges rather than declared
+        // unsupported. If a language is ever added without a grammar, the
+        // table has to keep saying so.
+        for language in canon_extract::Language::ALL {
+            let provider = canon_extract::lang::provider(*language);
+            let expected = if provider.grammar_ready { "wired" } else { "tier 0" };
+            assert!(
+                text.contains(language.name()),
+                "{} is missing from the table",
+                language.name()
+            );
+            assert!(text.contains(expected), "{} is mislabelled", language.name());
+        }
         assert!(text.contains("no snapshot yet"));
     }
 

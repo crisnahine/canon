@@ -1,4 +1,4 @@
-# Measured status — v0.3.0
+# Measured status — v0.4.0
 
 Every number below was executed. Reproduce with the commands shown.
 
@@ -6,7 +6,7 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release              0 errors
-cargo test --workspace             274 passing
+cargo test --workspace             311 passing
 cargo clippy --workspace           0 warnings
 cargo fmt --all --check            clean
 ./tests/fail-open.sh               75/75
@@ -14,7 +14,7 @@ cargo fmt --all --check            clean
 ./tests/injection-reaches-the-model.sh   PASS
 ```
 
-8,035 lines of Rust across five crates, of which roughly half are tests,
+9,380 lines of Rust across five crates, of which roughly half are tests,
 plus 105 lines of tree-sitter query across seven languages.
 
 ## The assumption everything rests on, and how it was checked
@@ -134,14 +134,35 @@ tool a team installs next, which is why the cap exists as well.
 ## What is not built
 
 - **CSS and Tailwind.** Value-frequency analysis, a different engine entirely.
-- **Vue and ERB.** Both are two grammars in one file. `Parser::set_included_ranges`
-  is the mechanism and it is not wired yet, which leaves 339 `.erb` files
-  invisible in the Rails repository measured above.
+- **Export style, default versus named.** Cheap and within reach of the ECMA
+  extractor, and currently unexpressed.
 - **Rewriting a write rather than refusing it.** `PreToolUse` accepts an
   `updatedInput`, and it works: a hook can replace the content before it is
   written. Measured, and deliberately not used. canon silently authoring
   someone's code on a derived rule is a worse failure than anything it would
   prevent.
+
+## Two languages in one file
+
+Vue and ERB are wired through `Parser::set_included_ranges`: the buffer is
+parsed by the grammar of the language canon has conventions about, restricted
+to the ranges that language occupies. Everything else is treated as absent, and
+the tree keeps the original byte offsets.
+
+```
+<div>
+  <% Payment.charge(1) %>      ->  parsed as Ruby
+</div>                             the markup is not there as far as the parser
+                                   is concerned
+```
+
+340 `.erb` files that were invisible now contribute. They yield few conventions
+of their own, because a template declares expressions rather than types and
+methods, and that is the honest outcome rather than a shortfall: canon measures
+shape, and templates have little.
+
+Every language canon knows is now wired. `canon check` still prints the tier
+per language, because the next language added without a grammar has to say so.
 
 ## Facts by query rather than by hand
 

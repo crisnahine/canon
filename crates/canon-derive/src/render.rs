@@ -31,6 +31,17 @@ pub fn render_block(rel: &str, selected: &[&Convention]) -> Option<String> {
     // in the header can only mislead.
     let scope = selected.first().map_or_else(|| rel.to_string(), |c| c.scope.render());
 
+    // A header claiming coverage the body does not deliver is worse than
+    // silence. When everything attached is a repository-wide fallback, the
+    // block used to announce conventions for a component directory and then
+    // offer one rule about test files, for a file that is not a test.
+    let anything_local = selected
+        .iter()
+        .any(|c| matches!(c.scope, canon_core::Scope::Dir(_) | canon_core::Scope::DirExt(..)));
+    if !anything_local {
+        return None;
+    }
+
     let mut out = String::new();
     out.push_str(&format!("Conventions for {scope}, derived from this repository:\n\n"));
     for convention in selected {

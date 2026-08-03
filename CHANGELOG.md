@@ -3,6 +3,34 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-08-03
+
+### Added
+
+- Import conventions. "Files here import from `@tanstack/react-query`" is the
+  highest-value thing canon can say and the one it had no word for: a wrong
+  import compiles, type-checks, and passes review whenever a plausible
+  alternative exists. Counted per file rather than per occurrence, so a barrel
+  import cannot decide a directory, and relative paths are excluded because
+  `./thing` names something different from every directory. (#7)
+- Colocation. "Every file here has a test of the same name", matched by stem
+  rather than by path shape, because `spec/` mirrors `app/` in some
+  repositories and `__tests__/` sits beside the file in others. (#7)
+- Vue and ERB, through `Parser::set_included_ranges`. The buffer is parsed by
+  the grammar of the language canon has conventions about, restricted to the
+  ranges that language occupies, and the tree keeps the original offsets so a
+  reported line still points at the right line. 340 `.erb` files that were
+  invisible now contribute. Every language canon knows is now wired.
+
+### Changed
+
+- The injected block says nothing when everything that applies is a
+  repository-wide fallback. It used to announce conventions for a component
+  directory and then offer one rule about test files, for a file that is not a
+  test: a header claiming coverage the body does not deliver is worse than
+  silence. (#7)
+- `SNAPSHOT_VERSION` is 4.
+
 ## [0.3.0] — 2026-08-03
 
 ### Fixed

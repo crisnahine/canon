@@ -89,7 +89,9 @@ fn source_for(language: Language) -> Option<&'static str> {
         Language::Go => include_str!("../queries/go/facts.scm"),
         Language::Rust => include_str!("../queries/rust/facts.scm"),
         Language::Php => include_str!("../queries/php/facts.scm"),
-        Language::Vue => return None,
+        // Both resolve to the language they embed before a query runs, so
+        // the facts come from that language's patterns.
+        Language::Vue | Language::Erb => return None,
     })
 }
 
@@ -191,7 +193,9 @@ mod tests {
         // A query that fails to compile degrades silently to no facts, so the
         // only place it can be caught is here.
         for language in Language::ALL {
-            if !crate::lang::provider(*language).grammar_ready {
+            // A language that delegates to the one it embeds has no grammar
+            // of its own, so it has no query of its own either.
+            if crate::lang::grammar(*language).is_none() {
                 continue;
             }
             assert!(
@@ -273,7 +277,7 @@ mod tests {
     #[test]
     fn hostile_input_produces_no_facts_and_does_not_panic() {
         for language in Language::ALL {
-            if !crate::lang::provider(*language).grammar_ready {
+            if crate::lang::grammar(*language).is_none() {
                 continue;
             }
             for source in ["", "\u{0}\u{1}", "{{{{{{", &"(".repeat(2_000)] {

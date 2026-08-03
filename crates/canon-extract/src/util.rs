@@ -53,6 +53,29 @@ pub(crate) fn parse(
     parser.parse(source, None).ok_or_else(|| crate::ExtractError::Parse { path: path.to_string() })
 }
 
+/// Parse only the given byte ranges of `source`.
+///
+/// The parser treats everything outside them as absent, so a `.erb` template
+/// is read as the Ruby between its tags with the markup skipped, and the tree
+/// still carries offsets into the original file.
+pub(crate) fn parse_ranges(
+    language: &tree_sitter::Language,
+    name: &'static str,
+    source: &str,
+    path: &str,
+    ranges: &[tree_sitter::Range],
+) -> crate::Result<tree_sitter::Tree> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(language).map_err(|_| crate::ExtractError::Grammar { language: name })?;
+    // A range set the parser rejects (out of order, or overlapping) leaves the
+    // parser unrestricted, which would feed it the markup as well. Treat it as
+    // nothing to extract rather than parse the wrong thing.
+    if parser.set_included_ranges(ranges).is_err() {
+        return Err(crate::ExtractError::Parse { path: path.to_string() });
+    }
+    parser.parse(source, None).ok_or_else(|| crate::ExtractError::Parse { path: path.to_string() })
+}
+
 /// Walk every descendant, deepest-last, applying `visit`.
 ///
 /// Iterative rather than recursive: a generated or minified file can nest

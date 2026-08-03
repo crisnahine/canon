@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 3;
+pub const SNAPSHOT_VERSION: u32 = 4;
+// 4: import and colocation conventions exist, and ERB and Vue contribute facts,
+//    so a snapshot from before them is missing whole families of rule.
 // 3: conventions carry an enforcement decision, rules are rolled up from
 //    agreeing siblings, and the agreement a wide scope must clear went up. A
 //    snapshot from before all three holds different rules and marks every one

@@ -27,6 +27,62 @@ pub(crate) fn derive(files: &[FileEntry], settings: &Settings) -> Vec<Convention
     let mut out = Vec::new();
     out.extend(naming_conventions(files, settings));
     out.extend(test_suffix(files, settings));
+    out.extend(colocation(files, settings));
+    out
+}
+
+/// "Every file here has a test."
+///
+/// A path-level fact, needing no parser, and it prompts the file a model is
+/// most likely to skip. Stated as a proportion because the interesting part is
+/// the habit, not any individual pairing.
+///
+/// Matching is by stem: `charge_card.rb` pairs with `charge_card_spec.rb` or
+/// `chargeCard.test.ts` wherever they live. Path-shaped mirroring is left
+/// alone deliberately, because `spec/` mirrors `app/` in some repositories,
+/// `__tests__/` sits beside the file in others, and guessing wrong produces a
+/// rule that tells someone to create a file in a directory nobody uses.
+fn colocation(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
+    let tested: std::collections::HashSet<String> = files
+        .iter()
+        .filter(|f| is_test(f))
+        .map(|f| {
+            let stem = f.stem.as_str();
+            let base = test_marker(stem).map_or(stem, |m| stem.trim_end_matches(m));
+            base.to_ascii_lowercase()
+        })
+        .collect();
+
+    let mut groups: HashMap<(String, String), Vec<&FileEntry>> = HashMap::new();
+    for f in files.iter().filter(|f| !is_test(f) && nameable(f)) {
+        for dir in group_keys(f) {
+            groups.entry((dir, f.ext.clone())).or_default().push(f);
+        }
+    }
+
+    let mut out = Vec::new();
+    for ((dir, ext), members) in groups {
+        if members.len() < settings.min_files || dir.is_empty() {
+            continue;
+        }
+        let agreeing =
+            members.iter().filter(|f| tested.contains(&f.stem.to_ascii_lowercase())).count();
+        let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
+
+        out.push(Convention {
+            id: format!("tests.colocation.{}.{ext}", id_fragment(&dir)),
+            statement: "Every file here has a test of the same name".to_string(),
+            scope: scope_for(&dir, &ext),
+            confidence,
+            agreeing,
+            total: members.len(),
+            exemplar: exemplar_of(&members),
+            evidence: evidence_of(&members),
+            // Path-shaped, but not exact: a file may legitimately be the one
+            // thing in a directory that needs no test.
+            enforcement: Enforcement::Advisory,
+        });
+    }
     out
 }
 
