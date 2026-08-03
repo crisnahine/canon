@@ -6,7 +6,7 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release              0 errors
-cargo test --workspace             349 passing
+cargo test --workspace             356 passing
 cargo clippy --workspace           0 warnings
 cargo fmt --all --check            clean
 ./tests/fail-open.sh               75/75
@@ -14,8 +14,33 @@ cargo fmt --all --check            clean
 ./tests/injection-reaches-the-model.sh   PASS
 ```
 
-11,061 lines of Rust across five crates, of which roughly half are tests,
+11,437 lines of Rust across five crates, of which roughly half are tests,
 plus 195 lines of tree-sitter query across seven languages.
+
+## What a pre-push review found, and why the harnesses missed it
+
+Six reviewers over the outgoing diff, every finding then handed to a separate
+agent whose job was to refute it. Fifteen survived, eight of them critical, and
+one root cause accounts for three: a guard written for `_form.html.erb` was
+written for a leading underscore rather than for the class of name it belongs
+to. `[id].tsx`, `[...slug].tsx`, `+page.server.ts` — every file-based router's
+own file names were refused, and the author cannot rename them.
+
+Both replay harnesses are structurally blind to that. The existing-file replay
+cannot see it, because a repository that already contains a route file has
+already had the rule silenced by it. The new-file harness writes a neighbour's
+name and a test-idiom name, so it never generates a `[` or a `+`. A harness
+finds the shapes it was built to generate, and nothing else — which is the
+argument for reading the diff as well as running it.
+
+The other criticals were of a piece: a rule refusing a directory or a file
+qualifier its sample never covered, a file too large for the index refused by
+rules it never voted on, and two ways a Rust `impl` block was attributed to the
+wrong type.
+
+Every one has a check in a harness of 18 assertions covering four frameworks'
+route conventions, acronyms and non-Latin names, scope-versus-sample
+mismatches, oversized files, and both attribution defects.
 
 ## Every open issue, reproduced rather than read
 

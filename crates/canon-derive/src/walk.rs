@@ -8,7 +8,12 @@ use serde::{Deserialize, Serialize};
 
 /// Files above this are generated, vendored, or data. Parsing them costs more
 /// than they inform, and their shape is nobody's convention.
-const MAX_FILE_BYTES: u64 = 512 * 1024;
+///
+/// Public because the write path has to honour the same bound. A file the
+/// index skipped never voted on any rule, so refusing it is refusing a file
+/// nothing was counted over — and a 630 KB tracked, committed service object
+/// was refused on every edit by a rule it had never been allowed to break.
+pub const MAX_FILE_BYTES: u64 = 512 * 1024;
 
 /// Depth past which a tree is pathological rather than deep. Bounded so a
 /// symlink loop the walker did not catch cannot run forever inside a hook.

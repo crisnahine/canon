@@ -49,6 +49,13 @@ fi
 
 # The source version, plus whatever version each installed copy of the plugin
 # declares. Usually one and the same; different exactly when it matters.
+if [ -z "${VERSION}" ]; then
+    echo "no version line in ${ROOT}/Cargo.toml" >&2
+    echo "refusing to install, because the cleanup below would delete every" >&2
+    echo "binary already there and put none back" >&2
+    exit 1
+fi
+
 WANTED="${VERSION}"
 for manifest in "${CACHE_DIR}"/*/canon/*/Cargo.toml; do
     [ -f "${manifest}" ] || continue

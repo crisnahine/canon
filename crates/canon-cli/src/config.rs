@@ -101,6 +101,19 @@ pub(crate) fn load_or_default(root: &Path) -> (Settings, Option<ConfigError>) {
     }
 }
 
+/// The log level to start with, whether or not the config loads.
+///
+/// `CANON_LOG` always wins and always works, because it is the only diagnostic
+/// channel that survives a config file the parser rejects — which is exactly
+/// when someone needs to see what happened.
+#[must_use]
+pub(crate) fn log_level_for(root: &Path) -> String {
+    if let Some(level) = std::env::var("CANON_LOG").ok().filter(|v| !v.is_empty()) {
+        return level;
+    }
+    load(root).map_or_else(|_| Settings::default().log_level, |s| s.log_level)
+}
+
 fn load_file(root: &Path) -> Result<Settings, ConfigError> {
     let path = root.join(CONFIG_FILE);
     let text = match std::fs::read_to_string(&path) {

@@ -48,7 +48,7 @@ pub use render::render_block;
 pub use select::for_path;
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot};
 pub use verify::{Violation, blocking_violations, missing_test, verify_source};
-pub use walk::{FileEntry, entries_for, walk};
+pub use walk::{FileEntry, MAX_FILE_BYTES, entries_for, walk};
 
 use canon_core::{Confidence, Convention, Settings};
 

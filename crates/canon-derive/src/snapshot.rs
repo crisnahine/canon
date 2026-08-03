@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 6;
+pub const SNAPSHOT_VERSION: u32 = 7;
+// 7: a name no style accepts is excluded from naming rules rather than counted
+//    against them, which changes which files voted. A snapshot from before
+//    this holds rules derived while `[id].tsx` and `+page.ts` were being read
+//    as style violations, and those rules are enforced.
 // 6: suppression is applied after roll-up rather than before it, so a snapshot
 //    from before this can hold a narrower copy of a rule the user suppressed;
 //    and `languages` now names the languages the conventions came from rather

@@ -67,6 +67,9 @@ fn verify_with(
     let mut out = Vec::new();
     if crate::tier0::counts_toward_naming(rel) {
         for convention in &applicable {
+            if strictness == Strictness::OnlyWhatWasCounted && !naming_speaks_for(rel, convention) {
+                continue;
+            }
             if let Some(v) = check_naming(rel, convention) {
                 out.push(v);
             }
@@ -139,6 +142,15 @@ fn check_naming(rel: &str, convention: &Convention) -> Option<Violation> {
     if stem.is_empty() || naming::is_compatible(stem, expected) {
         return None;
     }
+    // A name that distinguishes no style cannot break one. `404.tsx`, `2fa.ts`
+    // and `請求書.ts` have no case to read and no separator to read it at, so
+    // they are compatible with the three lowercase styles and with neither
+    // cased one — which made a `camelCase` directory refuse all three. The
+    // derivation already refuses to draw a conclusion from names like these;
+    // the check has to refuse to draw one too.
+    if !naming::is_discriminating(stem) {
+        return None;
+    }
     Some(Violation {
         convention_id: convention.id.clone(),
         message: format!(
@@ -149,6 +161,51 @@ fn check_naming(rel: &str, convention: &Convention) -> Option<Violation> {
             convention.scope.render()
         ),
     })
+}
+
+/// Whether a naming rule was counted over anything like this file.
+///
+/// A scope is a coarse claim. `Scope::Ext("md")` says "every `.md` in the
+/// repository", but the sample behind it may have been six files in `docs/`,
+/// and it then refused `.github/PULL_REQUEST_TEMPLATE.md` — a file the
+/// repository's tooling requires and the rule never saw. The same coarseness
+/// hides a qualifier: a directory of `Button.module.css` derives `PascalCase`
+/// for `**/*.css` and refuses a plain `globals.css`, which is a different kind
+/// of file that happens to share an extension.
+///
+/// The evidence is a capped sample rather than the whole set, so this can only
+/// ever withhold a refusal it should have made, never make one it should not.
+/// That is the correct direction to be wrong in, and it is checked only on the
+/// refusal path — advice still says everything it knows.
+fn naming_speaks_for(rel: &str, convention: &Convention) -> bool {
+    if !convention.id.starts_with("naming.") || convention.evidence.is_empty() {
+        return true;
+    }
+    // The qualifiers between the name and the extension. `Button.module.css`
+    // is `module`; `globals.css` is nothing; `charge_card.html.erb` is `html`.
+    let qualifier = |path: &str| -> String {
+        let name = path.rsplit_once('/').map_or(path, |(_, n)| n);
+        let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+        stem.split_once('.').map_or(String::new(), |(_, rest)| rest.to_string())
+    };
+    let mine = qualifier(rel);
+    if !convention.evidence.iter().any(|e| qualifier(&e.rel) == mine) {
+        return false;
+    }
+
+    // A repository-wide rule may refuse anywhere only if its evidence shows it
+    // really is repository-wide. Counted inside one top-level directory, it
+    // speaks for that directory.
+    if matches!(convention.scope, canon_core::Scope::Ext(_)) {
+        let top = |path: &str| path.split_once('/').map_or("", |(head, _)| head).to_string();
+        let mut tops: Vec<String> = convention.evidence.iter().map(|e| top(&e.rel)).collect();
+        tops.sort();
+        tops.dedup();
+        if tops.len() < 2 && !tops.iter().any(|t| *t == top(rel)) {
+            return false;
+        }
+    }
+    true
 }
 
 const IMPORT_PREFIX: &str = "Files here import from ";
@@ -346,6 +403,7 @@ pub fn missing_test(
     root: &std::path::Path,
     rel: &str,
     conventions: &[Convention],
+    settings: &canon_core::Settings,
 ) -> Option<Violation> {
     if crate::tier0::is_test_path(rel) {
         return None;
@@ -354,7 +412,7 @@ pub fn missing_test(
         .iter()
         .filter(|c| c.id.starts_with("tests.colocation") && c.scope.matches(rel))
         .max_by_key(|c| c.scope.specificity())?;
-    if crate::tier0::has_test_for(root, rel) {
+    if crate::tier0::has_test_for(root, rel, settings) {
         return None;
     }
     Some(Violation {
@@ -664,6 +722,115 @@ mod tests {
             )
             .len(),
             1
+        );
+    }
+
+    #[test]
+    fn a_file_the_framework_named_is_not_refused_for_the_name_it_was_given() {
+        // Next.js, Nuxt and SvelteKit all name route files with characters no
+        // style admits. Reading "compatible with nothing" as "breaks the rule"
+        // refused every one of them, and the author cannot rename them.
+        let settings = canon_core::Settings::default();
+        let rule = blocking(
+            "naming.repo.tsx",
+            "Files here are named in kebab-case",
+            Scope::Ext("tsx".into()),
+        );
+        for rel in [
+            "pages/posts/[id].tsx",
+            "pages/[...slug].tsx",
+            "src/routes/+page.server.tsx",
+            "app/views/_form.tsx",
+        ] {
+            assert!(
+                blocking_violations(
+                    rel,
+                    Some("export const A = 1;".into()),
+                    std::slice::from_ref(&rule),
+                    &settings
+                )
+                .is_empty(),
+                "{rel} is named by the framework, not by its author"
+            );
+        }
+        // A name that picked the wrong style is still a violation.
+        assert_eq!(
+            blocking_violations(
+                "pages/MyPage.tsx",
+                Some("export const A = 1;".into()),
+                &[rule],
+                &settings
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_name_that_distinguishes_no_style_cannot_break_one() {
+        let settings = canon_core::Settings::default();
+        let rule = blocking(
+            "naming.repo.ts",
+            "Files here are named in camelCase",
+            Scope::Ext("ts".into()),
+        );
+        for rel in ["src/404.ts", "src/請求書.ts", "src/2fa.ts"] {
+            assert!(
+                blocking_violations(
+                    rel,
+                    Some("export const a = 1;".into()),
+                    std::slice::from_ref(&rule),
+                    &settings
+                )
+                .is_empty(),
+                "{rel} has no case to read and no separator to read it at"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_does_not_refuse_a_directory_or_a_qualifier_its_sample_never_saw() {
+        let settings = canon_core::Settings::default();
+
+        // Counted in `docs/`, so it speaks for `docs/`.
+        let mut docs = blocking(
+            "naming.repo.md",
+            "Files here are named in kebab-case",
+            Scope::Ext("md".into()),
+        );
+        docs.evidence = ["getting-started", "api-reference", "style-guide"]
+            .iter()
+            .map(|n| canon_core::Evidence { rel: format!("docs/{n}.md"), line: 0 })
+            .collect();
+        assert!(
+            blocking_violations(
+                ".github/PULL_REQUEST_TEMPLATE.md",
+                Some("## What\n".into()),
+                &[docs.clone()],
+                &settings
+            )
+            .is_empty(),
+            "a rule counted in docs/ refused a file the repository's tooling requires"
+        );
+        assert_eq!(
+            blocking_violations("docs/BadName.md", Some("# x\n".into()), &[docs], &settings).len(),
+            1,
+            "and still holds inside the directory it was counted in"
+        );
+
+        // Counted over CSS modules, so it says nothing about a plain stylesheet.
+        let mut modules = blocking(
+            "naming.src.css",
+            "Files here are named in PascalCase",
+            Scope::DirExt("src".into(), "css".into()),
+        );
+        modules.evidence = ["Button", "Card", "Modal"]
+            .iter()
+            .map(|n| canon_core::Evidence { rel: format!("src/{n}.module.css"), line: 0 })
+            .collect();
+        assert!(
+            blocking_violations("src/globals.css", Some(".a{}".into()), &[modules], &settings)
+                .is_empty()
         );
     }
 

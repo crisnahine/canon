@@ -47,8 +47,29 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
         }
     }
 
+    // A type declared inside an inline module is only the file's subject when
+    // the file declares none at the root. `subject::primary_type` takes the
+    // largest surface it is given and cannot tell a nested type from a
+    // top-level one, so a private helper module with more methods than the
+    // real type became what the file was judged as.
+    if facts.types.iter().zip(&modules).any(|(_, m)| m.is_empty()) {
+        let root_only: Vec<bool> = modules.iter().map(String::is_empty).collect();
+        let mut keep = root_only.iter();
+        facts.types.retain(|_| keep.next().copied().unwrap_or(true));
+        modules.retain(String::is_empty);
+    }
+
     for (module, child) in items.iter().filter(|(_, c)| c.kind() == "impl_item") {
-        let Some(ty) = field_text(*child, "type", source).map(|t| bare_name(&t)) else { continue };
+        let Some(raw) = field_text(*child, "type", source) else { continue };
+        // A path-qualified target is a foreign type unless the path is rooted
+        // in this file. `impl LocalTrait for io::Error` is about `std`'s
+        // `Error`, and reducing it to its last segment attached it to whatever
+        // `Error` the file happened to declare — inventing methods on a type
+        // that has none of them.
+        if !addresses_this_file(&raw) {
+            continue;
+        }
+        let ty = bare_name(&raw);
         let trait_name = field_text(*child, "trait", source).map(|t| bare_name(&t));
         let Some(index) = target_of(&facts.types, &modules, &ty, module) else { continue };
         let Some(target) = facts.types.get_mut(index) else { continue };
@@ -115,6 +136,24 @@ fn target_of(types: &[TypeFacts], modules: &[String], name: &str, from: &str) ->
     match all.as_slice() {
         [only] => Some(*only),
         _ => None,
+    }
+}
+
+/// Whether an `impl` target names a type this file could have declared.
+///
+/// An unqualified name does. So do the paths that are rooted in the current
+/// crate or module — `crate::X`, `self::X`, `super::X` — because a type they
+/// name may well be declared a few lines up. Anything else is a foreign type:
+/// `io::Error`, `serde_json::Value`, `std::fmt::Formatter`. Attributing its
+/// `impl` block to a local type of the same last segment reports methods on a
+/// type that does not have them, and that arithmetic reaches an arity rule.
+fn addresses_this_file(raw: &str) -> bool {
+    let head = raw.split_once('<').map_or(raw, |(name, _)| name).trim();
+    match head.rsplit_once("::") {
+        None => true,
+        Some((path, _)) => {
+            path.split("::").all(|segment| matches!(segment.trim(), "crate" | "self" | "super"))
+        }
     }
 }
 
@@ -268,6 +307,50 @@ mod tests {
     fn two_genuinely_different_methods_still_count_as_two() {
         let f = f("pub struct S;\nimpl S {\n  pub fn a(&self) {}\n  pub fn b(&self) {}\n}\n");
         assert_eq!(f.types[0].public_arity(), 2);
+    }
+
+    #[test]
+    fn an_impl_on_a_foreign_type_is_not_attributed_to_a_local_one() {
+        // `io::Error` is `std`'s. Reducing it to its last segment merged the
+        // block into the file's own `Error` and invented methods on a type
+        // that does not have them — arithmetic that then reaches an arity rule.
+        let f = f(
+            "use std::io;\npub struct Error;\nimpl Error { pub fn call(&self) {} }\nimpl std::fmt::Debug for io::Error { fn fmt(&self) {} }\n",
+        );
+        assert_eq!(f.types.len(), 1);
+        assert_eq!(f.types[0].public_arity(), 1);
+        assert_eq!(f.types[0].superclass, None, "a foreign impl must not set the base");
+    }
+
+    #[test]
+    fn a_path_rooted_in_this_file_still_resolves() {
+        for src in [
+            "pub struct S;\nimpl crate::S { pub fn call(&self) {} }\n",
+            "pub struct S;\nimpl self::S { pub fn call(&self) {} }\n",
+            "pub struct S;\nmod inner { impl super::S { pub fn call(&self) {} } }\n",
+        ] {
+            assert_eq!(f(src).types[0].public_arity(), 1, "{src}");
+        }
+    }
+
+    #[test]
+    fn a_private_helper_module_is_not_the_subject_of_a_file_that_has_one() {
+        // The subject is chosen by largest surface, and a nested type in the
+        // same flat list outvoted the type the file is actually about.
+        let f = f(
+            "pub struct Thing;\nimpl Thing { pub fn call(&self) {} }\nmod helper { pub struct Big; impl Big { pub fn a(&self) {} pub fn b(&self) {} pub fn c(&self) {} } }\n",
+        );
+        assert_eq!(f.types.len(), 1);
+        assert_eq!(f.types[0].name, "Thing");
+
+        // A file that declares nothing at the root still reads its module.
+        let wrapped = f2("pub mod inner { pub struct S; impl S { pub fn call(&self) {} } }\n");
+        assert_eq!(wrapped.types.len(), 1);
+        assert_eq!(wrapped.types[0].public_methods, vec!["call"]);
+    }
+
+    fn f2(src: &str) -> FileFacts {
+        crate::tests::facts_of(crate::Language::Rust, src)
     }
 
     #[test]

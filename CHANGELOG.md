@@ -70,6 +70,27 @@ purpose-shaped ones covering the idioms each supported language actually uses.
   hooks.** The host passes `CLAUDE_PLUGIN_DATA` to a hook and nothing to a
   terminal, so the audit surface a refusal sends you to reported "no snapshot
   yet" for a repository the session had already indexed.
+- **A test file was refused for not being shaped like the code it tests.** A
+  colocated `test_void_invoice.py` written into a directory of service objects
+  was told it must inherit `BaseService` and expose one public method, because
+  the rule was still at total agreement — the counterexample was the file being
+  written. Shape rules no longer refuse a test.
+- **Two Rust files were refused by an arity rule they satisfy.** Making inline
+  `mod` bodies visible attached every `impl` to whichever type was declared
+  first, so two modules declaring the same name, and a type implemented from
+  two `#[cfg]`-gated modules, both came out as one type with two methods. An
+  `impl` now resolves to the nearest declaration it can see, and a repeated
+  method name counts once — a type cannot expose two methods under one name in
+  any build, so a repeat is a conditional alternative or an overload signature.
+- **A `.canon.toml` that would not parse silently turned enforcement back on.**
+  The two likeliest ways to get that file wrong are a typo in a key and a
+  second `suppress =` line appended to a file that already has one; both are
+  parse errors, both happen while trying to turn a refusal off, and both were
+  answered by refusing again with nothing printed. An unloadable config now
+  degrades to `enforce = false`.
+- `canon explain` reports a suppressed rule as `Suppressed` rather than
+  `Advisory`. It is the surface a refusal sends you to in order to confirm the
+  suppression took, and a suppressed rule is not downgraded, it is gone.
 
 ### Changed
 
@@ -92,30 +113,10 @@ purpose-shaped ones covering the idioms each supported language actually uses.
 - `canon explain` and `canon check` report enforcement as it would be applied
   now, not as it was recorded, and `canon check` prints the data directory in
   use.
-- `SNAPSHOT_VERSION` is 5. A snapshot from before this holds naming rules
-  derived from one repeated name, and those are enforced.
-
-- **A test file was refused for not being shaped like the code it tests.** A
-  colocated `test_void_invoice.py` written into a directory of service objects
-  was told it must inherit `BaseService` and expose one public method, because
-  the rule was still at total agreement — the counterexample was the file being
-  written. Shape rules no longer refuse a test.
-- **Two Rust files were refused by an arity rule they satisfy.** Making inline
-  `mod` bodies visible attached every `impl` to whichever type was declared
-  first, so two modules declaring the same name, and a type implemented from
-  two `#[cfg]`-gated modules, both came out as one type with two methods. An
-  `impl` now resolves to the nearest declaration it can see, and a repeated
-  method name counts once — a type cannot expose two methods under one name in
-  any build, so a repeat is a conditional alternative or an overload signature.
-- **A `.canon.toml` that would not parse silently turned enforcement back on.**
-  The two likeliest ways to get that file wrong are a typo in a key and a
-  second `suppress =` line appended to a file that already has one; both are
-  parse errors, both happen while trying to turn a refusal off, and both were
-  answered by refusing again with nothing printed. An unloadable config now
-  degrades to `enforce = false`.
-- `canon explain` reports a suppressed rule as `Suppressed` rather than
-  `Advisory`. It is the surface a refusal sends you to in order to confirm the
-  suppression took, and a suppressed rule is not downgraded, it is gone.
+- `SNAPSHOT_VERSION` is 7. A snapshot from before this holds naming rules
+  derived from one repeated name, rules a suppression should have removed, and
+  rules derived while a framework-named file was read as a style violation —
+  all of them enforced.
 
 ### Fixed — the open issues
 
@@ -170,10 +171,66 @@ already closed by the work above (#10, #13); the rest were not.
   as having no effect. A copy now goes in for every version an installed plugin
   might ask for.
 
+
+### Fixed — what a pre-push review found
+
+Six lenses over the outgoing diff, every finding then handed to a separate
+agent whose job was to refute it. Eight survived as critical, and one root
+cause accounts for three of them: the fix above for `_form.html.erb` was
+written for a leading underscore rather than for the class of name it belongs
+to.
+
+- **Every file-based router's own file names were refused.** `[id].tsx`,
+  `[...slug].tsx`, `pages/[id].vue`, `+page.server.ts`, `+layout.ts`. A name
+  containing a character no style admits is compatible with nothing, and the
+  check read "compatible with nothing" as "breaks the rule" — so Next.js, Nuxt
+  and SvelteKit route files were denied, and the developer cannot rename them.
+  The guard is now the general one: a name outside the style system is
+  unclassifiable, not wrong, in both the sample and the check.
+- **An acronym, a digit or a non-Latin script was refused in a cased
+  directory.** `SEO.tsx` and `FAQ.tsx` in a `PascalCase` components directory,
+  `404.tsx`, `請求書.ts` in a `camelCase` one. A separator-free all-caps name is
+  now Pascal-compatible, which is how a Pascal-cased project writes an acronym,
+  and a name that distinguishes no style cannot break one.
+- **A rule refused files its sample never covered.** Six `.md` files in `docs/`
+  derived a repository-wide rule that refused `.github/PULL_REQUEST_TEMPLATE.md`;
+  a directory of `Button.module.css` derived one that refused a plain
+  `globals.css`. A refusal now requires the evidence to cover the qualifier and,
+  for a repository-wide rule, the top-level directory.
+- **A file the index skipped was refused on every edit.** Anything over 512 KB
+  never votes, so no rule was counted over it, and a tracked 630 KB service
+  object was held to rules it had never been allowed to break — contradicting
+  the README's central safety claim in the one case that could reach it.
+- **Rust attributed foreign `impl` blocks to local types.** `impl LocalTrait for
+  io::Error` was reduced to its last path segment and merged into whatever
+  `Error` the file declared, inventing methods on a type that has none. A
+  qualified path now only matches when it is rooted in this file.
+- **A private helper module could become the file's subject.** Making inline
+  `mod` bodies visible put nested types in the same flat list as top-level ones,
+  and the subject is chosen by largest surface. A nested type is now only the
+  subject when the file declares none at the root.
+- **`resulting_file` read any path with no type or size guard**, on the write
+  path. A FIFO in the tree would have hung the hook forever, which is the one
+  failure a fail-open harness cannot disguise.
+- **`has_test_for` walked the filesystem with no exclusions**, so a
+  `node_modules` exhausted its entry budget and the exhaustion was reported as
+  "no test found" — a confident claim produced by giving up. It now skips the
+  same directories the fallback walk does, bounds its depth, and says nothing
+  when it runs out of budget.
+- **A broken config disabled enforcement and the diagnostic for it at once.**
+  The log level came from the same fallback, so the line explaining why could
+  not be written. `CANON_LOG` now resolves independently of whether the config
+  loads.
+- **`bin/install-local` deleted every binary and installed none** when the
+  version line did not parse.
+
 ### Verified
 
 - Every one of the eight open issues has a check in a harness that runs against
   any build: 23 assertions, all passing, each failing on the build before this.
+- Every critical from the review has one too: 18 assertions covering four
+  frameworks' route conventions, acronyms and non-Latin names, scope-versus-
+  sample mismatches, oversized files, and both Rust attribution defects.
 - 15,265 tracked files from the fourteen repositories replayed through the
   write path: 11,299 given conventions, none refused, none errored.
 - 5,700 *new* files written into those same directories — one file's content at

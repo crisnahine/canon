@@ -93,8 +93,17 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
     // `Stop` block genuinely prevents the turn ending and still does not
     // compel the edit. So a rule the repository holds without exception is
     // enforced here, before anything is written, and everything else advises.
-    let violations =
-        blocking_violations(&rel, resulting_file(&root, &rel, input), &conventions, &settings);
+    let resulting = resulting_file(&root, &rel, input);
+    // A file the index would have skipped never voted on anything, so no rule
+    // here was counted over it and none may refuse it. That is the same bound
+    // the walk uses, applied to the file about to exist rather than to the
+    // files that already do: a 630 KB tracked service object was refused on
+    // every edit by rules it had never been allowed to break.
+    let violations = if indexable(&root, &rel, resulting.as_deref()) {
+        blocking_violations(&rel, resulting, &conventions, &settings)
+    } else {
+        Vec::new()
+    };
     if !violations.is_empty() {
         logging::info(&format!("refused a write to {rel}: {} violations", violations.len()));
         return HookOutput::deny(refusal(&rel, &violations));
@@ -117,6 +126,22 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
     let Some(block) = render_block(&rel, &selected) else { return HookOutput::silent() };
     logging::debug(&format!("injected {} conventions for {rel}", selected.len()));
     HookOutput::context(Event::PreToolUse, block)
+}
+
+/// Whether the file this write produces is one the index would have kept.
+///
+/// Both directions matter. The content about to be written may be over the
+/// bound, and the file already on disk may be, and either way it never
+/// contributed a vote to any rule in the snapshot.
+fn indexable(root: &Path, rel: &str, resulting: Option<&str>) -> bool {
+    if resulting.is_some_and(|c| c.len() as u64 > canon_derive::MAX_FILE_BYTES) {
+        return false;
+    }
+    match std::fs::symlink_metadata(root.join(rel)) {
+        Ok(meta) => meta.is_file() && meta.len() <= canon_derive::MAX_FILE_BYTES,
+        // Not there yet is the ordinary case for a new file.
+        Err(_) => true,
+    }
 }
 
 /// The file as it will exist once this tool call runs, when that is knowable.
@@ -142,6 +167,16 @@ fn resulting_file(root: &Path, rel: &str, input: &HookInput) -> Option<String> {
     }
     let (old, new) =
         (input.tool_input.old_string.as_deref()?, input.tool_input.new_string.as_deref()?);
+    // Only a regular file, and only one small enough to have been indexed.
+    // `read_to_string` on a FIFO inside the tree blocks forever, and a hook
+    // that never returns is worse than a hook that returns nothing; a device
+    // node or a directory is not a thing to reconstruct either. `symlink_metadata`
+    // rather than `metadata`, so a symlink to a FIFO is not followed into the
+    // same hang.
+    let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
+    if !meta.is_file() || meta.len() > canon_derive::MAX_FILE_BYTES {
+        return None;
+    }
     let current = std::fs::read_to_string(root.join(rel)).ok()?;
     // An `old_string` that is not there means the edit will not apply, and
     // guessing at the result would refuse a write that was never going to
@@ -215,7 +250,7 @@ pub(crate) fn verify(input: &HookInput) -> HookOutput {
     let mut violations = verify_source(&rel, &source, &conventions);
     // Asked last and separately, because it is the one check that looks for a
     // file rather than at one, and the file it looks for does not exist yet.
-    violations.extend(canon_derive::missing_test(&root, &rel, &conventions));
+    violations.extend(canon_derive::missing_test(&root, &rel, &conventions, &settings));
     if violations.is_empty() {
         return HookOutput::silent();
     }

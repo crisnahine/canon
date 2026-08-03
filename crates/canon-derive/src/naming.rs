@@ -88,9 +88,34 @@ pub(crate) fn is_compatible(name: &str, style: Style) -> bool {
         Style::Snake => word_ok('_') && !name.chars().any(char::is_uppercase),
         Style::Kebab => word_ok('-') && !name.chars().any(char::is_uppercase),
         Style::Camel => first.is_lowercase() && alnum(),
-        Style::Pascal => first.is_uppercase() && alnum() && name.chars().any(char::is_lowercase),
+        // A separator-free all-caps name is how a `PascalCase` project writes
+        // an acronym — `SEO.tsx`, `FAQ.tsx`, `API.ts` — and requiring a
+        // lowercase letter refused every one of them in a directory of
+        // `PascalCase` components. It is compatible with `SCREAMING_SNAKE_CASE`
+        // too; compatibility was never exclusive, and a sample that contains
+        // only such names still pins no style and derives nothing.
+        Style::Pascal => first.is_uppercase() && alnum(),
         Style::ScreamingSnake => word_ok('_') && !name.chars().any(char::is_lowercase),
     }
+}
+
+/// Whether any style at all could have produced this name.
+///
+/// A name that no style accepts is not a badly styled name, it is a name from
+/// outside the style system: a framework token the author could not have
+/// chosen differently. `[id].tsx` and `[...slug].tsx` are Next.js and Nuxt
+/// dynamic routes, `+page.server.ts` and `+layout.ts` are `SvelteKit` routes,
+/// `_form.html.erb` is a Rails partial, `_variables.scss` is a Sass partial.
+/// None contains only word characters, so `is_compatible` is false for every
+/// style, and a check that reads "compatible with nothing" as "breaks the
+/// rule" refuses a file the developer cannot rename.
+///
+/// This is the general form of a guard that first shipped for a leading
+/// underscore alone. Fixing the instance rather than the class left every
+/// file-based router in the same trap.
+#[must_use]
+pub(crate) fn outside_the_style_system(name: &str) -> bool {
+    !Style::ALL.iter().any(|s| is_compatible(name, *s))
 }
 
 /// Whether `name` has enough structure to tell two styles apart.
@@ -230,10 +255,31 @@ mod tests {
     }
 
     #[test]
-    fn an_all_caps_acronym_is_not_pascal_case() {
-        // `HTTP` has no lowercase, so it is screaming snake, not Pascal.
-        assert!(!is_compatible("HTTP", Style::Pascal));
+    fn a_separator_free_acronym_is_compatible_with_both_readings() {
+        // `SEO.tsx` and `FAQ.tsx` are how a PascalCase project writes an
+        // acronym, and demanding a lowercase letter refused every one of them.
+        // It reads as `SCREAMING_SNAKE_CASE` too, and compatibility was never
+        // exclusive — a sample of nothing but acronyms pins neither style and
+        // so derives nothing, which is the right answer.
+        assert!(is_compatible("HTTP", Style::Pascal));
         assert!(is_compatible("HTTP", Style::ScreamingSnake));
+        assert_eq!(shared_styles(&owned(&["HTTP", "SEO", "FAQ"]), 3).len(), 2, "pins neither");
+        // A separator settles it: only screaming snake admits one.
+        assert!(!is_compatible("HTTP_CLIENT", Style::Pascal));
+        assert_eq!(shared_styles(&owned(&["HTTP_CLIENT", "SEO"]), 2), vec![Style::ScreamingSnake]);
+        // And a real Pascal sample still admits the acronym beside it.
+        assert_eq!(shared_styles(&owned(&["UserCard", "SEO"]), 2), vec![Style::Pascal]);
+    }
+
+    #[test]
+    fn a_framework_named_file_is_outside_the_style_system() {
+        // Every file-based router names files the author cannot rename.
+        for token in ["[id]", "[...slug]", "+page", "+layout", "_form", "$types"] {
+            assert!(outside_the_style_system(token), "{token} should be unclassifiable");
+        }
+        for real in ["user_card", "UserCard", "userCard", "user-card", "SEO"] {
+            assert!(!outside_the_style_system(real), "{real} is a style choice");
+        }
     }
 
     #[test]

@@ -343,9 +343,13 @@ rule looks like when it has been derived from one kind of file and applied to
 every kind.
 
 An unknown key is a hard error, because a typo means a setting you think is
-active never parsed. On the hook path an invalid config degrades to defaults
-and is logged; `canon check` is where it fails loudly, because that is a
-command a human ran and is waiting on.
+active never parsed. On the hook path a config that will not load runs on the
+defaults *except* for `enforce`, which is forced off: the setting that can
+block a write has to fail toward permissive, or a typo made while turning a
+refusal off answers by refusing again. It is logged, and `canon check` is where
+it fails loudly, because that is a command a human ran and is waiting on. A
+file that exists and cannot be read at all — saved as UTF-16, or unreadable —
+is reported the same way rather than treated as absent.
 
 Logging is off by default and never goes to a stream. stdout is the hook
 protocol channel and stderr on `PostToolUse` is fed to the model, so a debug

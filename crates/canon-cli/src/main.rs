@@ -79,8 +79,14 @@ fn human<F: FnOnce(&std::path::Path) -> String>(handler: F) -> std::process::Exi
 }
 
 fn start_logging(root: &std::path::Path) {
-    let (settings, _) = config::load_or_default(root);
-    logging::init(&settings.log_level, paths::log_path());
+    // Resolved independently of whether the config is usable. A config that
+    // will not load falls back to settings with logging off, and taking the
+    // log level from that fallback silenced the one line that would have said
+    // why — "config unusable, running on defaults" cannot be written by a
+    // logger the same failure just turned off. `CANON_LOG` is the channel that
+    // has to keep working when the file does not.
+    let level = config::log_level_for(root);
+    logging::init(&level, paths::log_path());
 }
 
 /// The one place in the workspace that writes human-facing text to stdout.

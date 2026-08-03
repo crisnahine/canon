@@ -202,20 +202,24 @@ fn nameable(entry: &FileEntry) -> bool {
         && !CONVENTIONAL_NAMES.contains(&entry.stem.to_ascii_lowercase().as_str())
 }
 
-/// Whether a leading underscore is doing the naming rather than the author.
+/// Whether the framework named this file rather than the author.
 ///
-/// It is a marker every framework spends on the same idea — something not
-/// meant to be addressed directly — and never a style. `_form.html.erb` is a
-/// Rails partial, `_variables.scss` is a Sass partial, `__init__.py` is in
-/// every Python package, `_internal_utils.py` is private by convention.
+/// A leading underscore is one such marker — a Rails partial, a Sass partial,
+/// `__init__.py`, a private module — and a file-based router's brackets and
+/// pluses are another: `[id].tsx`, `[...slug].tsx`, `+page.server.ts`.
 ///
-/// None of them is compatible with any style, because no style begins with a
-/// separator, and [`naming::shared_styles`] is all-or-nothing. So one partial
-/// in a directory silenced every naming rule for it: a Rails view tree always
-/// has partials, which is why 85 idiomatic `.erb` views derived nothing at
-/// all, and why `requests` produced no rule for its own package directory.
+/// What they have in common is the thing to test for. None of them is
+/// compatible with any naming style, because no style admits a character that
+/// is neither a word character nor its own separator. That makes them
+/// unclassifiable rather than wrong, in both directions: one of them in a
+/// directory silences the whole rule, because [`naming::shared_styles`] is
+/// all-or-nothing, and writing one is refused, because a check that reads
+/// "compatible with nothing" as "breaks the rule" cannot tell the two apart.
+///
+/// Shipped first for a leading underscore alone, which fixed a Rails view tree
+/// and left every file-based router refusing its own route files.
 fn is_role_marked(root: &str) -> bool {
-    root.starts_with('_')
+    naming::outside_the_style_system(root)
 }
 
 /// Whether a file is the kind of thing that has a test.
@@ -439,7 +443,7 @@ fn is_test(f: &FileEntry) -> bool {
 /// after a write rather than before one and still must not cost a tree walk on
 /// a large repository.
 #[must_use]
-pub(crate) fn has_test_for(root: &std::path::Path, rel: &str) -> bool {
+pub(crate) fn has_test_for(root: &std::path::Path, rel: &str, settings: &Settings) -> bool {
     let name = rel.rsplit_once('/').map_or(rel, |(_, n)| n);
     let Some((stem, ext)) = name.rsplit_once('.') else { return false };
     let wanted = naming::name_root(stem).to_lowercase();
@@ -459,21 +463,34 @@ pub(crate) fn has_test_for(root: &std::path::Path, rel: &str) -> bool {
         }
     }
 
+    // Bounded the same way the fallback walk is, and excluding the same
+    // directories. Without the exclude list a single `node_modules` exhausted
+    // the entry budget and the answer came back "no test found" for a file
+    // whose test was sitting beside it — a confident claim produced by giving
+    // up. Reporting nothing is the only honest outcome of running out of
+    // budget, so exhaustion now says "cannot tell" rather than "no".
     let mut seen = 0usize;
-    for start in roots {
-        let mut stack = vec![start];
-        while let Some(current) = stack.pop() {
+    for (start, depth0) in roots.into_iter().map(|r| (r, 0usize)) {
+        let mut stack = vec![(start, depth0)];
+        while let Some((current, depth)) = stack.pop() {
+            if depth > 8 {
+                continue;
+            }
             let Ok(entries) = std::fs::read_dir(&current) else { continue };
             for entry in entries.flatten() {
                 seen += 1;
                 if seen > 20_000 {
-                    return false;
+                    return true;
                 }
                 let path = entry.path();
                 let Ok(kind) = entry.file_type() else { continue };
                 if kind.is_dir() {
-                    if !kind.is_symlink() {
-                        stack.push(path);
+                    let excluded = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| settings.excludes_segment(n));
+                    if !kind.is_symlink() && !excluded {
+                        stack.push((path, depth + 1));
                     }
                     continue;
                 }
