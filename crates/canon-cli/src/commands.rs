@@ -225,6 +225,17 @@ pub(crate) fn check(root: &Path) -> String {
                 settings.recency_half_life_days
             ));
             out.push_str(&format!("  log_level                {}\n", settings.log_level));
+            // Printed because a reader has to be able to tell whether canon
+            // can refuse a write, and the answer is not visible anywhere else.
+            out.push_str(&format!(
+                "  enforce                  {}{}\n",
+                settings.enforce,
+                if settings.enforce {
+                    "  (rules with total agreement may refuse a write)"
+                } else {
+                    "  (advisory only)"
+                }
+            ));
             if !settings.suppress.is_empty() {
                 out.push_str(&format!(
                     "  suppress                 {}\n",

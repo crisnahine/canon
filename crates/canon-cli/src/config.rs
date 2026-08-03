@@ -113,6 +113,14 @@ pub(crate) fn apply_env(
             "CANON_RECENCY_HALF_LIFE_DAYS" => {
                 value.parse().map(|v| settings.recency_half_life_days = v).map_err(|_| ())
             }
+            "CANON_ENFORCE" => {
+                match value.as_str() {
+                    "1" | "true" | "yes" | "on" => settings.enforce = true,
+                    "0" | "false" | "no" | "off" => settings.enforce = false,
+                    _ => return Err(ConfigError::Env { key: key.clone(), value: value.clone() }),
+                }
+                Ok(())
+            }
             "CANON_LOG" => {
                 settings.log_level.clone_from(value);
                 Ok(())
@@ -209,6 +217,24 @@ mod tests {
         apply_env(&mut settings, &vars(&[("CANON_SUPPRESS", "naming.*, shape.base.app.rb ,")]))
             .unwrap();
         assert_eq!(settings.suppress, vec!["naming.*", "shape.base.app.rb"]);
+    }
+
+    #[test]
+    fn enforcement_can_be_turned_on_from_the_environment() {
+        let mut settings = Settings::default();
+        assert!(!settings.enforce, "off by default");
+        apply_env(&mut settings, &vars(&[("CANON_ENFORCE", "1")])).unwrap();
+        assert!(settings.enforce);
+        apply_env(&mut settings, &vars(&[("CANON_ENFORCE", "off")])).unwrap();
+        assert!(!settings.enforce);
+    }
+
+    #[test]
+    fn an_unreadable_enforcement_value_is_an_error_not_a_silent_no() {
+        // Silently reading `maybe` as off would leave someone believing
+        // enforcement is on when it never was.
+        let mut settings = Settings::default();
+        assert!(apply_env(&mut settings, &vars(&[("CANON_ENFORCE", "maybe")])).is_err());
     }
 
     #[test]

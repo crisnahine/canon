@@ -260,14 +260,30 @@ suppress = ["shape.base.app.services.rb"]
 Optional, and most repositories should never need it. Layered: defaults, then
 `.canon.toml` at the repository root, then `CANON_*` environment variables.
 
-| Key | Default | What it does |
-|---|---|---|
-| `injection_budget` | `1500` | bytes of convention text per write |
-| `confidence_floor` | `0.8` | agreement below this is not a convention |
-| `min_files` | `5` | sample below this is coincidence |
-| `recency_half_life_days` | `365` | how fast an old file loses its vote |
-| `suppress` | `[]` | convention ids to silence, `*` allowed |
-| `log_level` | `off` | `off`, `error`, `warn`, `info`, `debug`, `trace` |
+| Key | Default | Environment | What it does |
+|---|---|---|---|
+| `enforce` | `false` | `CANON_ENFORCE` | whether a rule may refuse a write, or only advise |
+| `injection_budget` | `1500` | `CANON_INJECTION_BUDGET` | bytes of convention text per write |
+| `confidence_floor` | `0.8` | `CANON_CONFIDENCE_FLOOR` | agreement below this is not a convention |
+| `min_files` | `5` | `CANON_MIN_FILES` | sample below this is coincidence |
+| `recency_half_life_days` | `365` | `CANON_RECENCY_HALF_LIFE_DAYS` | how fast an old file loses its vote |
+| `suppress` | `[]` | `CANON_SUPPRESS` | convention ids to silence, `*` allowed |
+| `exclude_dirs` | 29 entries | — | directory names never scanned |
+| `log_level` | `off` | `CANON_LOG` | `off`, `error`, `warn`, `info`, `debug`, `trace` |
+
+`canon check` prints all of these as they are actually resolved, so what is in
+effect is never inferred from a document.
+
+Two paths come from the environment only, because they are about where canon
+keeps its own state rather than about how it derives: `CANON_DATA_DIR`
+overrides everything, and `CLAUDE_PLUGIN_DATA` is what the host supplies to a
+plugin hook.
+
+The `confidence_floor` is a floor, not the bar. The bar rises with the size of
+the sample: a rule over thirty files may hold four times in five, but the same
+ratio over four thousand is eight hundred counterexamples, and that is what a
+rule looks like when it has been derived from one kind of file and applied to
+every kind.
 
 An unknown key is a hard error, because a typo means a setting you think is
 active never parsed. On the hook path an invalid config degrades to defaults
