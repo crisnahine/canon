@@ -338,27 +338,52 @@ fn languages_in(files: &[FileEntry]) -> Vec<String> {
     seen
 }
 
+/// Evidence below which a rule is too small to be worth summarising.
+///
+/// A repository has many tiny rules about obscure extensions. They are useful
+/// when that exact file is being written and noise in an orientation block.
+const MANIFEST_MIN_EVIDENCE: usize = 20;
+
 /// The short block injected at session start and into every subagent.
 ///
 /// Short on purpose. The per-file block carries the detail; this exists so the
 /// model knows the detail is coming and does not go inferring house style from
 /// five files it happened to read.
 fn manifest(snapshot: &Snapshot) -> String {
-    let repo_wide: Vec<&canon_core::Convention> = snapshot
-        .conventions
-        .iter()
-        .filter(|c| matches!(c.scope, canon_core::Scope::Repo | canon_core::Scope::Ext(_)))
-        .take(3)
-        .collect();
+    // Best supported first. Taking whatever came first alphabetically surfaced
+    // the three most trivial rules in the repository, which is the opposite of
+    // a summary.
+    let mut widest: Vec<&canon_core::Convention> =
+        snapshot.conventions.iter().filter(|c| c.total >= MANIFEST_MIN_EVIDENCE).collect();
+    // Shape before naming, then evidence. Sorting on evidence alone put "the
+    // 2,912 files in public/ are named in snake_case" at the top: true, and
+    // nothing a reader could not have got from a directory listing. Shape is
+    // the part that cannot be seen without parsing.
+    widest.sort_by(|a, b| {
+        let rank = |c: &canon_core::Convention| usize::from(c.id.starts_with("shape."));
+        rank(b).cmp(&rank(a)).then(b.total.cmp(&a.total)).then(a.id.cmp(&b.id))
+    });
+    widest.truncate(4);
 
     let mut out = format!(
         "canon: {} derived from this repository. The rules for each file are supplied before it is written, so do not infer house style from the files you happen to read.\n",
         snapshot.summary()
     );
-    if !repo_wide.is_empty() {
-        out.push_str("\nRepository-wide:\n");
-        for c in repo_wide {
-            out.push_str(&format!("{}\n", c.render_line()));
+    if !widest.is_empty() {
+        out.push_str("\nThe most widely held, for orientation only:\n");
+        for c in widest {
+            // Scoped, unlike the per-file block. There the header names the
+            // scope, so a rule can say "files here"; in a summary nothing has
+            // established what "here" refers to, and two rules for different
+            // extensions read as one rule contradicting itself.
+            out.push_str(&format!(
+                "- {}: {} ({}/{}, {})\n",
+                c.scope.render(),
+                c.statement.trim_end_matches('.'),
+                c.agreeing,
+                c.total,
+                c.confidence.render()
+            ));
         }
     }
     out
