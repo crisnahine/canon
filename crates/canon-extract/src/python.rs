@@ -5,11 +5,10 @@
 //! not a hidden helper either, so counting it in either list distorts arity.
 //! They are excluded from both.
 
-use crate::util::{child_of_kind, children_of, field_text, line_of, parse, text};
-use crate::{FileFacts, Result, TypeFacts};
+use crate::util::{child_of_kind, children_of, field_text, line_of, text};
+use crate::{FileFacts, TypeFacts};
 
-pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
-    let tree = parse(&tree_sitter_python::LANGUAGE.into(), "Python", source, path)?;
+pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     let mut facts = FileFacts::default();
     for child in children_of(tree.root_node()) {
         match child.kind() {
@@ -36,7 +35,7 @@ pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
             _ => {}
         }
     }
-    Ok(facts)
+    facts
 }
 
 #[derive(PartialEq, Eq)]
@@ -93,7 +92,7 @@ mod tests {
     use super::*;
 
     fn f(src: &str) -> FileFacts {
-        extract(src, "t.py").expect("parses")
+        crate::tests::facts_of(crate::Language::Python, src)
     }
 
     #[test]
@@ -139,7 +138,7 @@ mod tests {
     #[test]
     fn malformed_source_yields_partial_facts_rather_than_failing() {
         for bad in ["class", "def def", "\u{0}", "class A:\n  def", ""] {
-            assert!(extract(bad, "t.py").is_ok(), "errored on {bad:?}");
+            let _ = f(bad);
         }
     }
 }

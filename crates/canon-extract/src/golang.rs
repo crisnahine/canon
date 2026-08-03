@@ -6,13 +6,10 @@
 //! every method declared above its type or require the file to be ordered,
 //! and real Go files are not.
 
-use crate::util::{
-    child_of_any, child_of_kind, children_of, field_text, line_of, parse, text, unquote,
-};
-use crate::{FileFacts, Result, TypeFacts};
+use crate::util::{child_of_any, child_of_kind, children_of, field_text, line_of, text, unquote};
+use crate::{FileFacts, TypeFacts};
 
-pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
-    let tree = parse(&tree_sitter_go::LANGUAGE.into(), "Go", source, path)?;
+pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     let root = tree.root_node();
     let mut facts = FileFacts::default();
 
@@ -56,7 +53,7 @@ pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
         }
     }
 
-    Ok(facts)
+    facts
 }
 
 fn is_exported(name: &str) -> bool {
@@ -113,7 +110,7 @@ mod tests {
     use super::*;
 
     fn f(src: &str) -> FileFacts {
-        extract(src, "t.go").expect("parses")
+        crate::tests::facts_of(crate::Language::Go, src)
     }
 
     #[test]
@@ -169,7 +166,7 @@ mod tests {
     #[test]
     fn malformed_source_yields_partial_facts_rather_than_failing() {
         for bad in ["package", "func func", "\u{0}", "type S struct {", ""] {
-            assert!(extract(bad, "t.go").is_ok(), "errored on {bad:?}");
+            let _ = f(bad);
         }
     }
 }

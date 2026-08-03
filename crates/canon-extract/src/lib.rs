@@ -38,6 +38,7 @@
 
 mod error;
 pub mod lang;
+mod query;
 mod util;
 
 mod ecma;
@@ -49,6 +50,7 @@ mod rustlang;
 
 pub use error::{ExtractError, Result};
 pub use lang::{Language, Provider, Visibility};
+pub use query::Call;
 
 use serde::{Deserialize, Serialize};
 
@@ -89,13 +91,24 @@ pub struct FileFacts {
     pub free_functions: Vec<String>,
     /// Imported module paths, as written.
     pub imports: Vec<String>,
+    /// Call sites, in source order.
+    ///
+    /// What a file reaches for is as much a convention as what it declares:
+    /// "services here never call `ActiveRecord` directly" is a layering rule no
+    /// linter checks and every team holds.
+    pub calls: Vec<Call>,
+    /// Exception types raised or thrown.
+    pub raises: Vec<String>,
 }
 
 impl FileFacts {
     /// Whether the file contributed anything worth deriving from.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.types.is_empty() && self.free_functions.is_empty() && self.imports.is_empty()
+        self.types.is_empty()
+            && self.free_functions.is_empty()
+            && self.imports.is_empty()
+            && self.calls.is_empty()
     }
 }
 
@@ -114,25 +127,50 @@ impl FileFacts {
 /// convention derived from files that were never parsed would be derived from
 /// no evidence at all.
 pub fn extract(language: Language, source: &str, path: &str) -> Result<FileFacts> {
-    if !lang::provider(language).grammar_ready {
+    let provider = lang::provider(language);
+    if !provider.grammar_ready {
         return Err(ExtractError::Unsupported { language: language.name() });
     }
-    match language {
-        Language::Ruby => ruby::extract(source, path),
+    let grammar =
+        lang::grammar(language).ok_or(ExtractError::Unsupported { language: language.name() })?;
+    let tree = util::parse(&grammar, language.name(), source, path)?;
+
+    // One parse, two passes over the same tree. The structural pass resolves
+    // what is stateful and language-specific; the query pass matches what is a
+    // pattern. Parsing twice would double the cold path for no gain.
+    let mut facts = match language {
+        Language::Ruby => ruby::extract(&tree, source),
         Language::JavaScript | Language::Jsx | Language::TypeScript | Language::Tsx => {
-            ecma::extract(language, source, path)
+            ecma::extract(&tree, source)
         }
-        Language::Python => python::extract(source, path),
-        Language::Go => golang::extract(source, path),
-        Language::Rust => rustlang::extract(source, path),
-        Language::Php => php::extract(source, path),
-        Language::Vue => Err(ExtractError::Unsupported { language: language.name() }),
+        Language::Python => python::extract(&tree, source),
+        Language::Go => golang::extract(&tree, source),
+        Language::Rust => rustlang::extract(&tree, source),
+        Language::Php => php::extract(&tree, source),
+        Language::Vue => return Err(ExtractError::Unsupported { language: language.name() }),
+    };
+
+    let found = query::run(language, &tree, source);
+    facts.calls = found.calls;
+    facts.raises = found.raises;
+    // The query is the better import extractor where it has one: it reads the
+    // field rather than the first string it finds. Where it has none, the
+    // structural pass already filled these in.
+    if !found.imports.is_empty() {
+        facts.imports = found.imports;
     }
+    Ok(facts)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Parse and extract, the way [`extract`] does, for an extractor's own
+    /// tests. They exercise the structural pass, which no longer parses.
+    pub(crate) fn facts_of(language: Language, source: &str) -> FileFacts {
+        extract(language, source, "test-input").unwrap_or_default()
+    }
 
     #[test]
     fn an_unwired_language_errors_rather_than_reporting_no_types() {

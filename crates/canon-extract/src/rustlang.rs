@@ -6,11 +6,10 @@
 //! the type's own surface. Both are collected; the trait name is recorded the
 //! way a base class is in other languages, because it is the closest analogue.
 
-use crate::util::{child_of_kind, children_of, field_text, line_of, parse, text};
-use crate::{FileFacts, Result, TypeFacts};
+use crate::util::{child_of_kind, children_of, field_text, line_of, text};
+use crate::{FileFacts, TypeFacts};
 
-pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
-    let tree = parse(&tree_sitter_rust::LANGUAGE.into(), "Rust", source, path)?;
+pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     let root = tree.root_node();
     let mut facts = FileFacts::default();
 
@@ -61,7 +60,7 @@ pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
         }
     }
 
-    Ok(facts)
+    facts
 }
 
 /// Any `pub`, including `pub(crate)`, counts as surface. The distinction
@@ -76,7 +75,7 @@ mod tests {
     use super::*;
 
     fn f(src: &str) -> FileFacts {
-        extract(src, "t.rs").expect("parses")
+        crate::tests::facts_of(crate::Language::Rust, src)
     }
 
     #[test]
@@ -127,7 +126,7 @@ mod tests {
     #[test]
     fn malformed_source_yields_partial_facts_rather_than_failing() {
         for bad in ["pub struct", "fn fn fn", "\u{0}", "impl S {", ""] {
-            assert!(extract(bad, "t.rs").is_ok(), "errored on {bad:?}");
+            let _ = f(bad);
         }
     }
 }

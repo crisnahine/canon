@@ -130,6 +130,7 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(entrypoint_name(&dir, &ext, &members, settings));
         out.extend(base_class(&dir, &ext, &members, settings));
         out.extend(module_arity(&dir, &ext, &members, settings));
+        out.extend(collaborator(&dir, &ext, &members, settings));
     }
     out
 }
@@ -323,6 +324,89 @@ fn module_arity(
     })
 }
 
+/// "Files here call `ApplicationRecord`."
+///
+/// Who a directory talks to is a layering rule, and the kind no linter checks:
+/// a service that reaches past its collaborators into the database is wrong in
+/// a way that compiles, passes tests, and is only caught in review.
+///
+/// Counted by presence rather than by frequency. One file with fifty calls to a
+/// logger would otherwise outvote forty files that each call the real
+/// collaborator once.
+fn collaborator(
+    dir: &str,
+    ext: &str,
+    members: &[&FactSet],
+    settings: &Settings,
+) -> Option<Convention> {
+    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+        .iter()
+        .map(|s| {
+            let mut receivers: Vec<&String> =
+                s.facts.calls.iter().filter_map(|c| c.receiver.as_ref()).collect();
+            receivers.sort_unstable();
+            receivers.dedup();
+            // The receiver this file leans on most, once per file.
+            let dominant = receivers
+                .into_iter()
+                .max_by_key(|r| {
+                    s.facts.calls.iter().filter(|c| c.receiver.as_ref() == Some(*r)).count()
+                })
+                .cloned();
+            (dominant, s.weight, *s)
+        })
+        .collect();
+
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let name = winner.clone()?;
+    if !is_collaborator(&name) {
+        return None;
+    }
+    Some(Convention {
+        id: format!("shape.collaborator.{}.{ext}", id_fragment(dir)),
+        statement: format!("Files here call `{name}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        enforcement: Enforcement::Advisory,
+    })
+}
+
+/// Absence of raising was tried as a convention and removed. On a 9,546-file
+/// Rails repository it produced six rules, for `spec/`, `vendor/`, `config/`,
+/// `db/` and the whole of `app/`, and every one was arithmetic rather than a
+/// choice anyone made. The useful half of the idea, "failure is returned as a
+/// value", is a positive fact about what a file calls, and [`collaborator`]
+/// already carries it.
+///
+/// Whether a receiver names a collaborator rather than a local variable.
+///
+/// `Ledger.record(x)` is a layering fact. `listing.save` is a sentence about
+/// one method's local, and on a real Rails repository the unfiltered version
+/// produced "files here call `listing`", "call `response`", "call `user`":
+/// true of the code, and describing nothing anyone chose.
+///
+/// The test is that the receiver is written like a type. Every language canon
+/// parses spells a class in some capitalised or qualified form, and none of
+/// them spell a local that way by convention.
+fn is_collaborator(receiver: &str) -> bool {
+    if receiver.len() < 2 {
+        return false;
+    }
+    // A qualified path is a collaborator whatever its case: `std::fs`, `a.b`.
+    if receiver.contains("::") || receiver.contains('.') {
+        return true;
+    }
+    // `self`, `this` and friends are the file talking to itself.
+    if matches!(receiver, "self" | "this" | "super" | "cls" | "me") {
+        return false;
+    }
+    receiver.chars().next().is_some_and(char::is_uppercase)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +506,42 @@ mod tests {
             "got {}",
             joined(&convs)
         );
+    }
+
+    #[test]
+    fn a_shared_collaborator_becomes_a_layering_rule() {
+        // Who a directory talks to, which is the rule no linter checks.
+        let files = fixture::agreeing(
+            "app/services",
+            "rb",
+            6,
+            "class Item$N\n  def call\n    Ledger.record(1)\n    Ledger.settle(2)\n  end\nend\n",
+        );
+        let convs = derive_from("sem-collaborator", &files);
+        assert!(joined(&convs).contains("call `Ledger`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn one_chatty_file_does_not_outvote_the_directory() {
+        // Presence, not frequency: fifty log lines in one file must not become
+        // the directory's collaborator.
+        let mut files = fixture::agreeing(
+            "app/services",
+            "rb",
+            5,
+            "class Item$N\n  def call\n    Ledger.record(1)\n  end\nend\n",
+        );
+        let mut spam = String::new();
+        for i in 0..50 {
+            spam.push_str(&format!("    Logger.write({i})\n"));
+        }
+        files.push((
+            "app/services/noisy.rb".to_string(),
+            format!("class Noisy\n  def call\n{spam}  end\nend\n"),
+        ));
+        let convs = derive_from("sem-chatty", &files);
+        let text = joined(&convs);
+        assert!(!text.contains("call `Logger`"), "one file dominated the count: {text}");
     }
 
     #[test]

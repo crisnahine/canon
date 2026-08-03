@@ -14,24 +14,15 @@
 //!   convention purposes. This is what makes "files here export exactly one
 //!   component" derivable in a React codebase.
 
-use crate::util::{
-    child_of_any, child_of_kind, children_of, field_text, line_of, parse, text, unquote,
-};
-use crate::{FileFacts, Language, Result, TypeFacts};
+use crate::util::{child_of_any, child_of_kind, children_of, field_text, line_of, text, unquote};
+use crate::{FileFacts, TypeFacts};
 
-pub(crate) fn extract(language: Language, source: &str, path: &str) -> Result<FileFacts> {
-    let (grammar, name) = match language {
-        Language::TypeScript => (tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), "TypeScript"),
-        Language::Tsx => (tree_sitter_typescript::LANGUAGE_TSX.into(), "TSX"),
-        Language::Jsx => (tree_sitter_javascript::LANGUAGE.into(), "JSX"),
-        _ => (tree_sitter_javascript::LANGUAGE.into(), "JavaScript"),
-    };
-    let tree = parse(&grammar, name, source, path)?;
+pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     let mut facts = FileFacts::default();
     for child in children_of(tree.root_node()) {
         top_level(child, source, &mut facts);
     }
-    Ok(facts)
+    facts
 }
 
 fn top_level(node: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
@@ -152,13 +143,13 @@ mod tests {
     use super::*;
 
     fn ts(src: &str) -> FileFacts {
-        extract(Language::TypeScript, src, "t.ts").expect("parses")
+        crate::tests::facts_of(crate::Language::TypeScript, src)
     }
     fn tsx(src: &str) -> FileFacts {
-        extract(Language::Tsx, src, "t.tsx").expect("parses")
+        crate::tests::facts_of(crate::Language::Tsx, src)
     }
     fn js(src: &str) -> FileFacts {
-        extract(Language::JavaScript, src, "t.js").expect("parses")
+        crate::tests::facts_of(crate::Language::JavaScript, src)
     }
 
     #[test]
@@ -247,8 +238,8 @@ mod tests {
     #[test]
     fn malformed_source_yields_partial_facts_rather_than_failing() {
         for bad in ["export class", "const = = =", "\u{0}", "class A { { {", ""] {
-            assert!(extract(Language::TypeScript, bad, "t.ts").is_ok(), "errored on {bad:?}");
-            assert!(extract(Language::Tsx, bad, "t.tsx").is_ok(), "errored on {bad:?}");
+            let _ = ts(bad);
+            let _ = ts(bad);
         }
     }
 }

@@ -11,8 +11,8 @@
 //! private methods and reported every helper as public, inflating the arity of
 //! every class in the repository and producing a confident, wrong convention.
 
-use crate::util::{child_of_kind, children_of, line_of, parse, text, unquote};
-use crate::{FileFacts, Result, TypeFacts};
+use crate::util::{child_of_kind, children_of, line_of, text, unquote};
+use crate::{FileFacts, TypeFacts};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -20,11 +20,10 @@ enum Section {
     Private,
 }
 
-pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
-    let tree = parse(&tree_sitter_ruby::LANGUAGE.into(), "Ruby", source, path)?;
+pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     let mut facts = FileFacts::default();
     collect(tree.root_node(), source, &mut facts);
-    Ok(facts)
+    facts
 }
 
 /// Walk the whole file iteratively, carrying whether we are inside a type.
@@ -150,7 +149,7 @@ mod tests {
     use super::*;
 
     fn f(src: &str) -> FileFacts {
-        extract(src, "t.rb").expect("parses")
+        crate::tests::facts_of(crate::Language::Ruby, src)
     }
 
     #[test]
@@ -233,7 +232,7 @@ mod tests {
     #[test]
     fn malformed_source_yields_partial_facts_rather_than_failing() {
         for bad in ["class", "def def def", "\u{0}\u{1}", "class A\n  def", ""] {
-            assert!(extract(bad, "t.rb").is_ok(), "errored on {bad:?}");
+            let _ = f(bad);
         }
     }
 
@@ -243,17 +242,17 @@ mod tests {
         // host cannot tell apart from a crash. Depth well past anything a
         // human writes, and well within what a generator emits.
         let deep = format!("{}{}", "if x\n".repeat(5_000), "end\n".repeat(5_000));
-        assert!(extract(&deep, "deep.rb").is_ok());
+        let _ = f(&deep);
 
         let nested_arrays = format!("x = {}{}", "[".repeat(5_000), "]".repeat(5_000));
-        assert!(extract(&nested_arrays, "arrays.rb").is_ok());
+        let _ = f(&nested_arrays);
 
         let mut nested_classes = String::new();
         for i in 0..500 {
             nested_classes.push_str(&format!("class C{i}\n"));
         }
         nested_classes.push_str(&"end\n".repeat(500));
-        assert!(extract(&nested_classes, "classes.rb").is_ok());
+        let _ = f(&nested_classes);
     }
 
     #[test]

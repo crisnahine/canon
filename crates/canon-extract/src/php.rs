@@ -4,11 +4,10 @@
 //! similar `private` keyword. A method with no modifier at all is public, so
 //! absence of evidence is evidence of publicity here and nowhere else.
 
-use crate::util::{child_of_kind, children_of, field_text, line_of, parse, text};
-use crate::{FileFacts, Result, TypeFacts};
+use crate::util::{child_of_kind, children_of, field_text, line_of, text};
+use crate::{FileFacts, TypeFacts};
 
-pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
-    let tree = parse(&tree_sitter_php::LANGUAGE_PHP.into(), "PHP", source, path)?;
+pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     let mut facts = FileFacts::default();
     crate::util::walk(tree.root_node(), |node| match node.kind() {
         "class_declaration" | "interface_declaration" | "trait_declaration" => {
@@ -30,7 +29,7 @@ pub(crate) fn extract(source: &str, path: &str) -> Result<FileFacts> {
         }
         _ => {}
     });
-    Ok(facts)
+    facts
 }
 
 fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts> {
@@ -71,7 +70,7 @@ mod tests {
     use super::*;
 
     fn f(src: &str) -> FileFacts {
-        extract(src, "t.php").expect("parses")
+        crate::tests::facts_of(crate::Language::Php, src)
     }
 
     #[test]
@@ -117,7 +116,7 @@ mod tests {
     #[test]
     fn malformed_source_yields_partial_facts_rather_than_failing() {
         for bad in ["<?php class", "<?php function function", "\u{0}", "<?php class A {", ""] {
-            assert!(extract(bad, "t.php").is_ok(), "errored on {bad:?}");
+            let _ = f(bad);
         }
     }
 }

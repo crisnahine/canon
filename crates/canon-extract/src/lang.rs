@@ -130,6 +130,26 @@ pub fn provider(language: Language) -> Provider {
     Provider { language, grammar_ready, visibility, extensions }
 }
 
+/// The tree-sitter grammar for a language, or `None` when none is linked.
+///
+/// The single place a grammar object is constructed. Extractors and the query
+/// layer both need one, and two lists of the same mapping is how a language
+/// ends up wired for parsing but not for queries.
+#[must_use]
+pub fn grammar(language: Language) -> Option<tree_sitter::Language> {
+    Some(match language {
+        Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE.into(),
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        Language::Python => tree_sitter_python::LANGUAGE.into(),
+        Language::Go => tree_sitter_go::LANGUAGE.into(),
+        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+        Language::Vue => return None,
+    })
+}
+
 /// Map a file extension to a language.
 ///
 /// Case-insensitive, because Windows checkouts and generated files disagree
