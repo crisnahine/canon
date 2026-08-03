@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
+// 2: the query layer added call and raise facts, so snapshots built before it
+//    contain no layering rules. Discarding is right: re-deriving costs seconds
+//    and keeping one would leave an upgraded install running on the old
+//    binary's conventions until the commit changed.
 
 /// Age past which a snapshot is rebuilt even if nothing else changed.
 ///

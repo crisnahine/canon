@@ -39,6 +39,7 @@ Conventions for app/services/**/*.rb, derived from this repository:
 - That public method is named `execute`. (1241/1248, 0.99)
 - Types here inherit from `ApplicationService`. (1268/1550, 0.82)
 - Types here expose exactly 1 public method. (1248/1550, 0.80)
+- Files here call `Ledger`. (9/10, 0.90)
 - Files here are named in snake_case. (2399/2399, 1.00)
 - Test files are named `*_spec.rb`. (1321/1462, 0.90)
 
@@ -54,6 +55,10 @@ applies to this file, right now.
 After the write it re-parses the result and structurally diffs it against those
 same conventions. A difference comes back as specific feedback, so it gets
 fixed before the turn ends rather than at review time.
+
+That fourth line is a layering rule: who this directory talks to. It is the
+kind of thing no linter checks and every team holds, and a service that reaches
+past its collaborators is wrong in a way that compiles and passes tests.
 
 ## Why the numbers are in the text
 
@@ -161,9 +166,37 @@ Vue is deliberately blank: `<script lang="ts">` and `<template>` parse under
 different grammars, so it needs two passes rather than one. Left unwired rather
 than half-wired.
 
-Adding a language is one module in `crates/canon-extract/src/` plus one arm in
-`lang::provider`. The match is exhaustive, so it will not compile until the
-capability table is updated.
+Adding a language is one module in `crates/canon-extract/src/`, one arm in
+`lang::provider`, and one `queries/<language>/facts.scm`. The match is
+exhaustive, so it will not compile until the capability table is updated.
+
+## Facts by query
+
+Two kinds of fact, extracted two ways.
+
+**Patterns are queries.** Call sites, raises and imports look the same in every
+file of a language, so they are written once in
+`crates/canon-extract/queries/<language>/facts.scm` and matched by tree-sitter.
+Adding a fact to a language is editing an `.scm` file.
+
+```scheme
+; Payment.charge(x) — a call with an explicit receiver.
+(call
+  receiver: (_) @call.receiver
+  method: (identifier) @call)
+```
+
+**State is Rust.** Ruby's `private` is a section keyword that flips everything
+after it, and Go's methods are declared outside the type they belong to.
+Neither is a pattern, and a query cannot express either. Those stay in a cursor
+walk, which is also why the first attempt at Ruby visibility as a query
+produced a confident and wrong convention.
+
+The capture vocabulary is canon's rather than upstream's. Every grammar crate
+exports a `TAGS_QUERY`, and they disagree: Go's reports `@reference.type` where
+Ruby's reports `@reference.call`, and TypeScript's covers only the constructs
+TypeScript adds, on the assumption the JavaScript query is concatenated with it.
+Pointed at an ordinary class, the TypeScript tags query returns nothing.
 
 ## Commands
 

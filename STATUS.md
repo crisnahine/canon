@@ -1,4 +1,4 @@
-# Measured status — v0.1.2
+# Measured status — v0.2.0
 
 Every number below was executed. Reproduce with the commands shown.
 
@@ -6,14 +6,16 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release              0 errors
-cargo test --workspace             257 passing
+cargo test --workspace             274 passing
 cargo clippy --workspace           0 warnings
 cargo fmt --all --check            clean
 ./tests/fail-open.sh               75/75
+./tests/asset-coverage.sh          8 of 8 platforms
 ./tests/injection-reaches-the-model.sh   PASS
 ```
 
-7,353 lines of Rust across five crates, of which roughly half are tests.
+8,035 lines of Rust across five crates, of which roughly half are tests,
+plus 105 lines of tree-sitter query across seven languages.
 
 ## The assumption everything rests on, and how it was checked
 
@@ -131,16 +133,51 @@ tool a team installs next, which is why the cap exists as well.
 
 ## What is not built
 
-- **Vue SFC.** `<template>` and `<script lang="ts">` are separate grammars, so
-  it needs two-pass extraction rather than one. Declared unwired in the
-  capability table rather than half-wired.
 - **CSS and Tailwind.** Value-frequency analysis, a different engine entirely.
-- **Import-layering rules.** Imports are extracted and stored; nothing derives
-  from them yet. "Files in `app/services` never import from `app/controllers`"
-  is the obvious next rule.
+- **Vue and ERB.** Both are two grammars in one file. `Parser::set_included_ranges`
+  is the mechanism and it is not wired yet, which leaves 339 `.erb` files
+  invisible in the Rails repository measured above.
 - **Blocking enforcement.** The type exists and nothing constructs it. No rule
   derived by counting should ever refuse a write, and every rule here is
   derived by counting.
+
+## Facts by query rather than by hand
+
+Call sites, raises and imports are matched by tree-sitter queries in
+`crates/canon-extract/queries/<language>/facts.scm`. Adding a fact to a language
+is editing an `.scm` file; the structural extractors stay in Rust because what
+they resolve is *stateful* and a pattern cannot express it. Ruby's `private` is
+a section keyword; Go's methods live outside the type they belong to.
+
+The capture vocabulary is canon's, not upstream's. Every grammar crate exports a
+`TAGS_QUERY` and they disagree with each other: Go's reports `@reference.type`
+where Ruby's reports `@reference.call`, and TypeScript's covers only the
+constructs TypeScript adds, on the assumption that the JavaScript query is
+concatenated with it. Pointed at `class Foo { call() { charge(1) } }` the
+TypeScript tags query returns nothing at all.
+
+A file is parsed once and read twice. The extractors previously each parsed
+their own tree, so a second pass would have parsed the file again.
+
+What it buys is layering, which this document listed as unbuilt until now:
+
+```
+app/workers/workers/users/**/*.rb   Files here call `User`  (9/10, 0.90)
+```
+
+Who a directory talks to is a rule no linter checks and every team holds.
+
+## Two more rules the real repository killed
+
+**A collaborator has to be written like a type.** Unfiltered, the layering rule
+produced "files here call `listing`", "call `response`", "call `user`". Those
+are local variables. True of the code, and describing nothing anyone chose. The
+filter took ten rules down to the two that are real.
+
+**Absence of raising was built, measured, and deleted.** It produced six rules,
+covering `spec/`, `vendor/`, `config/`, `db/` and the whole of `app/`, every one
+arithmetic rather than a choice. A rule whose entire output on a 9,546-file
+repository is noise does not ship, so it was removed rather than tuned.
 
 ## Known limits
 

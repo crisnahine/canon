@@ -5,7 +5,7 @@ has been load-bearing at least once.
 
 ```
 canon-core      types + confidence arithmetic       no I/O at all
-canon-extract   tree-sitter, one module per language depends on: core
+canon-extract   tree-sitter: queries + one module per language, depends on: core
 canon-derive    walk, rules, snapshot, verify, dup   depends on: core, extract
 canon-hook      the host protocol + fail-open        depends on: core
 canon-cli       the binary: config, logging, git     depends on: all
@@ -19,15 +19,33 @@ is a unit test over plain values. `canon-derive` never spawns a subprocess, so
 its rules run in CI without git on `PATH`.
 
 **2. Adding a language cannot reach the derivation rules.** A new language is
-one module in `canon-extract` plus one arm in `lang::provider`. If a language
-ever required changing how conventions are derived, the abstraction would be
-wrong, and the compiler would say so: `provider` matches exhaustively, so a new
+one module in `canon-extract`, one arm in `lang::provider`, and one
+`queries/<language>/facts.scm`. If a language ever required changing how
+conventions are derived, the abstraction would be wrong, and the compiler would say so: `provider` matches exhaustively, so a new
 variant fails to build until the capability table is updated.
 
 **3. Only one function in the workspace writes to stdout.** `print_stdout` and
 `print_stderr` are denied workspace-wide with two audited exceptions:
 `canon_hook::write_line` for the protocol, and `canon_cli::emit` for the
 commands humans run. A stray `println!` on a hook path does not compile.
+
+## Queries for patterns, walks for state
+
+Extraction is split by what the fact *is*, not by which is nicer to write.
+
+A call site, a raise and an import look the same in every file of a language.
+They are patterns, they belong in a query, and they live in
+`queries/<language>/facts.scm`.
+
+Ruby's `private` is a section keyword: it flips the visibility of everything
+declared after it, so resolving it means accumulating state while moving
+through siblings. Go declares methods outside the type they belong to, so
+attaching them needs two passes over the file. Neither is a pattern. Both stay
+in Rust. The section below on visibility is where that rule was learned.
+
+A file is parsed once and both passes read the same tree. Each extractor used
+to parse its own, which would have meant parsing twice as soon as a second pass
+existed.
 
 ## Why visibility lives in the extraction layer
 
@@ -158,3 +176,5 @@ This is a bet that a binary with four dependencies still builds in a decade.
 | `canon-derive/select.rs` | what to say inside a fixed budget |
 | `canon-derive/render.rs` | why the block states evidence, not policy |
 | `canon-derive/verify.rs` | comparing what was written against the rules |
+| `canon-extract/query.rs` | which facts are a pattern, and why the vocabulary is canon's |
+| `canon-extract/queries/` | the patterns themselves, one directory per language |

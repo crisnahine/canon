@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -17,23 +17,23 @@ repository = "https://github.com/crisnahine/canon"
 authors = ["Cris Nahine"]
 
 [workspace.dependencies]
-canon-core = { path = "crates/canon-core", version = "0.1.2" }
-canon-extract = { path = "crates/canon-extract", version = "0.1.2" }
-canon-derive = { path = "crates/canon-derive", version = "0.1.2" }
-canon-hook = { path = "crates/canon-hook", version = "0.1.2" }
+canon-core = { path = "crates/canon-core", version = "0.2.0" }
+canon-extract = { path = "crates/canon-extract", version = "0.2.0" }
+canon-derive = { path = "crates/canon-derive", version = "0.2.0" }
+canon-hook = { path = "crates/canon-hook", version = "0.2.0" }
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
 
-tree-sitter = "0.26"
-tree-sitter-ruby = "0.23"
-tree-sitter-javascript = "0.25"
-tree-sitter-typescript = "0.23"
-tree-sitter-python = "0.25"
-tree-sitter-go = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-php = "0.24"
+tree-sitter = "0.26.11"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-php = "0.24.2"
 
 # Every crate inherits these. The hot path runs before each write, so the
 # lint set is tuned to catch the two things that actually break a hook:

@@ -3,6 +3,39 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-08-03
+
+### Added
+
+- A declarative extraction layer. Call sites, raises and imports are matched by
+  tree-sitter queries in `queries/<language>/facts.scm` rather than by another
+  hand-rolled walk per language. Adding a fact to a language is now editing an
+  `.scm` file.
+- Layering conventions, listed as unbuilt until now: who a directory talks to.
+  On a real worker directory, `Files here call ``User``. (9/10, 0.90)`. It is
+  the kind of rule no linter checks and every team holds.
+- The capture vocabulary is canon's and identical across languages. Every
+  grammar crate exports a `TAGS_QUERY`, and they disagree: Go's reports
+  `@reference.type` where Ruby's reports `@reference.call`, and TypeScript's
+  covers only the constructs TypeScript adds, on the assumption the JavaScript
+  query is concatenated with it.
+
+### Changed
+
+- A file is parsed once and read twice. Extractors previously each parsed their
+  own tree, so a second pass would have parsed the file again.
+- `SNAPSHOT_VERSION` is 2. A snapshot built before the query layer holds no
+  layering rules, so it is discarded rather than kept until the commit changes.
+- `toml` moves from 0.9 to 1. Its error for an unknown key now lists the keys
+  that are valid, which is the message `canon check` shows a human.
+
+### Removed
+
+- Absence-of-raising as a convention. It was built, measured against a
+  9,546-file repository, and produced six rules covering `spec/`, `vendor/`,
+  `config/`, `db/` and all of `app/` — every one arithmetic rather than a choice
+  anyone made.
+
 ## [0.1.2] — 2026-08-03
 
 ### Fixed
