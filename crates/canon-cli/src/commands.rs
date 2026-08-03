@@ -288,13 +288,12 @@ fn refresh(root: &Path, settings: &Settings, force: bool) -> Snapshot {
     let path = paths::snapshot_path(root);
     let sha = git::head_sha(root);
 
-    if !force {
-        if let Some(existing) = Snapshot::load(&path) {
-            if existing.is_fresh(sha.as_deref(), settings) {
-                logging::debug("snapshot still fresh");
-                return existing;
-            }
-        }
+    if !force
+        && let Some(existing) = Snapshot::load(&path)
+        && existing.is_fresh(sha.as_deref(), settings)
+    {
+        logging::debug("snapshot still fresh");
+        return existing;
     }
 
     let files = index_files(root, settings);
@@ -415,10 +414,10 @@ fn record_touch(root: &Path, session_id: &str, rel: &str) {
     use std::io::Write as _;
 
     let path = paths::touched_path(root, session_id);
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "{rel}");

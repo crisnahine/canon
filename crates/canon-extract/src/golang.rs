@@ -24,10 +24,10 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
                 }
             }
             "function_declaration" => {
-                if let Some(n) = field_text(child, "name", source) {
-                    if is_exported(&n) {
-                        facts.free_functions.push(n);
-                    }
+                if let Some(n) = field_text(child, "name", source)
+                    && is_exported(&n)
+                {
+                    facts.free_functions.push(n);
                 }
             }
             "import_declaration" => collect_imports(child, source, &mut facts),

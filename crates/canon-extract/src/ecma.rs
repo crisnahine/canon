@@ -72,10 +72,8 @@ fn export(node: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
                 let is_callable = d
                     .child_by_field_name("value")
                     .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression"));
-                if is_callable {
-                    if let Some(n) = field_text(d, "name", src) {
-                        facts.free_functions.push(n);
-                    }
+                if is_callable && let Some(n) = field_text(d, "name", src) {
+                    facts.free_functions.push(n);
                 }
             }
         }

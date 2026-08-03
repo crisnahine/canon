@@ -106,16 +106,16 @@ fn check_shape(facts: &FileFacts, convention: &Convention) -> Vec<Violation> {
             if t.public_arity() != 1 {
                 continue;
             }
-            if let Some(actual) = t.public_methods.first() {
-                if actual != &expected {
-                    out.push(Violation {
+            if let Some(actual) = t.public_methods.first()
+                && actual != &expected
+            {
+                out.push(Violation {
                         convention_id: convention.id.clone(),
                         message: format!(
                             "`{}` exposes `{actual}`; the entrypoint here is named `{expected}` ({evidence})",
                             t.name
                         ),
                     });
-                }
             }
         }
     }

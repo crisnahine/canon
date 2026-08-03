@@ -89,10 +89,10 @@ pub(crate) fn log(level: Level, message: &str) {
 }
 
 fn write(sink: &Sink, level: Level, message: &str) {
-    if let Some(parent) = sink.path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
+    if let Some(parent) = sink.path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
     }
     let oversized = std::fs::metadata(&sink.path).is_ok_and(|m| m.len() > MAX_LOG_BYTES);
     let opened = std::fs::OpenOptions::new()

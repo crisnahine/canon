@@ -18,10 +18,10 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
                 }
             }
             "function_definition" => {
-                if let Some(n) = field_text(child, "name", source) {
-                    if visibility(&n) == Vis::Public {
-                        facts.free_functions.push(n);
-                    }
+                if let Some(n) = field_text(child, "name", source)
+                    && visibility(&n) == Vis::Public
+                {
+                    facts.free_functions.push(n);
                 }
             }
             "import_statement" | "import_from_statement" => {

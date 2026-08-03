@@ -27,10 +27,10 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
                 }
             }
             "function_item" => {
-                if is_pub(child) {
-                    if let Some(n) = field_text(child, "name", source) {
-                        facts.free_functions.push(n);
-                    }
+                if is_pub(child)
+                    && let Some(n) = field_text(child, "name", source)
+                {
+                    facts.free_functions.push(n);
                 }
             }
             "use_declaration" => {

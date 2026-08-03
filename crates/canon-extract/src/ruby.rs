@@ -99,10 +99,10 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
                 }
                 // `private :foo` names one method and leaves the section alone.
                 "call" => {
-                    if let Some((kw, target)) = visibility_call(child, src) {
-                        if matches!(kw.as_str(), "private" | "protected") {
-                            private_methods.push(target);
-                        }
+                    if let Some((kw, target)) = visibility_call(child, src)
+                        && matches!(kw.as_str(), "private" | "protected")
+                    {
+                        private_methods.push(target);
                     }
                 }
                 "method" => {

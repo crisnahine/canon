@@ -168,10 +168,17 @@ jobs:
           test "$count" = "1" || { echo "expected one binary, found $count"; exit 1; }
 
   minimum-supported-rust:
-    # A twenty-year project should not need this month's compiler. Checked on
-    # every platform, because the C grammars are built by a different toolchain
-    # on each one and an older rustc pairs differently with each.
-    name: rust 1.85 (${{ matrix.os }})
+    # The declared `rust-version` has to be true, or it is worse than absent:
+    # cargo will refuse a build with a confident message naming a version the
+    # code does not actually need, or accept one it cannot compile.
+    #
+    # Pinned to the current release deliberately. canon ships prebuilt binaries
+    # for eight targets, so nobody installs it by compiling, and the only cost
+    # of a recent floor falls on someone building from source.
+    #
+    # Checked on every platform: the C grammars are built by a different
+    # toolchain on each, and a given rustc pairs differently with each of them.
+    name: rust 1.97.1 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -179,7 +186,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo build --workspace
 

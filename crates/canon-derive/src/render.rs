@@ -40,10 +40,10 @@ pub fn render_block(rel: &str, selected: &[&Convention]) -> Option<String> {
 
     // One example, from the most specific rule that has one. More than one
     // reads as a reading list rather than a pointer.
-    if let Some(exemplar) = selected.iter().find_map(|c| c.exemplar.as_deref()) {
-        if exemplar != rel {
-            out.push_str(&format!("\nCanonical example, most recently modified: {exemplar}\n"));
-        }
+    if let Some(exemplar) = selected.iter().find_map(|c| c.exemplar.as_deref())
+        && exemplar != rel
+    {
+        out.push_str(&format!("\nCanonical example, most recently modified: {exemplar}\n"));
     }
 
     Some(out)

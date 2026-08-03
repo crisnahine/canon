@@ -22,6 +22,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rust-version` is 1.97.1, the current release. canon ships prebuilt binaries for
+  eight targets, so the floor only affects building from source, and the CI job
+  that proves it moves with it.
 - A file is parsed once and read twice. Extractors previously each parsed their
   own tree, so a second pass would have parsed the file again.
 - `SNAPSHOT_VERSION` is 2. A snapshot built before the query layer holds no
