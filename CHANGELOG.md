@@ -3,6 +3,33 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-08-03
+
+### Fixed
+
+- Windows on ARM had no binary at all, and neither did any musl system. The
+  release built five of the eight triples the shim can compute, so those
+  platforms got a 404 and then the fail-open path, which produces no symptom
+  beyond a plugin that never speaks.
+- The shim now asks the loader whether the C library is musl or glibc, instead
+  of assuming glibc and handing Alpine something that cannot run.
+
+### Added
+
+- All eight targets are built natively rather than cross-compiled. The
+  tree-sitter grammars are C, and a missing cross toolchain yields something
+  unrunnable rather than a build failure. Each build job now runs what it built.
+- A release smoke stage: every published asset is downloaded on its own
+  platform, checked against `SHA256SUMS`, and executed. Building an artifact
+  and publishing a working one are different claims.
+- `tests/asset-coverage.sh`, which enumerates the shim's computable triples and
+  the release's published assets from source and fails on any mismatch. That
+  mismatch is what shipped a Windows plugin that did nothing, and it is
+  structural rather than a typo, so it needed a test rather than vigilance.
+- CI runs tests and the resolution shim on both architectures of all three
+  platforms, the fail-open contract on all three, and the Windows batch wrapper
+  through `cmd.exe`, which is the path the host actually takes there.
+
 ## [0.1.1] — 2026-08-03
 
 ### Fixed

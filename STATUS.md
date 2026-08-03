@@ -1,4 +1,4 @@
-# Measured status — v0.1.1
+# Measured status — v0.1.2
 
 Every number below was executed. Reproduce with the commands shown.
 

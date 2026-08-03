@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -17,10 +17,10 @@ repository = "https://github.com/crisnahine/canon"
 authors = ["Cris Nahine"]
 
 [workspace.dependencies]
-canon-core = { path = "crates/canon-core", version = "0.1.1" }
-canon-extract = { path = "crates/canon-extract", version = "0.1.1" }
-canon-derive = { path = "crates/canon-derive", version = "0.1.1" }
-canon-hook = { path = "crates/canon-hook", version = "0.1.1" }
+canon-core = { path = "crates/canon-core", version = "0.1.2" }
+canon-extract = { path = "crates/canon-extract", version = "0.1.2" }
+canon-derive = { path = "crates/canon-derive", version = "0.1.2" }
+canon-hook = { path = "crates/canon-hook", version = "0.1.2" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
