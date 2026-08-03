@@ -127,11 +127,18 @@ jobs:
         # `canon-x86_64-pc-windows-msvc.exe` while the shim requested the same
         # name without the suffix. A 404, a silent fail-open, and a plugin that
         # did nothing on Windows.
+        #
+        # The pattern deliberately avoids GitHub's own expression syntax. A
+        # first attempt grepped for the literal artifact expression, which
+        # Actions expanded before bash ever saw it, leaving a pattern that
+        # matched nothing and a job that failed for the wrong reason.
         run: |
-          release_has_exe=$(grep -c 'canon-\${{ matrix.target }}.exe' .github/workflows/release.yml || true)
-          shim_adds_exe=$(grep -c 'EXE=".exe"' bin/canon || true)
-          test "$release_has_exe" -ge 1 || { echo "release.yml no longer names a .exe artifact"; exit 1; }
-          test "$shim_adds_exe" -ge 1 || { echo "bin/canon no longer appends .exe on Windows"; exit 1; }
+          grep -q 'dist/canon-.*\.exe' .github/workflows/release.yml \
+            || { echo "release.yml no longer publishes a .exe artifact"; exit 1; }
+          grep -q 'EXE=".exe"' bin/canon \
+            || { echo "bin/canon no longer appends .exe on Windows"; exit 1; }
+          grep -q 'canon-\*.exe' hooks/run-hook.cmd \
+            || { echo "the Windows wrapper no longer looks for a versioned binary"; exit 1; }
 
       - name: every hook command points at a file that exists
         run: |
