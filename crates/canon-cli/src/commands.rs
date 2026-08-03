@@ -28,6 +28,14 @@ pub(crate) fn session_start(input: &HookInput) -> HookOutput {
         logging::warn(&format!("config unusable, running on defaults: {e}"));
     }
 
+    // Housekeeping on the cold path: a snapshot for a repository that no
+    // longer exists, and a touched-file list from a session that was killed
+    // before its turn ended, are both invisible and both permanent otherwise.
+    let swept = paths::sweep_stale(now_unix());
+    if swept > 0 {
+        logging::info(&format!("swept {swept} stale files"));
+    }
+
     let snapshot = refresh(&root, &settings, false);
     if snapshot.conventions.is_empty() {
         logging::info("no conventions derived; staying quiet");
@@ -309,6 +317,10 @@ fn refresh(root: &Path, settings: &Settings, force: bool) -> Snapshot {
         logging::info(&format!("snapshot rebuilt: {}", snapshot.summary()));
     }
     snapshot
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// The files canon considers, from git when there is a git.

@@ -45,6 +45,70 @@ pub(crate) fn touched_path(root: &Path, session_id: &str) -> PathBuf {
     data_dir().join("sessions").join(format!("{}-{}.touched", key_for(root), safe))
 }
 
+/// The directory holding one snapshot per repository.
+#[must_use]
+pub(crate) fn snapshots_dir() -> PathBuf {
+    data_dir().join("snapshots")
+}
+
+/// The directory holding the per-session lists of touched files.
+#[must_use]
+pub(crate) fn sessions_dir() -> PathBuf {
+    data_dir().join("sessions")
+}
+
+/// Delete state canon will never read again.
+///
+/// Two things accumulate, both slowly and neither bounded. A snapshot is
+/// written per repository and nothing removes it when that repository is
+/// deleted or renamed. A session's touched-file list is removed when the turn
+/// ends, and a session that crashes or is killed never ends, so its list stays
+/// forever.
+///
+/// Swept on the cold path, where a directory listing is free, and by age
+/// rather than by reachability: canon cannot tell an abandoned repository from
+/// one nobody has opened this month, but a snapshot expires after a day, so
+/// anything much older than that is not being used.
+///
+/// Never fails. This is housekeeping; a permissions problem here must not cost
+/// the session its conventions.
+pub(crate) fn sweep_stale(now_unix: u64) -> usize {
+    let mut removed = 0;
+    removed += sweep(&snapshots_dir(), now_unix, SNAPSHOT_RETENTION_SECONDS);
+    removed += sweep(&sessions_dir(), now_unix, SESSION_RETENTION_SECONDS);
+    removed
+}
+
+/// A snapshot older than this belongs to a repository nobody is working in.
+/// Well past the one-day freshness window, so an active repository is never
+/// touched: its snapshot is rewritten long before this.
+const SNAPSHOT_RETENTION_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+/// A turn does not last a day. A touched-file list this old belongs to a
+/// session that ended without reaching `Stop`.
+const SESSION_RETENTION_SECONDS: u64 = 24 * 60 * 60;
+
+fn sweep(dir: &Path, now_unix: u64, max_age: u64) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        if now_unix.saturating_sub(modified) > max_age && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// The log file. One per install, not per repository, so a user chasing a
 /// problem has one place to look.
 #[must_use]
@@ -101,6 +165,71 @@ mod tests {
     fn an_empty_session_id_still_produces_a_usable_name() {
         let path = touched_path(Path::new("/work/x"), "");
         assert!(path.file_name().unwrap().to_str().unwrap().contains("anon"));
+    }
+
+    fn aged_file(dir: &Path, name: &str, age_seconds: u64) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, "{}").unwrap();
+        // `sweep` compares against a caller-supplied now, so age is expressed
+        // by moving the clock rather than by touching the file.
+        let _ = age_seconds;
+        path
+    }
+
+    #[test]
+    fn a_snapshot_nobody_has_used_in_a_month_is_swept() {
+        let base = std::env::temp_dir().join("canon-sweep-old");
+        let _ = std::fs::remove_dir_all(&base);
+        let snaps = base.join("snapshots");
+        let old = aged_file(&snaps, "abandoned.json", 0);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // A month in the future: everything present is now a month old.
+        let removed =
+            sweep(&snaps, now + SNAPSHOT_RETENTION_SECONDS + 1, SNAPSHOT_RETENTION_SECONDS);
+        assert_eq!(removed, 1);
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn a_snapshot_in_use_is_left_alone() {
+        let base = std::env::temp_dir().join("canon-sweep-fresh");
+        let _ = std::fs::remove_dir_all(&base);
+        let snaps = base.join("snapshots");
+        let current = aged_file(&snaps, "active.json", 0);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        assert_eq!(sweep(&snaps, now, SNAPSHOT_RETENTION_SECONDS), 0);
+        assert!(current.exists(), "an active repository must keep its snapshot");
+    }
+
+    #[test]
+    fn a_touched_list_from_a_session_that_never_ended_is_swept() {
+        // `take_touched` removes these when a turn ends. A session that is
+        // killed never ends, and its list would otherwise stay forever.
+        let base = std::env::temp_dir().join("canon-sweep-session");
+        let _ = std::fs::remove_dir_all(&base);
+        let sessions = base.join("sessions");
+        let orphan = aged_file(&sessions, "abandoned.touched", 0);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        assert_eq!(
+            sweep(&sessions, now + SESSION_RETENTION_SECONDS + 1, SESSION_RETENTION_SECONDS),
+            1
+        );
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn sweeping_a_directory_that_does_not_exist_is_not_an_error() {
+        assert_eq!(sweep(Path::new("/nonexistent/canon/snapshots"), 0, 1), 0);
     }
 
     #[test]
