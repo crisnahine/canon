@@ -128,6 +128,18 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
     HookOutput::context(Event::PreToolUse, block)
 }
 
+/// Read one of canon's own state files, if it is a file and a sane size.
+///
+/// The same guard the repository reads get. A touched-file ledger is a few
+/// kilobytes; anything larger is not one canon wrote.
+fn read_state(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// Whether the file this write produces is one the index would have kept.
 ///
 /// Both directions matter. The content about to be written may be over the
@@ -834,7 +846,9 @@ fn record_touch(root: &Path, session_id: &str, rel: &str) {
 /// Read and clear the touched list for this session.
 fn take_touched(root: &Path, session_id: &str) -> Vec<String> {
     let path = paths::touched_path(root, session_id);
-    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    // canon's own state directory is still a directory someone can put a FIFO
+    // in, and `reconcile` blocks forever on one.
+    let Some(text) = read_state(&path) else { return Vec::new() };
     let _ = std::fs::remove_file(&path);
     let mut seen: Vec<String> =
         text.lines().map(str::to_string).filter(|s| !s.is_empty()).collect();

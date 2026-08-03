@@ -27,6 +27,7 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
                         public_methods: Vec::new(),
                         private_methods: Vec::new(),
                         superclass: None,
+                        interfaces: Vec::new(),
                     });
                     modules.push(module.clone());
                 }
@@ -62,6 +63,13 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
         let Some(index) = target_of(&facts.types, &modules, &ty, module) else { continue };
         let Some(target) = facts.types.get_mut(index) else { continue };
         if let Some(t) = trait_name {
+            // A Rust type routinely implements several traits, and which one
+            // landed in `superclass` was decided by where the author put the
+            // block. Keeping all of them lets the check accept the file
+            // whichever order they are written in.
+            if !target.interfaces.contains(&t) {
+                target.interfaces.push(t.clone());
+            }
             target.superclass.get_or_insert(t);
         }
         let Some(body) = child_of_kind(*child, "declaration_list") else { continue };
@@ -86,9 +94,15 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     // marker — `pub struct Sealed;`, a unit error type, a phantom — and
     // discarding the module beside it left the file resolving to something
     // with nothing on it, which then failed an arity rule it satisfies.
-    let root_has_surface = facts.types.iter().zip(&modules).any(|(t, m)| {
-        m.is_empty() && !(t.public_methods.is_empty() && t.private_methods.is_empty())
-    });
+    // Inherent surface only. Rust forbids `pub fn` inside `impl Trait for Type`
+    // (E0449), so `is_pub` files every trait-impl method under `private_methods`
+    // — which meant one `impl Display for Sealed` was enough to make a marker
+    // type look like it had surface, discard the module holding the real
+    // subject, and refuse the file for exposing nothing. Every unit error type
+    // in Rust has such an impl, because `std::error::Error` requires `Display`
+    // and `Display` has no derive.
+    let root_has_surface =
+        facts.types.iter().zip(&modules).any(|(t, m)| m.is_empty() && !t.public_methods.is_empty());
     if root_has_surface {
         let keep: Vec<bool> = modules.iter().map(String::is_empty).collect();
         let mut it = keep.iter();

@@ -70,11 +70,21 @@ fn visibility(name: &str) -> Vis {
 
 fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts> {
     let name = field_text(class_node, "name", src)?;
+    // The first positional base, whatever node kind it is. Matching only a bare
+    // `identifier` read `class X(base.BaseService)` as an `attribute` and
+    // `class X(BaseService[Order])` as a `subscript`, so both came out with no
+    // base at all and were then refused for having none. A keyword argument —
+    // `metaclass=`, `total=` — is not a base.
     let superclass = class_node
         .child_by_field_name("superclasses")
-        .and_then(|a| children_of(a).into_iter().find(|c| c.kind() == "identifier"))
-        .map(|n| text(n, src));
+        .and_then(|a| {
+            children_of(a)
+                .into_iter()
+                .find(|c| !matches!(c.kind(), "(" | ")" | "," | "comment" | "keyword_argument"))
+        })
+        .map(|n| bare_base(&text(n, src)));
 
+    let interfaces = Vec::new();
     let mut public_methods = Vec::new();
     let mut private_methods = Vec::new();
     if let Some(body) = class_node.child_by_field_name("body") {
@@ -97,7 +107,24 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         }
     }
 
-    Some(TypeFacts { name, line: line_of(class_node), public_methods, private_methods, superclass })
+    Some(TypeFacts {
+        name,
+        line: line_of(class_node),
+        public_methods,
+        private_methods,
+        superclass,
+        interfaces,
+    })
+}
+
+/// A base as written, reduced to the name a convention states.
+///
+/// `base.BaseService` and `BaseService[Order]` name the same class as
+/// `BaseService`; the module path and the type parameters are how the file
+/// reached it, not what it is.
+fn bare_base(raw: &str) -> String {
+    let head = raw.split_once('[').map_or(raw, |(name, _)| name);
+    head.rsplit('.').next().unwrap_or(head).trim().to_string()
 }
 
 #[cfg(test)]

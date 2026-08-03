@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 8;
+pub const SNAPSHOT_VERSION: u32 = 9;
+// 9: Ruby class methods, Python dotted and generic bases, and Rust trait sets
+//    are all visible now, and the file's subject is resolved differently for
+//    every language whose file names are not snake_case. A snapshot from before
+//    this was derived from a different reading of the same code.
 // 8: conventions carry the complete set of top-level directories their sample
 //    came from. Inferring it from the capped evidence was wrong in both
 //    directions, and the guard written to compensate switched itself off as
@@ -47,6 +51,12 @@ pub const SNAPSHOT_VERSION: u32 = 8;
 //    contain no layering rules. Discarding is right: re-deriving costs seconds
 //    and keeping one would leave an upgraded install running on the old
 //    binary's conventions until the commit changed.
+
+/// Size past which a file at the snapshot path is not a snapshot canon wrote.
+///
+/// The largest measured is 144 KB, on a 9,500-file repository with a hundred
+/// conventions. Two orders of magnitude of headroom, and still a bound.
+const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Age past which a snapshot is rebuilt even if nothing else changed.
 ///
@@ -101,6 +111,15 @@ impl Snapshot {
     /// outcome, because the only correct response to each is to rebuild.
     #[must_use]
     pub fn load(path: &Path) -> Option<Self> {
+        // The first read every hook performs, before the config and before
+        // anything else, so a FIFO here hangs all of them and a character
+        // device grows until the process is killed. A snapshot has a knowable
+        // size — 144 KB on a 9,500-file repository — and one larger than the
+        // cap is not one canon wrote.
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        if !meta.is_file() || meta.len() > MAX_SNAPSHOT_BYTES {
+            return None;
+        }
         let text = std::fs::read_to_string(path).ok()?;
         let snapshot: Self = serde_json::from_str(&text).ok()?;
         (snapshot.version == SNAPSHOT_VERSION).then_some(snapshot)

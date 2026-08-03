@@ -34,9 +34,32 @@ use canon_extract::{FileFacts, TypeFacts};
 /// with the largest surface.
 #[must_use]
 pub(crate) fn primary_type<'f>(facts: &'f FileFacts, stem: &str) -> Option<&'f TypeFacts> {
-    facts.types.iter().find(|t| to_snake(&t.name) == stem).or_else(|| {
-        facts.types.iter().max_by_key(|t| t.public_methods.len() + t.private_methods.len())
-    })
+    // Both sides normalised. Comparing `to_snake(name)` against the stem as
+    // written meant the match could never fire for a `PascalCase` or
+    // `camelCase` file name — which is every JavaScript, TypeScript and PHP
+    // repository — so every one of those files fell through to the surface
+    // comparison and a companion class could take the subject.
+    let wanted = to_snake(stem);
+    if let Some(named) = facts.types.iter().find(|t| to_snake(&t.name) == wanted) {
+        return Some(named);
+    }
+    // Public surface first, and the earliest declaration on a tie. A companion
+    // error type gets a `private_method` from its `Display` impl, which tied it
+    // with a one-public-method subject, and `max_by_key` returns the *last*
+    // maximum — so which class the file was judged as depended on which the
+    // author wrote second.
+    facts
+        .types
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, t)| {
+            (
+                t.public_methods.len(),
+                t.public_methods.len() + t.private_methods.len(),
+                usize::MAX - index,
+            )
+        })
+        .map(|(_, t)| t)
 }
 
 /// `CreateEnrolment` and `Enrolments::Create` both reduce toward a file stem.
@@ -75,6 +98,7 @@ mod tests {
             public_methods: public.iter().map(|s| (*s).to_string()).collect(),
             private_methods: vec![],
             superclass: base.map(String::from),
+            interfaces: vec![],
         }
     }
 

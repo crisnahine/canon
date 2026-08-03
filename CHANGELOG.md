@@ -277,15 +277,77 @@ old binary.
 
 The corpus is seventeen repositories now: 15,974 tracked files replayed and
 5,946 new files written into real directories, none refused. `SNAPSHOT_VERSION`
-is 8.
+is 9.
+
+
+### Fixed — a third review round, and six defects older than any of it
+
+Round three found twelve more criticals. Four were inside round two's fixes;
+six predate all three rounds and were reached by digging past the diff into the
+extractors.
+
+Inside the previous round's work:
+
+- **A trait impl was counted as a type's own surface.** Rust forbids `pub fn`
+  inside `impl Trait for Type`, so every trait-impl method is filed as private —
+  and one `impl Display for Sealed` was enough to make a marker type look like
+  it had surface, discard the module holding the real subject, and refuse the
+  file for exposing nothing. Every unit error type in Rust has such an impl,
+  because `std::error::Error` requires `Display` and `Display` has no derive.
+  The committed test stayed green because its marker carried no impl.
+- **The same miscount decided which type a file was about.** A companion error
+  type gets one private method from its `Display` impl, tying it with a
+  one-public-method subject, and `max_by_key` returns the *last* maximum — so
+  the subject was whichever of the two the author wrote second.
+- **A bare acronym was exempt when checking and counted when deriving.** One
+  `docs/FAQ.md` deleted every markdown naming rule in the repository. Deriving
+  and checking have to agree on which names the style system reaches, and the
+  previous round changed only one of them.
+- **The sample-coverage guard used a top-level directory and only applied to
+  `Scope::Ext`.** A repository whose source lives under `src/` recorded
+  `["src"]`, so a rule counted in `src/components/` still refused
+  `src/hooks/`, `src/pages/` and `src/utils/`, and a `src/**/*.tsx` rule got no
+  directory check at all. The whole directory is recorded now, capped, and the
+  check applies to every scope.
+
+Older than all three rounds:
+
+- **Ruby's `def self.call` was invisible.** It parses as `singleton_method`, not
+  `method`, so a class-method service object — the `ChargeCard.call(...)` style
+  canon's own README uses as its example — had no surface at all and was
+  refused for exposing none.
+- **A Ruby base written `::ApplicationService` was refused** by a rule naming
+  `ApplicationService`. They are the same constant; the `::` only forces
+  top-level lookup, and inside a namespaced module it is the only way to reach
+  one.
+- **Python read only a bare identifier as a base**, so `class X(base.Service)`
+  and `class X(Service[Order])` both came out with no base and were then refused
+  for having none.
+- **Rust recorded whichever trait `impl` appeared first as the base**, making a
+  refusal depend on the order the author wrote the blocks. Every implemented
+  trait is kept now, and the check accepts any of them. A Rust trait is also no
+  longer enforceable as a base at all: it is a contract a type opts into, not a
+  structural parent, so a type that does not implement what its neighbours do is
+  ordinary Rust.
+- **The subject of every `PascalCase`- or `camelCase`-named file was resolved by
+  surface rather than by name**, because `to_snake(type)` was compared against
+  the stem as written — which cannot match for any JavaScript, TypeScript or PHP
+  file. Both sides are normalised now.
+- **`shape.public-arity` refused an extra method**, including the `up`/`down`
+  pair Rails requires for an irreversible migration, a Go type implementing
+  `fmt.Stringer`, and a Ruby object defining `to_s`. It advises on a larger
+  surface now and refuses only a smaller one.
+- **`Snapshot::load`, `take_touched` and the log file were unguarded reads**,
+  each hanging forever on a FIFO. `Snapshot::load` is the first read every hook
+  performs.
 
 ### Verified
 
 - Every one of the eight open issues has a check in a harness that runs against
   any build: 23 assertions, all passing, each failing on the build before this.
-- Every critical from the review has one too: 18 assertions covering four
-  frameworks' route conventions, acronyms and non-Latin names, scope-versus-
-  sample mismatches, oversized files, and both Rust attribution defects.
+- Every critical from all three review rounds has one too: 50 assertions, each
+  run against the binary from before its fix to confirm it fails there. Three
+  did not, when first written, and were rebuilt until they did.
 - 15,974 tracked files from the seventeen repositories replayed through the
   write path: 11,700 given conventions, none refused, none errored.
 - 5,946 *new* files written into those same directories — one file's content at

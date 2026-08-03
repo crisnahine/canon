@@ -68,6 +68,7 @@ fn type_facts(spec: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts> {
         public_methods: Vec::new(),
         private_methods: Vec::new(),
         superclass: embedded_type(spec, src),
+        interfaces: Vec::new(),
     })
 }
 

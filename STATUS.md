@@ -12,7 +12,7 @@ cargo fmt --all --check                    clean
 ./tests/fail-open.sh                       75/75
 ./tests/asset-coverage.sh                  8 of 8 platforms
 ./tests/injection-reaches-the-model.sh     PASS
-tests/refusal-regressions.py               33/33
+tests/refusal-regressions.py               50/50
 tests/issue-regressions.py                 23/23
 ```
 
@@ -28,7 +28,7 @@ python3 tests/replay-tracked-files.py ./target/release/canon /tmp/canon-corpus
 python3 tests/replay-new-files.py     ./target/release/canon /tmp/canon-corpus
 ```
 
-11,437 lines of Rust across five crates, of which roughly half are tests,
+11,848 lines of Rust across five crates, of which roughly half are tests,
 plus 195 lines of tree-sitter query across seven languages.
 
 ## What a pre-push review found, and why the harnesses missed it
@@ -52,23 +52,36 @@ qualifier its sample never covered, a file too large for the index refused by
 rules it never voted on, and two ways a Rust `impl` block was attributed to the
 wrong type.
 
-Every one has a check in a harness of 33 assertions, and each of those
-assertions was run against the binary from before its fix to confirm it
-actually fails there. Twelve fail on the immediately preceding commit; three
-more need the commit before that. A regression test that passes on the code it
-was written to catch is worth nothing, and two of the first batch were exactly
-that — one was saved by a stem name-match rather than by the fix it claimed to
-pin, the other by a fixture that derived no rule of the kind it tested.
+Every one has a check in a harness of 50 assertions, and each was run against
+the binary from before its fix to confirm it actually fails there. A regression
+test that passes on the code it was written to catch is worth nothing, and
+three of them were exactly that when first written — one saved by a stem
+name-match that short-circuits the path it tested, one by a fixture that
+derived no rule of the relevant kind, one by a fixture using the single
+directory layout its guard happened to cover.
 
-A second review round, told the first round's ground was covered, found seven
-more criticals. Four were in the fix for the first round's own headline defect:
-a guard that switched itself off as soon as a rule's sample spanned two
-directories, a branch that skipped that guard entirely, an acronym still
-refused everywhere except `PascalCase`, and a filter that discarded the module
-holding a file's real subject. The other three were unguarded reads — `verify`,
-`reconcile` and `.canon.toml` — each of which hangs forever on a FIFO, which is
-the single failure a fail-open harness cannot report, because there is no
-output to inspect.
+Three rounds, and the shape of them is the finding worth recording. Round one
+reviewed the original work: eight criticals. Round two was told round one's
+ground was covered and found seven more, **four of them inside round one's own
+fixes**. Round three found twelve more, **four of them inside round two's**.
+
+The recurring failure is not carelessness, it is that a fix written against one
+reproduction covers that reproduction. Round one's guard used the top-level
+directory of a rule's sample, which fixed `.github/PULL_REQUEST_TEMPLATE.md`
+and left `src/pages/` refused by a rule counted in `src/components/`. Round
+two's exemption for framework-named files was applied when checking and not
+when deriving, so one `docs/FAQ.md` deleted every markdown naming rule instead.
+Both had passing tests.
+
+Round three also reached past the fixes into the extractors and found six
+defects that predate all of this: Ruby's `def self.call` invisible, so a
+class-method service was refused for exposing nothing; Ruby's `::Base` refused
+by a rule naming the same constant; Python's `base.BaseService` and
+`BaseService[Order]` read as no base at all; Rust recording whichever trait
+`impl` came first as the base, so a refusal depended on block order; the
+subject of every `PascalCase`-named file resolved by surface rather than by
+name, because the stem was compared unnormalised; and `shape.public-arity`
+refusing the `up`/`down` pair Rails requires for an irreversible migration.
 
 ## Every open issue, reproduced rather than read
 

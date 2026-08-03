@@ -85,6 +85,23 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
     let name = field_text(class_node, "name", src)?;
     let superclass =
         child_of_kind(class_node, "class_heritage").and_then(|h| heritage_name(h, src));
+    // `implements` names contracts the class holds beside its base, and a rule
+    // stating any of them should accept a class that declares it.
+    let interfaces = child_of_kind(class_node, "class_heritage")
+        .and_then(|h| child_of_kind(h, "implements_clause"))
+        .map(|c| {
+            children_of(c)
+                .into_iter()
+                .filter(|n| {
+                    matches!(
+                        n.kind(),
+                        "type_identifier" | "generic_type" | "nested_type_identifier"
+                    )
+                })
+                .map(|n| text(n, src))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut public_methods = Vec::new();
     let mut private_methods = Vec::new();
@@ -111,7 +128,14 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         }
     }
 
-    Some(TypeFacts { name, line: line_of(class_node), public_methods, private_methods, superclass })
+    Some(TypeFacts {
+        name,
+        line: line_of(class_node),
+        public_methods,
+        private_methods,
+        superclass,
+        interfaces,
+    })
 }
 
 /// Two independent private markers, and both must be honoured.

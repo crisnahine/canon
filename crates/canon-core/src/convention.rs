@@ -188,6 +188,17 @@ pub fn enforcement_for(id: &str, confidence: Confidence, settings: &Settings) ->
     if id.ends_with(ROLLUP_SUFFIX) {
         return Enforcement::Advisory;
     }
+    // A Rust trait implementation is not a base class. Every other language
+    // canon reads has one structural parent a type either declares or does
+    // not; Rust has a set of contracts a type opts into one at a time, and a
+    // type that does not implement the trait its neighbours do is ordinary
+    // Rust rather than a departure. It is recorded as the closest analogue and
+    // stated as advice, which is honest; refusing on it is not.
+    // The id ends in the extension the rule was derived for; canon builds it,
+    // and it is always lowercase.
+    if id.starts_with("shape.base") && id.rsplit('.').next() == Some("rs") {
+        return Enforcement::Advisory;
+    }
     if settings.enforce
         && confidence.is_blocking_grade()
         && EXACT.iter().any(|kind| id.starts_with(kind))

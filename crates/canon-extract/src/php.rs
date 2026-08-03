@@ -37,6 +37,16 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
     let superclass = child_of_kind(class_node, "base_clause")
         .and_then(|b| children_of(b).into_iter().find(|c| c.kind() == "name"))
         .map(|n| text(n, src));
+    // `implements` names contracts the class holds beside its base.
+    let interfaces = child_of_kind(class_node, "class_interface_clause")
+        .map(|c| {
+            children_of(c)
+                .into_iter()
+                .filter(|n| matches!(n.kind(), "name" | "qualified_name"))
+                .map(|n| text(n, src))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut public_methods = Vec::new();
     let mut private_methods = Vec::new();
@@ -55,7 +65,14 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         }
     }
 
-    Some(TypeFacts { name, line: line_of(class_node), public_methods, private_methods, superclass })
+    Some(TypeFacts {
+        name,
+        line: line_of(class_node),
+        public_methods,
+        private_methods,
+        superclass,
+        interfaces,
+    })
 }
 
 fn is_hidden(member: tree_sitter::Node<'_>, src: &str) -> bool {

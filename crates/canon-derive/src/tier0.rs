@@ -220,7 +220,13 @@ fn nameable(entry: &FileEntry) -> bool {
 /// Shipped first for a leading underscore alone, which fixed a Rails view tree
 /// and left every file-based router refusing its own route files.
 fn is_role_marked(root: &str) -> bool {
-    naming::outside_the_style_system(root)
+    // A bare acronym belongs here for the same reason and was left out of it:
+    // the check stopped treating `FAQ` as a violation without the derivation
+    // stopping counting it, so one `docs/FAQ.md` in a directory of six
+    // `kebab-case` files silenced the naming rule for every `.md` in the
+    // repository. Deriving and checking have to agree on which names the style
+    // system reaches.
+    naming::outside_the_style_system(root) || naming::is_bare_acronym(root)
 }
 
 /// Whether a file is the kind of thing that has a test.
@@ -556,18 +562,26 @@ fn exemplar_of(members: &[&FileEntry]) -> Option<String> {
     members.iter().max_by_key(|f| (f.modified_unix, f.rel.clone())).map(|f| f.rel.clone())
 }
 
-/// Every top-level directory the sample came from, deduplicated.
+/// Every directory the sample came from, deduplicated.
 ///
-/// The repository root is the empty string, which is a directory like any
-/// other: a rule counted over files at the root speaks for the root.
+/// The whole directory, not its first segment. Keeping only the first segment
+/// left the guard inert on the ordinary layout: a repository whose source all
+/// lives under `src/` recorded `["src"]`, and a rule counted over
+/// `src/components/` then refused `src/hooks/`, `src/pages/` and `src/utils/`,
+/// none of which contributed a file.
+///
+/// The repository root is the empty string, a directory like any other.
+///
+/// Capped, because a rule over four thousand files touches hundreds of
+/// directories and the snapshot is read before every write. Past the cap the
+/// list is emptied, which the check reads as "counted too widely to restrict" —
+/// the right answer for a rule that really is repository-wide.
 fn roots_of(members: &[&FileEntry]) -> Vec<String> {
-    let mut roots: Vec<String> = members
-        .iter()
-        .map(|f| f.rel.split_once('/').map_or("", |(head, _)| head).to_string())
-        .collect();
+    const MAX_SAMPLE_DIRS: usize = 96;
+    let mut roots: Vec<String> = members.iter().map(|f| f.dir.clone()).collect();
     roots.sort();
     roots.dedup();
-    roots
+    if roots.len() > MAX_SAMPLE_DIRS { Vec::new() } else { roots }
 }
 
 fn evidence_of(members: &[&FileEntry]) -> Vec<Evidence> {

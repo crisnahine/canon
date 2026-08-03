@@ -202,16 +202,28 @@ fn naming_speaks_for(rel: &str, convention: &Convention) -> bool {
         return false;
     }
 
-    // A repository-wide rule may refuse anywhere only if its evidence shows it
-    // really is repository-wide. Counted inside one top-level directory, it
-    // speaks for that directory.
-    if matches!(convention.scope, canon_core::Scope::Ext(_)) {
-        let top = |path: &str| path.split_once('/').map_or("", |(head, _)| head).to_string();
-        if !convention.sample_roots.iter().any(|t| *t == top(rel)) {
-            return false;
-        }
+    // A rule may refuse a file only where it was counted. An empty list means
+    // the sample was too wide to record, which is what a genuinely
+    // repository-wide rule looks like; anything else has to cover the file's
+    // own directory or an ancestor of it.
+    //
+    // Applied to every scope, not only `Scope::Ext`. Gating it on `Ext` left a
+    // `src/**/*.tsx` rule counted entirely in `src/components/` refusing
+    // `src/pages/` and `src/hooks/`, because the scope alone was taken as
+    // proof the sample covered them.
+    if convention.sample_roots.is_empty() {
+        return true;
     }
-    true
+    let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+    convention.sample_roots.iter().any(|counted| counted == dir || is_below(dir, counted))
+}
+
+/// Whether `dir` sits inside `ancestor`, which may be the repository root.
+fn is_below(dir: &str, ancestor: &str) -> bool {
+    if ancestor.is_empty() {
+        return !dir.is_empty();
+    }
+    dir.strip_prefix(ancestor).is_some_and(|rest| rest.starts_with('/'))
 }
 
 const IMPORT_PREFIX: &str = "Files here import from ";
@@ -313,8 +325,18 @@ fn check_shape(
     // from, and judging them reports correct files as broken.
     let Some(t) = subject else { return out };
 
+    // Advising on any arity is useful; refusing on a larger one is not. The
+    // rule is derived over types with exactly this many methods, and a type
+    // that carries one more is routinely legitimate: a Rails migration needs
+    // `up` and `down` for an irreversible change, a Go type implements
+    // `fmt.Stringer`, a Ruby object defines `to_s`, a TypeScript class exposes
+    // a getter. Each of those was a hard refusal, and the advice attached to it
+    // told the author to delete a method the language or framework requires.
+    let arity_may_refuse =
+        strictness == Strictness::Advisory || t.public_arity() < expected_arity(convention);
     if let Some(expected) = trailing_count(&convention.statement, "expose exactly ")
         && t.public_arity() != expected
+        && arity_may_refuse
     {
         out.push(Violation {
             convention_id: convention.id.clone(),
@@ -358,7 +380,11 @@ fn check_shape(
 
     if let Some(expected) = backticked(&convention.statement, "Types here inherit from ") {
         {
+            // A type may declare several contracts, and which one landed in
+            // `superclass` is decided by source order. Accepting any of them
+            // stops a refusal from depending on where the author put a block.
             match &t.superclass {
+                _ if t.interfaces.contains(&expected) => {}
                 Some(actual) if actual == &expected => {}
                 Some(actual) => out.push(Violation {
                     convention_id: convention.id.clone(),
@@ -379,6 +405,11 @@ fn check_shape(
     }
 
     out
+}
+
+/// The arity a statement asks for, or zero when it asks for none.
+fn expected_arity(convention: &Convention) -> usize {
+    trailing_count(&convention.statement, "expose exactly ").unwrap_or(0)
 }
 
 /// The integer immediately after `prefix`, e.g. `1` in "expose exactly 1 ...".

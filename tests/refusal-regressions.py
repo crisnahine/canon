@@ -183,6 +183,136 @@ except subprocess.TimeoutExpired:
 os.remove(cfg)
 shutil.rmtree(root); shutil.rmtree(data)
 
+# --- round three: what a third review found in the second round's fixes ----
+
+# 1+2. Rust: trait-impl methods are not the type's own surface
+files = {f"src/handlers/{n}.rs":
+         f"use std::fmt;\npub struct {n.title()};\nimpl {n.title()} {{ pub fn call(&self) {{}} }}\n"
+         f"impl fmt::Display for {n.title()} {{ fn fmt(&self) {{}} }}\n"
+         for n in ["alpha","beta","gamma","delta","epsilon","zeta"]}
+root, data = mk(files, "rust-surface")
+d, w = inject(root, data, "src/handlers/theta.rs",
+  "use std::fmt;\npub struct Sealed;\nimpl fmt::Display for Sealed { fn fmt(&self) {} }\n"
+  "pub mod inner { use std::fmt; pub struct Theta; impl Theta { pub fn call(&self) {} }\n"
+  "impl fmt::Display for Theta { fn fmt(&self) {} } }\n")
+check("a marker with a Display impl does not hide the module with the surface", not d, w[:150])
+d, w = inject(root, data, "src/handlers/client.rs",
+  "use std::fmt;\n#[derive(Debug)] pub enum Error { NotFound }\n"
+  "impl fmt::Display for Error { fn fmt(&self) {} }\nimpl std::error::Error for Error {}\n"
+  "pub mod client { pub struct Client; impl Client { pub fn call(&self) {} } }\n")
+check("a unit error type with the required impls does not become the subject", not d, w[:150])
+d, w = inject(root, data, "src/handlers/iota.rs",
+  "use std::fmt;\npub struct Iota;\nimpl Iota { pub fn call(&self) {} }\n"
+  "impl fmt::Display for Iota { fn fmt(&self) {} }\n"
+  "mod helper { pub struct Big; impl Big { pub fn a(&self){} pub fn b(&self){} } }\n")
+check("a private helper module is still not the subject", not d, w[:150])
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 3. a bare acronym must not delete the naming rule when deriving
+files = {f"docs/{n}.md": "# x\n" for n in
+         ["getting-started","api-reference","quick-start","style-guide","release-notes","tuning-guide"]}
+files["docs/FAQ.md"] = "# x\n"
+root, data = mk(files, "acronym-derive")
+out = subprocess.run([BIN,"explain","docs/"], cwd=root, capture_output=True, text=True,
+                     env={**os.environ,"CANON_DATA_DIR":data}).stdout
+check("one acronym does not delete the naming rule", "kebab-case" in out, out[:120])
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 4. TS/JS: a companion class declared second must not become the subject
+files = {f"src/components/{n}.tsx": f"export class {n} extends BaseComponent {{ render(): void {{}} }}\n"
+         for n in ["UserCard","OrderList","PayoutForm","LoginPanel","NavBar","SideMenu"]}
+root, data = mk(files, "companion")
+d, w = inject(root, data, "src/components/PriceTag.tsx",
+  "export class PriceTag extends BaseComponent { render(): void {} }\n"
+  "export class PriceTagStore extends Store { update(): void {} }\n")
+check("a companion class declared second is not the subject", not d, w[:150])
+d, _ = inject(root, data, "src/components/BadOne.tsx",
+  "export class BadOne extends Other { nope(): void {} }\n")
+check("a genuine base violation is still refused", d)
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 5. sample coverage below the top level, and for a DirExt scope
+files = {f"src/components/{n}.tsx": "export const X = 1;\n" for n in
+         ["UserCard","OrderList","PayoutForm","LoginPanel","NavBar","SideMenu"]}
+files.update({f"web/{n}.tsx": "export const X = 1;\n" for n in
+              ["home-page","about-page","help-page","legal-page","terms-page","press-page"]})
+root, data = mk(files, "subdirs")
+for rel in ["src/hooks/useToggle.tsx","src/pages/about-us.tsx","src/utils/date_fmt.tsx"]:
+    d, w = inject(root, data, rel, "export const X = 1;\n")
+    check(f"a sample in src/components does not govern {rel}", not d, w[:130])
+d, _ = inject(root, data, "src/components/bad_name.tsx", "export const X = 1;\n")
+check("and still refuses inside the directory it was counted in", d)
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 6. Python: a dotted or generic base class
+files = {f"app/services/{n}.py":
+         f"from app import base\n\n\nclass {''.join(w.title() for w in n.split('_'))}(base.BaseService):\n"
+         f"    def execute(self):\n        pass\n"
+         for n in ["charge_card","refund_payment","settle_batch","send_receipt","void_invoice","apply_credit"]}
+root, data = mk(files, "py-base")
+out = subprocess.run([BIN,"explain","app/services/"], cwd=root, capture_output=True, text=True,
+                     env={**os.environ,"CANON_DATA_DIR":data}).stdout
+check("a dotted base class is read as the base", "BaseService" in out, out[:150])
+d, w = inject(root, data, "app/services/new_thing.py",
+  "from app import base\n\n\nclass NewThing(base.BaseService[Order]):\n    def execute(self):\n        pass\n")
+check("a generic base class is not refused as having none", not d, w[:150])
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 7. Rust: the order of impl blocks must not decide a refusal
+files = {f"src/net/{n}.rs":
+         f"use std::fmt;\npub struct {n.title()};\nimpl fmt::Display for {n.title()} {{ fn fmt(&self) {{}} }}\n"
+         f"impl {n.title()} {{ pub fn call(&self) {{}} }}\n"
+         for n in ["alpha","beta","gamma","delta","epsilon","zeta"]}
+root, data = mk(files, "impl-order")
+d, w = inject(root, data, "src/net/theta.rs",
+  "use std::fmt;\npub struct Theta;\nimpl std::error::Error for Theta {}\n"
+  "impl fmt::Display for Theta { fn fmt(&self) {} }\nimpl Theta { pub fn call(&self) {} }\n")
+check("impl order does not decide the base check", not d, w[:150])
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 8+9. Ruby: def self.call, and a rooted superclass
+files = {f"app/services/{n}.rb":
+         f"class {''.join(w.title() for w in n.split('_'))} < ApplicationService\n"
+         f"  def self.call(x)\n    new(x).call\n  end\n\n  def call\n    run\n  end\n\n"
+         f"  private\n\n  def run; end\nend\n"
+         for n in ["charge_card","refund_payment","settle_batch","send_receipt","void_invoice","apply_credit"]}
+root, data = mk(files, "ruby-self")
+out = subprocess.run([BIN,"explain","app/services/"], cwd=root, capture_output=True, text=True,
+                     env={**os.environ,"CANON_DATA_DIR":data}).stdout
+check("a class-method service derives a shape rule", "ApplicationService" in out, out[:150])
+d, w = inject(root, data, "app/services/new_thing.rb",
+  "module Billing\n  class NewThing < ::ApplicationService\n    def self.call(x)\n      new(x).call\n    end\n\n"
+  "    def call\n      run\n    end\n\n    private\n\n    def run; end\n  end\nend\n")
+check("a rooted ::Base is not refused by a rule naming the same class", not d, w[:150])
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 10. an extra method is advice, not a refusal
+files = {f"db/migrate/2024010{i}_add_{n}.rb":
+         f"class Add{n.title()} < ActiveRecord::Migration[7.1]\n  def change\n  end\nend\n"
+         for i, n in enumerate(["one","two","three","four","five","six"], start=1)}
+root, data = mk(files, "migration")
+d, w = inject(root, data, "db/migrate/20240707_backfill_totals.rb",
+  "class BackfillTotals < ActiveRecord::Migration[7.1]\n  def up\n  end\n\n"
+  "  def down\n    raise ActiveRecord::IrreversibleMigration\n  end\nend\n")
+check("an up/down migration is not refused", not d, w[:150])
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 11+12. canon's own reads must not hang
+files = {f"app/services/{n}.rb": f"class {n.title()} < ApplicationService\n  def call; end\nend\n"
+         for n in ["alpha","beta","gamma","delta","epsilon","zeta"]}
+root, data = mk(files, "state-hazards")
+snap = [f for f in os.listdir(os.path.join(data,"snapshots"))]
+os.remove(os.path.join(data,"snapshots",snap[0])); os.mkfifo(os.path.join(data,"snapshots",snap[0]))
+try:
+    d, _ = inject(root, data, "app/services/x.rb", "class X; end\n")
+    check("a FIFO at the snapshot path does not hang inject", True)
+except subprocess.TimeoutExpired:
+    check("a FIFO at the snapshot path does not hang inject", False, "timed out")
+os.remove(os.path.join(data,"snapshots",snap[0]))
+os.makedirs(os.path.join(data,"sessions"), exist_ok=True)
+for f in os.listdir(os.path.join(data,"sessions")): os.remove(os.path.join(data,"sessions",f))
+shutil.rmtree(root); shutil.rmtree(data)
+
 ok = sum(1 for _, o, _ in R if o)
 for n, o, d in R:
     if not o: print(f"  FAIL {n}\n       {d}")

@@ -73,6 +73,12 @@ pub struct TypeFacts {
     /// Base class, embedded type, or implemented trait, when the language has
     /// such a thing and the declaration names one.
     pub superclass: Option<String>,
+    /// Every contract the type declares, when the language lets it declare more
+    /// than one: Rust's trait impls, PHP's `implements`, TypeScript's
+    /// `implements`. `superclass` is one of these, chosen for the statement; a
+    /// check that only compared against that one refused a file for the order
+    /// its `impl` blocks were written in.
+    pub interfaces: Vec<String>,
 }
 
 impl TypeFacts {
@@ -213,6 +219,7 @@ fn extract_inner(
     for t in &mut facts.types {
         dedupe(&mut t.public_methods);
         dedupe(&mut t.private_methods);
+        dedupe(&mut t.interfaces);
     }
 
     if with_query {
@@ -333,6 +340,7 @@ pub(crate) mod tests {
             public_methods: vec!["call".into()],
             private_methods: vec!["a".into(), "b".into()],
             superclass: None,
+            interfaces: Vec::new(),
         };
         assert_eq!(t.public_arity(), 1);
     }

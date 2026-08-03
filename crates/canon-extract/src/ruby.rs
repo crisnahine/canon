@@ -51,7 +51,7 @@ fn collect(root: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
                         stack.push((body, true));
                     }
                 }
-                "method" => {
+                "method" | "singleton_method" => {
                     if inside_type {
                         continue;
                     }
@@ -82,8 +82,13 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
     let superclass = class_node
         .child_by_field_name("superclass")
         .and_then(|s| children_of(s).into_iter().find(tree_sitter::Node::is_named))
-        .map(|n| text(n, src));
+        // `::ApplicationService` and `ApplicationService` name the same
+        // constant — the `::` only forces top-level lookup, and inside a
+        // namespaced module it is the only way to reach one. Compared as
+        // written, the rooted form was refused by a rule stating the same class.
+        .map(|n| text(n, src).trim_start_matches("::").to_string());
 
+    let interfaces = Vec::new();
     let mut public_methods = Vec::new();
     let mut private_methods = Vec::new();
     let mut section = Section::Public;
@@ -105,12 +110,31 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
                         private_methods.push(target);
                     }
                 }
+                // `def self.call` is a `singleton_method`, and it is the shape a
+                // whole style of service object takes — `ChargeCard.call(...)`.
+                // Matching only `method` left those classes with no surface at
+                // all, and an arity rule then refused them for exposing none.
+                // Ruby marks a class method private with
+                // `private_class_method`, not with the `private` section, so a
+                // singleton method is public here.
                 "method" => {
                     if let Some(n) = child_of_kind(child, "identifier").map(|n| text(n, src)) {
                         match section {
                             Section::Public => public_methods.push(n),
                             Section::Private => private_methods.push(n),
                         }
+                    }
+                }
+                "singleton_method" => {
+                    if let Some(n) = children_of(child)
+                        .into_iter()
+                        .filter(|c| c.kind() == "identifier")
+                        .nth(1)
+                        .or_else(|| child_of_kind(child, "identifier"))
+                        .map(|n| text(n, src))
+                        && n != "self"
+                    {
+                        public_methods.push(n);
                     }
                 }
                 _ => {}
@@ -121,7 +145,14 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
     // `private :foo` written below the definition demotes it after the fact.
     public_methods.retain(|m| !private_methods.contains(m));
 
-    Some(TypeFacts { name, line: line_of(class_node), public_methods, private_methods, superclass })
+    Some(TypeFacts {
+        name,
+        line: line_of(class_node),
+        public_methods,
+        private_methods,
+        superclass,
+        interfaces,
+    })
 }
 
 fn visibility_call(node: tree_sitter::Node<'_>, src: &str) -> Option<(String, String)> {
