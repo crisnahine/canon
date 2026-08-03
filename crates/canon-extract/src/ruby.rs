@@ -75,7 +75,7 @@ fn collect(root: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
 fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts> {
     // Read the named fields rather than looking for a `constant` child. A
     // compound name parses as `scope_resolution`, not `constant`, so matching
-    // on kind silently skipped every `class Hubspot::EnrollSequence` in a real
+    // on kind silently skipped every `class Billing::ChargeCard` in a real
     // Rails codebase and captured only the small error class nested inside it.
     // The result was a confident, wrong claim that services inherit from
     // `StandardError`.
@@ -197,23 +197,22 @@ mod tests {
         // The dominant Rails service-object shape. Matching on node kind found
         // `constant` and missed `scope_resolution`, so these files reported no
         // main class at all.
-        let facts =
-            f("class Hubspot::EnrollSequence < ActiveInteraction::Base\n  def execute; end\nend\n");
-        assert_eq!(facts.types[0].name, "Hubspot::EnrollSequence");
-        assert_eq!(facts.types[0].superclass.as_deref(), Some("ActiveInteraction::Base"));
+        let facts = f("class Billing::ChargeCard < ApplicationService\n  def execute; end\nend\n");
+        assert_eq!(facts.types[0].name, "Billing::ChargeCard");
+        assert_eq!(facts.types[0].superclass.as_deref(), Some("ApplicationService"));
         assert_eq!(facts.types[0].public_methods, vec!["execute"]);
     }
 
     #[test]
     fn a_nested_error_class_does_not_replace_the_subject() {
-        // Verbatim shape of app/services/hubspot/enroll_sequence.rb: the real
-        // class plus a small error type declared inside it.
+        // The shape that broke this: a namespaced service with a small error
+        // type declared inside it, which is ordinary in a Rails codebase.
         let facts = f(
-            "class Hubspot::EnrollSequence < ActiveInteraction::Base\n  def execute; end\n\n  class SenderConfigurationError < StandardError; end\nend\n",
+            "class Billing::ChargeCard < ApplicationService\n  def execute; end\n\n  class ChargeDeclinedError < StandardError; end\nend\n",
         );
         assert_eq!(facts.types.len(), 2);
-        assert_eq!(facts.types[0].name, "Hubspot::EnrollSequence");
-        assert_eq!(facts.types[1].name, "SenderConfigurationError");
+        assert_eq!(facts.types[0].name, "Billing::ChargeCard");
+        assert_eq!(facts.types[1].name, "ChargeDeclinedError");
     }
 
     #[test]

@@ -31,22 +31,24 @@ the code the moment they're written.
 
 At session start it reads the files git tracks, parses them with tree-sitter,
 and counts structural facts. Then, immediately before Claude writes
-`app/services/hubspot/sync_deal.rb`, it says this:
+`app/services/billing/refund_payment.rb`, it says this:
 
 ```
 Conventions for app/services/**/*.rb, derived from this repository:
 
 - That public method is named `execute`. (1241/1248, 0.99)
-- Types here inherit from `ActiveInteraction::Base`. (1268/1550, 0.82)
+- Types here inherit from `ApplicationService`. (1268/1550, 0.82)
 - Types here expose exactly 1 public method. (1248/1550, 0.80)
 - Files here are named in snake_case. (2399/2399, 1.00)
 - Test files are named `*_spec.rb`. (1321/1462, 0.90)
 
-Canonical example, most recently modified: app/services/shopify/oauth/merchant_login.rb
+Canonical example, most recently modified: app/services/billing/settle_batch.rb
 ```
 
-That is real output from a real 9,545-file Rails repository, not an
-illustration. Nothing about the frontend, nothing about migrations: only what
+Those counts are real, measured on a 9,545-file Rails repository. The class
+and file names are changed, because that repository is not mine to publish; the
+numbers, the confidences and the shape of the block are exactly what it
+produced. Nothing about the frontend, nothing about migrations: only what
 applies to this file, right now.
 
 After the write it re-parses the result and structurally diffs it against those
@@ -101,7 +103,7 @@ Three reasons, in increasing order of importance:
 A workspace root is often not a repository itself:
 
 ```
-empire-flippers/          <- you open the editor here; not a git repo
+workspace/          <- you open the editor here; not a git repo
 ├── api/                  <- its own checkout, Rails
 ├── client/               <- its own checkout, TypeScript/React
 └── wordpress/            <- its own checkout, PHP

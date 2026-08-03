@@ -51,10 +51,11 @@ inject   median 2.6 ms   p95 3.6 ms   max 6.1 ms      (budget 50 ms)
 It is a single file read and a filter over a 52 KB snapshot. No tree walk, no
 parsing, no subprocess.
 
-What it derived for the Rails repository, unedited:
+What it derived for the Rails repository. Counts and confidences are as
+measured; class and file names are changed, because that repository is private:
 
 ```
-app/services       inherit from `ActiveInteraction::Base`  (1268/1550, 0.82)
+app/services       inherit from `ApplicationService`  (1268/1550, 0.82)
 app/services       expose exactly 1 public method          (1248/1550, 0.80)
 app/services       that method is named `execute`          (1241/1248, 0.99)
 app/workers        that method is named `perform`          (481/481,   1.00)
@@ -64,7 +65,7 @@ repository-wide    test files are named `*_spec.rb`        (1321/1462, 0.90)
 ```
 
 Those are correct, and none of them are written down anywhere in that
-repository.
+repository. That is the point: they were derived, not read.
 
 ## Four defects the real repositories found that fixtures did not
 
@@ -76,10 +77,10 @@ hand-maintained exclude list keeps up with a working tree; the ignore rules the
 team already wrote do. Now the file list comes from `git ls-files`, falling
 back to the walk when there is no git. Indexing went to 2.4 s.
 
-**2. `class Hubspot::EnrollSequence` was invisible to the Ruby extractor.** A
+**2. `class Billing::ChargeCard` was invisible to the Ruby extractor.** A
 compound constant parses as `scope_resolution`, not `constant`, and the
 extractor matched on node kind. So it skipped the real class in every namespaced
-service and captured only the small `class SenderConfigurationError <
+service and captured only the small `class ChargeDeclinedError <
 StandardError` nested inside, then reported with 0.95 confidence that services
 inherit from `StandardError`. It now reads the `name` and `superclass` fields
 instead of guessing at node kinds.
