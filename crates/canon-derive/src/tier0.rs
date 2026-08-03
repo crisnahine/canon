@@ -30,6 +30,65 @@ pub(crate) fn derive(files: &[FileEntry], settings: &Settings) -> Vec<Convention
     out
 }
 
+/// Extensions whose names no model will ever choose.
+///
+/// A naming rule over 2,912 `.jpg` files is true and useless: it takes a slot
+/// in a 1,500-character budget from a rule that would change the output. The
+/// list is a deny-list rather than an allow-list of code extensions, because
+/// Tier 0 is supposed to work on any text repository, including one written in
+/// a language canon has never heard of.
+const ASSET_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "ico", "bmp", "tiff", "pdf", "psd", "ai",
+    "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "wav", "ogg", "webm", "mov", "avi", "zip",
+    "gz", "tar", "bz2", "7z", "rar", "jar", "war", "so", "dylib", "dll", "exe", "bin", "wasm",
+    "class", "pyc", "o", "a", "lib", "map", "lock", "min",
+];
+
+/// File names that describe their role rather than following a convention.
+///
+/// Five of these at a repository root derived "files here are named in
+/// `SCREAMING_SNAKE_CASE`" for every `.md` in the project. The inference is
+/// arithmetically correct and practically wrong: asked for a new document, a
+/// model following it produces `MY_NEW_DOC.md`.
+const CONVENTIONAL_NAMES: &[&str] = &[
+    "readme",
+    "changelog",
+    "license",
+    "licence",
+    "contributing",
+    "code_of_conduct",
+    "security",
+    "authors",
+    "notice",
+    "makefile",
+    "dockerfile",
+    "rakefile",
+    "gemfile",
+    "procfile",
+    "vagrantfile",
+    "brewfile",
+    "justfile",
+    "todo",
+    "install",
+    "upgrading",
+    "history",
+    "news",
+    "copying",
+    "version",
+    "owners",
+    "codeowners",
+    "maintainers",
+    "support",
+    "governance",
+    "roadmap",
+];
+
+/// Whether a file may contribute to a naming rule.
+fn nameable(entry: &FileEntry) -> bool {
+    !ASSET_EXTENSIONS.contains(&entry.ext.as_str())
+        && !CONVENTIONAL_NAMES.contains(&entry.stem.to_ascii_lowercase().as_str())
+}
+
 /// Every `(directory prefix, extension)` group a file belongs to.
 fn group_keys(entry: &FileEntry) -> Vec<String> {
     if entry.ext.is_empty() {
@@ -50,7 +109,7 @@ fn group_keys(entry: &FileEntry) -> Vec<String> {
 /// "Files in `app/services/` are named in `snake_case`."
 fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
     let mut groups: HashMap<(String, String), Vec<&FileEntry>> = HashMap::new();
-    for f in files.iter().filter(|f| !is_test(f)) {
+    for f in files.iter().filter(|f| !is_test(f) && nameable(f)) {
         for dir in group_keys(f) {
             groups.entry((dir, f.ext.clone())).or_default().push(f);
         }
@@ -79,7 +138,7 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
             total: members.len(),
             exemplar: exemplar_of(&members),
             evidence: evidence_of(&members),
-            enforcement: Enforcement::Advisory,
+            enforcement: crate::semantic::enforcement_for("naming", confidence, settings),
         });
     }
     out

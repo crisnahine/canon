@@ -32,48 +32,23 @@ use crate::walk::FileEntry;
 /// its single public method are all exact. Naming style is not: a single-word
 /// file name is compatible with three styles at once. "Files here call `X`" is
 /// not: a new file may legitimately not need that collaborator yet.
-fn enforcement_for(kind: &str, confidence: Confidence) -> Enforcement {
-    const EXACT: &[&str] = &["shape.public-arity", "shape.entrypoint", "shape.base"];
-    if confidence.is_blocking_grade() && EXACT.contains(&kind) {
+pub(crate) fn enforcement_for(
+    kind: &str,
+    confidence: Confidence,
+    settings: &Settings,
+) -> Enforcement {
+    /// Checks that cannot be wrong about a legitimate file.
+    ///
+    /// `naming` is the safest of them: a string comparison on the path, with
+    /// no parsing, no language extractor, and no question about which type in
+    /// the file is the subject. The shape checks read one resolved subject,
+    /// which is only true since they stopped judging every declared type.
+    const EXACT: &[&str] = &["naming", "shape.public-arity", "shape.entrypoint", "shape.base"];
+    if settings.enforce && confidence.is_blocking_grade() && EXACT.contains(&kind) {
         Enforcement::Blocking
     } else {
         Enforcement::Advisory
     }
-}
-
-/// The type a file is *about*.
-///
-/// Ruby files routinely declare a small `class SomethingError < StandardError`
-/// beside the real class, and TypeScript files declare prop interfaces beside
-/// the component. Counting every declared type lets those auxiliaries outvote
-/// the subject: pointed at a real Rails repository, treating them equally
-/// produced "types here inherit from `StandardError`" across the whole
-/// services tree, which is true of the error classes and false of every
-/// service in it.
-///
-/// Resolution order: the type whose name matches the file name, then the one
-/// with the largest surface, then the first declared.
-fn primary_type<'f>(facts: &'f FileFacts, stem: &str) -> Option<&'f canon_extract::TypeFacts> {
-    facts.types.iter().find(|t| to_snake(&t.name) == stem).or_else(|| {
-        facts.types.iter().max_by_key(|t| t.public_methods.len() + t.private_methods.len())
-    })
-}
-
-/// `CreateEnrolment` and `Enrolments::Create` both reduce toward a file stem.
-fn to_snake(name: &str) -> String {
-    let last = name.rsplit("::").next().unwrap_or(name);
-    let mut out = String::with_capacity(last.len() + 4);
-    for (i, c) in last.chars().enumerate() {
-        if c.is_ascii_uppercase() {
-            if i != 0 {
-                out.push('_');
-            }
-            out.push(c.to_ascii_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Facts for one file, tagged with where it lives and how much it counts.
@@ -91,7 +66,7 @@ pub(crate) struct FactSet {
 impl FactSet {
     /// The type this file is about, if it declares one.
     fn subject(&self) -> Option<&canon_extract::TypeFacts> {
-        primary_type(&self.facts, &self.stem)
+        crate::subject::primary_type(&self.facts, &self.stem)
     }
 }
 
@@ -245,7 +220,7 @@ fn public_arity(
         total: observations.len(),
         exemplar: exemplar(&observations, &arity),
         evidence: evidence(&observations, &arity),
-        enforcement: enforcement_for("shape.public-arity", confidence),
+        enforcement: enforcement_for("shape.public-arity", confidence, settings),
     })
 }
 
@@ -281,7 +256,7 @@ fn entrypoint_name(
         total: observations.len(),
         exemplar: exemplar(&observations, &name),
         evidence: evidence(&observations, &name),
-        enforcement: enforcement_for("shape.entrypoint", confidence),
+        enforcement: enforcement_for("shape.entrypoint", confidence, settings),
     })
 }
 
@@ -311,7 +286,7 @@ fn base_class(
         total: observations.len(),
         exemplar: exemplar(&observations, &winner),
         evidence: evidence(&observations, &winner),
-        enforcement: enforcement_for("shape.base", confidence),
+        enforcement: enforcement_for("shape.base", confidence, settings),
     })
 }
 

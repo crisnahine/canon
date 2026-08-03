@@ -47,8 +47,12 @@ pub fn verify_source(rel: &str, source: &str, conventions: &[Convention]) -> Vec
         .and_then(|l| canon_extract::extract(l, source, rel).ok());
     let Some(facts) = facts else { return out };
 
+    // Resolved once, the same way deriving resolves it, so the two halves
+    // cannot disagree about which type a convention is about.
+    let subject = crate::subject::primary_type(&facts, crate::subject::stem_of(rel));
+
     for convention in &applicable {
-        out.extend(check_shape(&facts, convention));
+        out.extend(check_shape(&facts, subject, convention));
     }
     out
 }
@@ -57,16 +61,11 @@ fn extension_of(rel: &str) -> Option<&str> {
     rel.rsplit_once('/').map_or(rel, |(_, name)| name).rsplit_once('.').map(|(_, e)| e)
 }
 
-fn stem_of(rel: &str) -> &str {
-    let name = rel.rsplit_once('/').map_or(rel, |(_, n)| n);
-    name.rsplit_once('.').map_or(name, |(s, _)| s)
-}
-
 fn check_naming(rel: &str, convention: &Convention) -> Option<Violation> {
     let expected = convention.id.starts_with("naming.").then(|| {
         naming::Style::ALL.iter().copied().find(|s| convention.statement.contains(s.label()))
     })??;
-    let stem = stem_of(rel);
+    let stem = crate::subject::stem_of(rel);
     if naming::is_compatible(stem, expected) {
         return None;
     }
@@ -81,47 +80,75 @@ fn check_naming(rel: &str, convention: &Convention) -> Option<Violation> {
     })
 }
 
-fn check_shape(facts: &FileFacts, convention: &Convention) -> Vec<Violation> {
+fn check_shape(
+    facts: &FileFacts,
+    subject: Option<&canon_extract::TypeFacts>,
+    convention: &Convention,
+) -> Vec<Violation> {
     let evidence = format!("{}/{}", convention.agreeing, convention.total);
     let mut out = Vec::new();
 
-    if let Some(expected) = trailing_count(&convention.statement, "expose exactly ") {
-        for t in &facts.types {
-            if t.public_arity() != expected {
-                out.push(Violation {
-                    convention_id: convention.id.clone(),
-                    message: format!(
-                        "`{}` exposes {} public method(s); types here expose {expected} ({evidence}): {}",
-                        t.name,
-                        t.public_arity(),
-                        t.public_methods.join(", ")
-                    ),
-                });
-            }
+    if let Some(expected) = trailing_count(&convention.statement, "export exactly ") {
+        // Only meaningful for a module with no types, which is how the rule
+        // was derived. A file that introduces a class is a different shape,
+        // not a violation of this one.
+        if facts.types.is_empty() && facts.free_functions.len() != expected {
+            out.push(Violation {
+                convention_id: convention.id.clone(),
+                message: format!(
+                    "this file exports {} function(s); files here export {expected} ({evidence}): {}",
+                    facts.free_functions.len(),
+                    facts.free_functions.join(", ")
+                ),
+            });
         }
     }
 
-    if let Some(expected) = backticked(&convention.statement, "That public method is named ") {
-        for t in &facts.types {
-            if t.public_arity() != 1 {
-                continue;
-            }
-            if let Some(actual) = t.public_methods.first()
-                && actual != &expected
-            {
-                out.push(Violation {
-                        convention_id: convention.id.clone(),
-                        message: format!(
-                            "`{}` exposes `{actual}`; the entrypoint here is named `{expected}` ({evidence})",
-                            t.name
-                        ),
-                    });
-            }
-        }
+    // The subject, not every declared type. A namespace module and a small
+    // error class beside the real one are not what the convention was derived
+    // from, and judging them reports correct files as broken.
+    let Some(t) = subject else { return out };
+
+    if let Some(expected) = trailing_count(&convention.statement, "expose exactly ")
+        && t.public_arity() != expected
+    {
+        out.push(Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "`{}` exposes {} public method(s); types here expose {expected} ({evidence}): {}",
+                t.name,
+                t.public_arity(),
+                t.public_methods.join(", ")
+            ),
+        });
+    }
+
+    // Whatever the arity. Gating this on a single public method withheld the
+    // rule from exactly the files that broke it hardest: a type with `up` and
+    // `down` was told its count was wrong and never told the expected name,
+    // which is two round trips to fix one file.
+    if let Some(expected) = backticked(&convention.statement, "That public method is named ")
+        && !t.public_methods.is_empty()
+        && !t.public_methods.contains(&expected)
+    {
+        let message = if t.public_arity() == 1 {
+            format!(
+                "`{}` exposes `{}`; the entrypoint here is named `{expected}` ({evidence})",
+                t.name,
+                t.public_methods.first().map_or("", String::as_str)
+            )
+        } else {
+            format!(
+                "`{}` exposes {} but not `{expected}`; the entrypoint here is named `{expected}` ({evidence})",
+                t.name,
+                t.public_methods.join(", ")
+            )
+        };
+        out.push(Violation { convention_id: convention.id.clone(), message });
     }
 
     if let Some(expected) = backticked(&convention.statement, "Types here inherit from ") {
-        for t in &facts.types {
+        {
             match &t.superclass {
                 Some(actual) if actual == &expected => {}
                 Some(actual) => out.push(Violation {
@@ -139,22 +166,6 @@ fn check_shape(facts: &FileFacts, convention: &Convention) -> Vec<Violation> {
                     ),
                 }),
             }
-        }
-    }
-
-    if let Some(expected) = trailing_count(&convention.statement, "export exactly ") {
-        // Only meaningful for a module with no types, which is how the rule
-        // was derived. A file that introduces a class is a different shape,
-        // not a violation of this one.
-        if facts.types.is_empty() && facts.free_functions.len() != expected {
-            out.push(Violation {
-                convention_id: convention.id.clone(),
-                message: format!(
-                    "this file exports {} function(s); files here export {expected} ({evidence}): {}",
-                    facts.free_functions.len(),
-                    facts.free_functions.join(", ")
-                ),
-            });
         }
     }
 
@@ -256,6 +267,58 @@ mod tests {
 
         let wrong = verify_source("app/services/a.rb", "class A < Other\nend\n", &convs);
         assert!(wrong[0].message.contains("inherits from `Other`"));
+    }
+
+    #[test]
+    fn a_namespace_module_is_not_reported_as_a_violation() {
+        // Issue #1. This file agrees with every convention in its scope. The
+        // old check judged `Billing` as well and reported two violations, and
+        // once those rules reached total agreement it refused the write.
+        let convs = vec![
+            conv("shape.public-arity.app.services.rb", "Types here expose exactly 1 public method"),
+            conv("shape.base.app.services.rb", "Types here inherit from `ApplicationService`"),
+        ];
+        let source = "module Billing\n  class ApplyVariance < ApplicationService\n    def call; end\n  end\nend\n";
+        let violations = verify_source("app/services/apply_variance.rb", source, &convs);
+        assert!(violations.is_empty(), "correct file reported as broken: {violations:#?}");
+    }
+
+    #[test]
+    fn an_error_class_beside_the_subject_is_not_judged() {
+        let convs = vec![conv(
+            "shape.public-arity.app.services.rb",
+            "Types here expose exactly 1 public method",
+        )];
+        let source = "class ChargeCard < Base\n  def call; end\n\n  class DeclinedError < StandardError; end\nend\n";
+        let violations = verify_source("app/services/charge_card.rb", source, &convs);
+        assert!(violations.is_empty(), "got {violations:#?}");
+    }
+
+    #[test]
+    fn the_entrypoint_name_is_reported_even_when_the_arity_is_wrong() {
+        // Issue #2. The old gate withheld the entrypoint rule from exactly the
+        // files that broke it hardest, costing two round trips to fix one file.
+        let convs = vec![
+            conv("shape.public-arity.db.rb", "Types here expose exactly 1 public method"),
+            conv("shape.entrypoint.db.rb", "That public method is named `change`"),
+        ];
+        let source = "class AddThing\n  def up; end\n  def down; end\nend\n";
+        let violations = verify_source("app/services/add_thing.rb", source, &convs);
+
+        let text = violations.iter().map(|v| v.message.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(text.contains("exposes 2 public method"), "got {text}");
+        assert!(text.contains("`change`"), "the entrypoint rule was withheld: {text}");
+    }
+
+    #[test]
+    fn a_type_that_has_the_expected_entrypoint_among_others_is_not_reported() {
+        // Reporting a missing name is the point; reporting a present one is
+        // noise, and would fire on every type with a second public method.
+        let convs =
+            vec![conv("shape.entrypoint.app.services.rb", "That public method is named `call`")];
+        let source = "class A\n  def call; end\n  def extra; end\nend\n";
+        let violations = verify_source("app/services/a.rb", source, &convs);
+        assert!(violations.is_empty(), "got {violations:#?}");
     }
 
     #[test]

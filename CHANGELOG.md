@@ -5,6 +5,54 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.0] — 2026-08-03
 
+### Fixed
+
+- A file that followed every convention exactly was reported for breaking two,
+  and once those rules reached total agreement it was refused outright.
+  Verifying judged every declared type while deriving resolved one, so a
+  namespace module counted as a type with no base and no public methods. Both
+  halves now resolve the subject the same way, in one place. (#1)
+- The entrypoint-name rule was withheld from any type with more than one public
+  method, so the files that broke it hardest were told the least, and fixing
+  one file took two round trips. (#2)
+- Moving the working directory into a nested repository silently switched to a
+  snapshot that was never built, and every hook went quiet for the rest of the
+  session. The snapshot is now found by searching upward, and a root with none
+  says so once. (#3)
+- `reconcile` compared a written file only against tracked files, so several
+  near-identical files written in the same turn were invisible to each other —
+  which is the case worth catching. The session's own ledger is now part of the
+  index. (#4)
+- Naming rules were derived for binary assets. Twelve of them on one workspace,
+  including 2,912 `.jpg` files, each taking a slot in a 1,500-character budget.
+  (#8)
+- Five conventionally-named files at a repository root produced "files here are
+  named in `SCREAMING_SNAKE_CASE`" for every `.md` in the project. (#8)
+- Required agreement now rises with the size of the sample. The widest scopes
+  were clearing the floor by the smallest margin and generating the most
+  messages: one rule covered every `.rb` file in a Rails API at 0.81 and
+  complained about a migration written the way the framework asks. (#8)
+
+### Added
+
+- A rule is stated at the parent when every child directory that has an opinion
+  holds the same one. Agreement is counted over directories, not files, because
+  a tree where twelve subdirectories each hold a rule without exception can
+  still sit at 0.82 across its files. A new subdirectory now inherits the rule
+  instead of getting nothing. (#6)
+- `enforce`, off by default. Refusing a write is the only channel a model
+  cannot decline, so the first release of it is opt-in. (#5)
+- File-name casing can refuse, when enabled. It is the safest check there is:
+  a string comparison on the path, with no parsing and no question about which
+  type in the file is the subject. (#5)
+
+### Changed
+
+- The report after a write asks for the change rather than restating the
+  policy. (#5)
+
+
+
 ### Added
 
 - canon can refuse a write. `Enforcement::Blocking` existed from the first

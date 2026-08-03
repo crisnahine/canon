@@ -67,14 +67,23 @@ pub(crate) fn subagent_start(input: &HookInput) -> HookOutput {
 ///
 /// The hot path. One file read, one filter, no parsing and no subprocess.
 pub(crate) fn inject(input: &HookInput) -> HookOutput {
-    let root = input.root();
-    let Some(rel) = input.target_path().and_then(|p| relative_to(&root, p)) else {
+    let cwd = input.root();
+    let Some(target) = input.target_path() else { return HookOutput::silent() };
+    let Some((root, snapshot)) = snapshot_root(&cwd) else {
+        logging::debug("no snapshot for this root or any ancestor");
+        // Once per session, to the user rather than the model. Silence here is
+        // indistinguishable from "nothing applies here", which is how this
+        // failure stayed invisible; saying it on every write would be worse
+        // than saying nothing.
+        if first_miss(&cwd, &input.session_id) {
+            return HookOutput::silent().with_system_message(format!(
+                "canon has no index for {}. Run `canon index` there, or start the session at the directory you want indexed.",
+                cwd.display()
+            ));
+        }
         return HookOutput::silent();
     };
-    let Some(snapshot) = Snapshot::load(&paths::snapshot_path(&root)) else {
-        logging::debug("no snapshot yet; session-start has not finished");
-        return HookOutput::silent();
-    };
+    let Some(rel) = relative_to(&root, target) else { return HookOutput::silent() };
     let (settings, _) = config::load_or_default(&root);
 
     // Refusing the write is the only channel the model cannot decline. Every
@@ -121,15 +130,15 @@ fn refusal(rel: &str, violations: &[canon_derive::Violation]) -> String {
 /// the payload carries the replacement fragment, not the resulting file, and
 /// checking a fragment against a whole-file rule reports nonsense.
 pub(crate) fn verify(input: &HookInput) -> HookOutput {
-    let root = input.root();
+    let cwd = input.root();
     let Some(target) = input.target_path() else { return HookOutput::silent() };
+    // Resolved before the ledger is written. Recording first left ledgers
+    // accumulating for roots that have no snapshot and nothing ever reads.
+    let Some((root, snapshot)) = snapshot_root(&cwd) else { return HookOutput::silent() };
     let Some(rel) = relative_to(&root, target) else { return HookOutput::silent() };
 
     record_touch(&root, &input.session_id, &rel);
 
-    let Some(snapshot) = Snapshot::load(&paths::snapshot_path(&root)) else {
-        return HookOutput::silent();
-    };
     let Ok(source) = std::fs::read_to_string(root.join(&rel)) else {
         return HookOutput::silent();
     };
@@ -143,7 +152,11 @@ pub(crate) fn verify(input: &HookInput) -> HookOutput {
     for v in violations.iter().take(6) {
         text.push_str(&format!("- {}\n", v.message));
     }
-    text.push_str("\nThese are derived by counting, not written down. Follow them unless the change is deliberate.\n");
+    // Asking for the change moves compliance more than restating the rule
+    // does, and costs nothing. The previous wording described a policy.
+    text.push_str(
+        "\nUpdate the file to match, unless the difference is deliberate. These are counted from the code, not written down; `canon explain` shows the files behind each one.\n",
+    );
     HookOutput::context(Event::PostToolUse, text)
 }
 
@@ -153,13 +166,26 @@ pub(crate) fn verify(input: &HookInput) -> HookOutput {
 /// whether the finished work duplicates something, and a file halfway through
 /// an edit always looks like a partial copy of its neighbour.
 pub(crate) fn reconcile(input: &HookInput) -> HookOutput {
-    let root = input.root();
+    let cwd = input.root();
+    let root = snapshot_root(&cwd).map_or(cwd, |(r, _)| r);
     let touched = take_touched(&root, &input.session_id);
     if touched.is_empty() {
         return HookOutput::silent();
     }
     let (settings, _) = config::load_or_default(&root);
-    let index = index_files(&root, &settings);
+
+    // The index comes from git, so everything written this turn is untracked
+    // and therefore invisible to it. Four similar services written in one turn
+    // is exactly the case worth catching, and it was the one case that could
+    // not be seen; copying an already-tracked file was the only one that could.
+    let mut index = index_files(&root, &settings);
+    let known: std::collections::HashSet<&str> = index.iter().map(|f| f.rel.as_str()).collect();
+    let fresh: Vec<String> =
+        touched.iter().filter(|r| !known.contains(r.as_str())).cloned().collect();
+    if !fresh.is_empty() {
+        let entries = canon_derive::entries_for(&root, &settings, &fresh);
+        index.extend(entries);
+    }
 
     let mut lines = Vec::new();
     for rel in touched.iter().take(20) {
@@ -357,6 +383,47 @@ fn now_unix() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Whether this is the first time this session has missed for this root.
+///
+/// A marker in the session directory, which is already swept, so the state
+/// costs nothing to keep and nothing to clean up. Failing to write it means
+/// the message repeats rather than being lost, which is the right way round.
+fn first_miss(root: &Path, session_id: &str) -> bool {
+    let marker = paths::touched_path(root, session_id).with_extension("missed");
+    if marker.exists() {
+        return false;
+    }
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&marker, "").is_ok()
+}
+
+/// The root a snapshot exists for, searching upward from `start`.
+///
+/// A session indexes the directory it started in. Anything that later moves the
+/// working directory deeper — a nested repository, a shell that keeps its
+/// directory between calls — makes `input.root()` resolve somewhere that was
+/// never indexed, and every hook goes quiet for the rest of the session. Silence
+/// is also what canon returns when nothing applies, so the failure is invisible
+/// from inside the session.
+///
+/// Walking up finds the root the session actually indexed. Bounded, because an
+/// unbounded walk would eventually find a snapshot for an unrelated ancestor.
+fn snapshot_root(start: &Path) -> Option<(std::path::PathBuf, Snapshot)> {
+    const MAX_ASCENT: usize = 6;
+    let mut candidate = start.to_path_buf();
+    for _ in 0..=MAX_ASCENT {
+        if let Some(snapshot) = Snapshot::load(&paths::snapshot_path(&candidate)) {
+            return Some((candidate, snapshot));
+        }
+        if !candidate.pop() {
+            break;
+        }
+    }
+    None
+}
+
 /// The files canon considers, from git when there is a git.
 ///
 /// Falls back to walking the filesystem for a plain directory. The fallback
@@ -532,6 +599,24 @@ mod tests {
     }
 
     #[test]
+    fn a_root_with_no_snapshot_is_reported_once_and_then_stays_quiet() {
+        // Issue #3: silence for "no snapshot for this root" is
+        // indistinguishable from silence for "nothing applies here", so the
+        // failure was invisible from inside the session. Saying it on every
+        // write would be worse than saying nothing.
+        let root = temp("first-miss");
+        // The marker lives in the data directory, keyed by root and session,
+        // so it outlives the temporary root and would leak between runs.
+        for session in ["s-once", "s-other"] {
+            let _ =
+                std::fs::remove_file(paths::touched_path(&root, session).with_extension("missed"));
+        }
+        assert!(first_miss(&root, "s-once"), "the first miss must report");
+        assert!(!first_miss(&root, "s-once"), "the second must not");
+        assert!(first_miss(&root, "s-other"), "a different session reports again");
+    }
+
+    #[test]
     fn inject_without_a_snapshot_is_silent_rather_than_an_error() {
         let root = temp("inject-cold");
         let input = HookInput {
@@ -543,7 +628,11 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(inject(&input).is_silent());
+        // The first miss carries a message for the user; every later one is
+        // silent. Prime it so this asserts the steady state.
+        let _ = first_miss(&root, "");
+        let out = inject(&input);
+        assert!(out.is_silent(), "a repeat miss must be silent");
     }
 
     #[test]

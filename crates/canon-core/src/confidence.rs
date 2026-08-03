@@ -44,7 +44,30 @@ impl Confidence {
             return None;
         }
         let ratio = agreeing / total;
-        if (Self::FLOOR..=1.0).contains(&ratio) { Some(Self(ratio)) } else { None }
+        if (Self::required_for(sample)..=1.0).contains(&ratio) { Some(Self(ratio)) } else { None }
+    }
+
+    /// The agreement a sample of this size has to clear.
+    ///
+    /// The floor is a floor for a directory, not for a repository. A rule over
+    /// thirty files that holds four times in five is a real local habit. The
+    /// same ratio over four thousand files is eight hundred counterexamples,
+    /// and it is what a rule looks like when it has been derived from one kind
+    /// of file and applied to every kind.
+    ///
+    /// Measured: `shape.public-arity` over every `.rb` file in a Rails API sat
+    /// at 3232/3957, a hair above the floor. It came from single-purpose
+    /// service objects and was then applied to models, controllers and
+    /// migrations, where it produced the only complaint on a migration written
+    /// with the `up`/`down` pair the framework asks for.
+    #[must_use]
+    pub fn required_for(sample: usize) -> f32 {
+        match sample {
+            0..=50 => Self::FLOOR,
+            51..=500 => 0.85,
+            501..=5_000 => 0.90,
+            _ => 0.95,
+        }
     }
 
     /// Build from unweighted counts. Convenience for facts with no recency
@@ -126,6 +149,26 @@ mod tests {
         // Agreement above the total is a caller bug; refuse rather than clamp,
         // so the bug surfaces as a missing convention instead of a false one.
         assert!(Confidence::derive_counted(11.0, 10.0, 10).is_none());
+    }
+
+    #[test]
+    fn a_wide_scope_has_to_clear_a_higher_bar_than_a_narrow_one() {
+        // Issue #8. The widest scopes cleared the floor by the smallest margin
+        // and produced the most messages. 0.81 over four thousand files is
+        // eight hundred counterexamples.
+        assert!(Confidence::derive(24, 30).is_some(), "0.80 over 30 files stands");
+        assert!(Confidence::derive(3232, 3957).is_none(), "0.81 over 3957 must not");
+        assert!(Confidence::derive(3800, 3957).is_some(), "0.96 over 3957 does");
+    }
+
+    #[test]
+    fn the_bar_rises_with_the_sample_and_never_exceeds_total_agreement() {
+        let bars: Vec<f32> =
+            [10, 100, 1_000, 10_000].iter().map(|n| Confidence::required_for(*n)).collect();
+        for pair in bars.windows(2) {
+            assert!(pair[1] >= pair[0], "the bar must not fall as the sample grows: {bars:?}");
+        }
+        assert!(bars.iter().all(|b| *b <= 1.0));
     }
 
     #[test]

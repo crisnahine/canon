@@ -29,6 +29,16 @@ pub struct Settings {
     pub suppress: Vec<String>,
     /// One of `off`, `error`, `warn`, `info`, `debug`, `trace`.
     pub log_level: String,
+    /// Whether a convention may refuse a write, rather than only advise.
+    ///
+    /// Off by default. Refusing is the only channel a model cannot decline,
+    /// and that is exactly why the first release of it is opt-in: a rule that
+    /// refuses correct code is worse than no rule, and the failure lands on
+    /// someone mid-edit who cannot tell a real rule from a bad inference.
+    ///
+    /// Even when on, only a rule with total agreement and a check that cannot
+    /// be wrong about a legitimate file will ever refuse.
+    pub enforce: bool,
 }
 
 impl Default for Settings {
@@ -79,6 +89,7 @@ impl Default for Settings {
             .collect(),
             suppress: Vec::new(),
             log_level: "off".to_string(),
+            enforce: false,
         }
     }
 }

@@ -37,6 +37,7 @@ mod render;
 mod select;
 mod semantic;
 mod snapshot;
+mod subject;
 mod tier0;
 mod verify;
 mod walk;
@@ -49,7 +50,7 @@ pub use snapshot::{SNAPSHOT_VERSION, Snapshot};
 pub use verify::{Violation, blocking_violations, verify_source};
 pub use walk::{FileEntry, entries_for, walk};
 
-use canon_core::{Convention, Settings};
+use canon_core::{Confidence, Convention, Settings};
 
 /// Walk `root` and derive every convention it supports.
 ///
@@ -80,11 +81,119 @@ pub fn derive_from(
     let facts = semantic::gather(files, root);
     conventions.extend(semantic::derive(&facts, settings));
     conventions.retain(|c| !settings.is_suppressed(&c.id));
+    roll_up_agreeing_siblings(&mut conventions, settings);
     collapse_redundant(&mut conventions);
     // Deterministic order, so an unchanged tree produces a byte-identical
     // snapshot and cache staleness stays observable.
     conventions.sort_by(|a, b| a.id.cmp(&b.id));
     conventions
+}
+
+/// The kind of rule an id names, for comparing like with like.
+///
+/// A child silent about one kind of rule is not dissenting about it, so
+/// agreement has to be counted within a kind rather than across all of them.
+fn family(id: &str) -> &'static str {
+    const FAMILIES: &[&str] = &[
+        "shape.public-arity",
+        "shape.entrypoint",
+        "shape.base",
+        "shape.module-arity",
+        "shape.collaborator",
+        "naming",
+        "tests.suffix",
+    ];
+    FAMILIES.iter().find(|f| id.starts_with(**f)).copied().unwrap_or("other")
+}
+
+/// State a rule at the parent when its children all say it.
+///
+/// Rules are derived per directory, and a rule over the parent is derived from
+/// the parent's *files*. Those are different statistics, and the difference
+/// matters: a services tree where twelve subdirectories each hold the rule
+/// without exception can still sit at 0.82 across all its files, because the
+/// files are unevenly distributed between them. The per-file view then rejects
+/// a rule that every part of the tree actually follows, and a file written into
+/// a thirteenth subdirectory is told nothing.
+///
+/// So agreement is counted over directories here, not files. When every child
+/// of a parent that has an opinion holds the same one, the parent gets the rule
+/// with the children as its evidence.
+///
+/// A dissenting child keeps its own rule: [`collapse_redundant`] only removes a
+/// child that repeats its ancestor word for word, and a child that differs does
+/// not.
+fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Settings) {
+    use std::collections::HashMap;
+
+    // (parent directory, extension, statement) -> the children that hold it.
+    let mut votes: HashMap<(String, String, String), Vec<&Convention>> = HashMap::new();
+    // (parent, extension, family) -> the children that have an opinion of that
+    // kind. Scoped per family, because a child that is silent about arity is
+    // not disagreeing about arity. Counting any rule at all as an opinion made
+    // twelve subdirectories that unanimously agreed look like a split.
+    let mut speakers: HashMap<(String, String, &str), std::collections::HashSet<String>> =
+        HashMap::new();
+
+    for c in conventions.iter() {
+        let dir = scope_dir(c);
+        let ext = scope_ext(c);
+        let Some((parent, _)) = dir.rsplit_once('/') else { continue };
+        speakers
+            .entry((parent.to_string(), ext.clone(), family(&c.id)))
+            .or_default()
+            .insert(dir.clone());
+        votes.entry((parent.to_string(), ext, c.statement.clone())).or_default().push(c);
+    }
+
+    let mut rolled: Vec<Convention> = Vec::new();
+    for ((parent, ext, statement), holders) in votes {
+        let Some(kind) = holders.first().map(|c| family(&c.id)) else { continue };
+        let Some(all) = speakers.get(&(parent.clone(), ext.clone(), kind)) else { continue };
+        // Two children is a pair, not a pattern.
+        if all.len() < 2 {
+            continue;
+        }
+        let holding: std::collections::HashSet<String> =
+            holders.iter().map(|c| scope_dir(c)).collect();
+        if holding.len() != all.len() {
+            continue; // a child dissents, so the parent has no single answer
+        }
+        // Already stated at the parent, by the per-file derivation.
+        if conventions
+            .iter()
+            .any(|c| c.statement == statement && scope_dir(c) == parent && scope_ext(c) == ext)
+        {
+            continue;
+        }
+        // Gate on directories, report on files. The rule is only rolled up
+        // because every child directory holds it, but the numbers a reader
+        // sees are the files behind those children, so the confidence has to
+        // be the one those numbers imply. Reporting 1.00 beside 377/401 is a
+        // contradiction on the face of the block.
+        let agreeing: usize = holders.iter().map(|c| c.agreeing).sum();
+        let total: usize = holders.iter().map(|c| c.total).sum();
+        let Some(confidence) = Confidence::derive(agreeing, total) else { continue };
+        let Some(widest) = holders.iter().max_by_key(|c| c.total) else { continue };
+
+        rolled.push(Convention {
+            id: format!("{}.rollup", widest.id),
+            statement,
+            scope: canon_core::Scope::DirExt(parent.clone(), ext.clone()),
+            confidence,
+            agreeing,
+            total,
+            exemplar: widest.exemplar.clone(),
+            evidence: holders.iter().flat_map(|c| c.evidence.clone()).take(12).collect(),
+            // A rule assembled from other rules is never enforced. The evidence
+            // is real, but it is one inference further from the code than the
+            // rules it was built from.
+            enforcement: canon_core::Enforcement::Advisory,
+        });
+    }
+
+    let _ = settings;
+    conventions.extend(rolled);
 }
 
 /// Drop a rule that an ancestor already states in the same words.
