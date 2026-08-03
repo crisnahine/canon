@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+# Put a locally built binary where an installed plugin will find it.
+#
+# Needed because the two ways canon reaches a binary do not overlap during
+# development:
+#
+#   - A released install downloads the binary from the matching GitHub release.
+#     That is the path real users take, and it needs a release to exist.
+#   - A plugin installed from a local directory is a *copy* of the source tree
+#     that does not honour `.gitignore`, so `target/` is either dragged along
+#     (1.6 GB, measured) or absent from the copy entirely.
+#
+# So during development the binary goes in the plugin's data directory, which
+# the shim already checks and which survives `cargo clean`.
+#
+# Run this after `claude plugin install`, not before: uninstalling a plugin
+# clears its data directory, so a binary placed first is deleted.
+set -eu
+
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "${ROOT}/Cargo.toml" | head -1)"
+BINARY="${ROOT}/target/release/canon"
+DATA_DIR="${CLAUDE_PLUGIN_DATA:-${HOME}/.claude/plugins/data/canon-canon}"
+
+if [ ! -x "${BINARY}" ]; then
+    echo "no release build at ${BINARY}" >&2
+    echo "run: cargo build --release" >&2
+    exit 1
+fi
+
+mkdir -p "${DATA_DIR}/bin"
+cp "${BINARY}" "${DATA_DIR}/bin/canon-${VERSION}"
+chmod +x "${DATA_DIR}/bin/canon-${VERSION}"
+
+echo "installed canon ${VERSION} -> ${DATA_DIR}/bin/canon-${VERSION}"
+"${DATA_DIR}/bin/canon-${VERSION}" version

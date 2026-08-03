@@ -1,0 +1,4 @@
+/target
+/.attic
+**/*.rs.bk
+.DS_Store

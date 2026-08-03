@@ -1,0 +1,4 @@
+# A hook must not stall the editor. Anything that can block is reviewed by hand.
+disallowed-methods = [
+    { path = "std::process::exit", reason = "leave via main so the fail-open harness can still emit valid JSON" },
+]

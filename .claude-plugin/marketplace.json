@@ -1,0 +1,15 @@
+{
+  "name": "canon",
+  "owner": {
+    "name": "Cris Nahine"
+  },
+  "description": "canon: repository conventions derived from the code itself, stated before each write.",
+  "plugins": [
+    {
+      "name": "canon",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "Derives your repository's conventions from its AST and states them before each file is written."
+    }
+  ]
+}

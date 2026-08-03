@@ -1,0 +1,28 @@
+[package]
+name = "canon-cli"
+description = "The canon binary: config loading, logging, and the hook commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "canon"
+path = "src/main.rs"
+
+[dependencies]
+canon-core.workspace = true
+canon-extract.workspace = true
+canon-derive.workspace = true
+canon-hook.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,123 @@
+#!/usr/bin/env sh
+# Resolve the canon binary and run it.
+#
+# Fail-open is the whole job of this script. Every path that cannot produce a
+# working binary must print an empty JSON object and exit 0, because the caller
+# is a hook: a non-zero exit shows an error to the user mid-edit, and anything
+# other than JSON on stdout is parsed as canon's answer.
+#
+# Resolution order:
+#   1. CANON_BIN, for someone testing a specific build
+#   2. target/release, then target/debug, so a developer's build wins
+#   3. the installed binary under the plugin's data directory
+#   4. install it from the matching GitHub release, once, with a checksum
+set -eu
+
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}"
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "${PLUGIN_ROOT}/Cargo.toml" 2>/dev/null | head -1)"
+: "${VERSION:=0.1.0}"
+REPO="crisnahine/canon"
+
+DATA_DIR="${CANON_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/canon}}"
+INSTALL_DIR="${DATA_DIR}/bin"
+
+# Say nothing, successfully. The only correct failure for a hook.
+give_up() {
+    printf '{}\n'
+    exit 0
+}
+
+target_triple() {
+    _os="$(uname -s 2>/dev/null || echo unknown)"
+    _arch="$(uname -m 2>/dev/null || echo unknown)"
+    case "${_os}" in
+        Darwin) _os_part="apple-darwin" ;;
+        Linux) _os_part="unknown-linux-gnu" ;;
+        MINGW* | MSYS* | CYGWIN*) _os_part="pc-windows-msvc" ;;
+        *) return 1 ;;
+    esac
+    case "${_arch}" in
+        arm64 | aarch64) _arch_part="aarch64" ;;
+        x86_64 | amd64) _arch_part="x86_64" ;;
+        *) return 1 ;;
+    esac
+    printf '%s-%s' "${_arch_part}" "${_os_part}"
+}
+
+# Download and verify. Any failure here is silent: a first run without network
+# access must leave the editor working, not report a download error.
+install_binary() {
+    _triple="$(target_triple)" || return 1
+    _base="https://github.com/${REPO}/releases/download/v${VERSION}"
+    _asset="canon-${_triple}"
+    _tmp="${INSTALL_DIR}/.download.$$"
+
+    command -v curl >/dev/null 2>&1 || return 1
+    mkdir -p "${INSTALL_DIR}" 2>/dev/null || return 1
+
+    curl -fsSL --max-time 120 -o "${_tmp}" "${_base}/${_asset}" 2>/dev/null || {
+        rm -f "${_tmp}"
+        return 1
+    }
+
+    # A binary that is not in the release's checksum file is not installed.
+    # Skipping this would make a compromised or truncated download executable.
+    _sums="${INSTALL_DIR}/.SHA256SUMS.$$"
+    if curl -fsSL --max-time 60 -o "${_sums}" "${_base}/SHA256SUMS" 2>/dev/null; then
+        _want="$(grep " ${_asset}\$" "${_sums}" 2>/dev/null | awk '{print $1}' | head -1)"
+        if [ -z "${_want}" ]; then
+            rm -f "${_tmp}" "${_sums}"
+            return 1
+        fi
+        if command -v shasum >/dev/null 2>&1; then
+            _got="$(shasum -a 256 "${_tmp}" | awk '{print $1}')"
+        elif command -v sha256sum >/dev/null 2>&1; then
+            _got="$(sha256sum "${_tmp}" | awk '{print $1}')"
+        else
+            rm -f "${_tmp}" "${_sums}"
+            return 1
+        fi
+        rm -f "${_sums}"
+        [ "${_got}" = "${_want}" ] || {
+            rm -f "${_tmp}"
+            return 1
+        }
+    else
+        rm -f "${_tmp}"
+        return 1
+    fi
+
+    chmod +x "${_tmp}" 2>/dev/null || {
+        rm -f "${_tmp}"
+        return 1
+    }
+    mv -f "${_tmp}" "${INSTALL_DIR}/canon-${VERSION}" 2>/dev/null || {
+        rm -f "${_tmp}"
+        return 1
+    }
+    return 0
+}
+
+resolve() {
+    if [ -n "${CANON_BIN:-}" ] && [ -x "${CANON_BIN}" ]; then
+        printf '%s' "${CANON_BIN}"
+        return 0
+    fi
+    for candidate in \
+        "${PLUGIN_ROOT}/target/release/canon" \
+        "${PLUGIN_ROOT}/target/debug/canon" \
+        "${INSTALL_DIR}/canon-${VERSION}"; do
+        if [ -x "${candidate}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    if install_binary && [ -x "${INSTALL_DIR}/canon-${VERSION}" ]; then
+        printf '%s' "${INSTALL_DIR}/canon-${VERSION}"
+        return 0
+    fi
+    return 1
+}
+
+BIN="$(resolve)" || give_up
+exec "${BIN}" "$@"

@@ -1,0 +1,18 @@
+{
+  "name": "canon",
+  "version": "0.1.0",
+  "description": "Derives your repository's conventions from its AST and states them before each file is written. No CLAUDE.md required.",
+  "author": {
+    "name": "Cris Nahine"
+  },
+  "homepage": "https://github.com/crisnahine/canon",
+  "repository": "https://github.com/crisnahine/canon",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "conventions",
+    "code-style",
+    "tree-sitter",
+    "hooks",
+    "rust"
+  ]
+}

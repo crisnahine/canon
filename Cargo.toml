@@ -1,0 +1,79 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/canon-core",
+    "crates/canon-extract",
+    "crates/canon-derive",
+    "crates/canon-hook",
+    "crates/canon-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/crisnahine/canon"
+authors = ["Cris Nahine"]
+
+[workspace.dependencies]
+canon-core = { path = "crates/canon-core", version = "0.1.0" }
+canon-extract = { path = "crates/canon-extract", version = "0.1.0" }
+canon-derive = { path = "crates/canon-derive", version = "0.1.0" }
+canon-hook = { path = "crates/canon-hook", version = "0.1.0" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+
+tree-sitter = "0.26"
+tree-sitter-ruby = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-php = "0.24"
+
+# Every crate inherits these. The hot path runs before each write, so the
+# lint set is tuned to catch the two things that actually break a hook:
+# a panic, and anything printed to a stream the protocol owns.
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# stdout is the hook protocol channel and stderr on PostToolUse is fed to the
+# model. Only the CLI's single emit path may write to either, and it opts out
+# by name.
+print_stdout = "deny"
+print_stderr = "deny"
+# A panic in a hook is the one failure the fail-open harness cannot disguise
+# from the user, because the process dies before it can print valid JSON.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+integer_division = "warn"
+missing_errors_doc = "allow"
+# Reports are assembled by appending. `write!` into a String cannot fail but
+# still returns a Result, so satisfying this lint would put `let _ =` on every
+# line of every human-facing report and hide a real error if one ever appeared.
+format_push_string = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# Unwind, not abort: the fail-open harness catches a panic and still emits
+# valid JSON. Under abort the process dies with empty stdout, which the host
+# cannot tell apart from a hook that decided to say nothing.
+panic = "unwind"

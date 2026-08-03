@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - name: documentation builds without warnings
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  fail-open:
+    # The contract that keeps canon out of the user's way when it breaks:
+    # exit 0, stdout empty or valid JSON, whatever arrives on stdin.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: ./tests/fail-open.sh ./target/release/canon
+
+  minimum-supported-rust:
+    # A twenty-year project should not need this month's compiler.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+
+  plugin-manifest:
+    # The manifest, the hook configuration and the crate version have to agree,
+    # or the plugin installs and silently runs a different binary than it says.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: manifests are valid JSON
+        run: |
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json; do
+            python3 -c "import json,sys; json.load(open('$f'))" || exit 1
+          done
+      - name: plugin version matches the workspace version
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          plugin=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])")
+          test "$crate" = "$plugin" || {
+            echo "Cargo.toml says $crate, plugin.json says $plugin"
+            exit 1
+          }
+      - name: every hook command points at a file that exists
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, sys
+          config = json.load(open("hooks/hooks.json"))
+          missing = []
+          for event in config["hooks"].values():
+              for matcher in event:
+                  for hook in matcher["hooks"]:
+                      script = re.sub(r'\$\{CLAUDE_PLUGIN_ROOT\}', ".", hook["command"]).strip('"')
+                      target = script.split('"')[0].split()[0]
+                      if not pathlib.Path(target).exists():
+                          missing.append(target)
+          if missing:
+              print("hook commands with no file:", missing)
+              sys.exit(1)
+          PY
