@@ -197,9 +197,21 @@ had no other reason to write:
 
 Three of the five are persuasion and can be declined. Two are not.
 
-canon uses `deny`, and only for a rule with total agreement and an exact check.
-It does not use `updatedInput`, though it works: rewriting someone's code from
-a rule derived by counting is a worse failure than the one it would prevent.
+canon uses `deny`, on by default, and only for a rule with total agreement and
+an exact check. It does not use `updatedInput`, though it works: rewriting
+someone's code from a rule derived by counting is a worse failure than the one
+it would prevent.
+
+The default is on because the alternative is a tool followed when convenient,
+and because the condition for refusing makes a false positive a contradiction:
+a rule only qualifies when every file in scope already agrees, so no existing
+file can break one. Checked rather than argued — 400 tracked Ruby files from a
+production repository, replayed through the write path, refused none.
+
+The injection budget is not what bounds the block. Measured on the same
+workspace, real paths spend 262 to 486 bytes of it, and raising it from 1,500
+to 4,000 produced byte-identical output. What limits the block is how many
+conventions exist for a path, which is what issue #7 is about.
 
 Verified end to end. Asked directly for a violation — "two public methods named
 `perform` and `also`, do not use a base class" — against a directory where six

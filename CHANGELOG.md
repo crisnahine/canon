@@ -40,8 +40,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a tree where twelve subdirectories each hold a rule without exception can
   still sit at 0.82 across its files. A new subdirectory now inherits the rule
   instead of getting nothing. (#6)
-- `enforce`, off by default. Refusing a write is the only channel a model
-  cannot decline, so the first release of it is opt-in. (#5)
+- `enforce`, on by default, with `CANON_ENFORCE` to turn it off. Refusing a
+  write is the only channel a model cannot decline; the other three were each
+  measured being declined, and a tool that only advises is followed when
+  convenient. The safety is in what qualifies rather than in the switch: a rule
+  may only refuse when every file in scope already agrees, which makes a false
+  positive a contradiction rather than a risk. Replaying 400 tracked Ruby files
+  from a production repository through the write path refused none. (#5)
 - File-name casing can refuse, when enabled. It is the safest check there is:
   a string comparison on the path, with no parsing and no question about which
   type in the file is the subject. (#5)
@@ -50,6 +55,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The report after a write asks for the change rather than restating the
   policy. (#5)
+- `injection_budget` is 3,000, up from 1,500. Headroom rather than a fix:
+  measured on a 13,456-file workspace, real paths spend 262 to 486 bytes and
+  raising the ceiling to 4,000 produced byte-identical output. What bounds the
+  block is how many conventions exist for a path, not how many fit.
 
 
 

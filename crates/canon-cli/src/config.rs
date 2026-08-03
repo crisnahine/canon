@@ -220,13 +220,16 @@ mod tests {
     }
 
     #[test]
-    fn enforcement_can_be_turned_on_from_the_environment() {
+    fn enforcement_can_be_turned_off_from_the_environment() {
+        // On by default: advising is the channel a model may decline, and a
+        // tool that only advises is followed when convenient. What keeps that
+        // safe is which rules qualify, not whether the switch is thrown.
         let mut settings = Settings::default();
-        assert!(!settings.enforce, "off by default");
-        apply_env(&mut settings, &vars(&[("CANON_ENFORCE", "1")])).unwrap();
-        assert!(settings.enforce);
+        assert!(settings.enforce, "on by default");
         apply_env(&mut settings, &vars(&[("CANON_ENFORCE", "off")])).unwrap();
         assert!(!settings.enforce);
+        apply_env(&mut settings, &vars(&[("CANON_ENFORCE", "1")])).unwrap();
+        assert!(settings.enforce);
     }
 
     #[test]

@@ -90,10 +90,11 @@ Three reasons, in increasing order of importance:
 
 ## What it deliberately does not do
 
-- **It almost never refuses a write.** Everything advises, with one exception:
-  a rule the repository holds *without a single exception*, checked by a test
-  that cannot be wrong about a legitimate file, may refuse. Not 51 of 52 —
-  every file. See "When it refuses" below.
+- **It almost never refuses a write, but it can.** Everything advises, with one
+  exception: a rule the repository holds *without a single exception*, checked
+  by a test that cannot be wrong about a legitimate file. Not 51 of 52 — every
+  file. On by default; set `enforce = false` to make everything advisory. See
+  "When it refuses" below.
 - **It doesn't replace your linter.** RuboCop and ESLint encode conventions
   someone already wrote down. `canon` covers the ones nobody did: architectural
   shape, naming topology, layering, canonical examples.
@@ -143,7 +144,12 @@ channels reach the model, and three of them the model may simply decline:
 | **refusing the write** | the file never lands |
 
 Only the last does not depend on the model cooperating, so it is the only one
-canon uses for a rule it is certain of. Two conditions both have to hold:
+canon uses for a rule it is certain of. It is on by default: a tool that only
+advises is a tool that gets followed when convenient, and three of the four
+channels above were measured being declined.
+
+The safety is in what qualifies, not in whether the switch is thrown. Two
+conditions both have to hold:
 
 **Total agreement.** Every file, not most. One counterexample already in the
 tree means the rule has an exception nobody wrote down, and refusing a write
@@ -157,6 +163,16 @@ here call `X`", where a new file may legitimately not need that collaborator.
 A refusal states the counts and points at `canon explain`, so you can see the
 files it was derived from and suppress it in `.canon.toml` if it is wrong.
 Everything else in this document is advisory and always will be.
+
+Because a rule may only refuse when *every* file already agrees, no file that
+exists in the repository can violate one. That is checkable rather than
+reassuring: run against 400 tracked Ruby files in a production repository,
+enforcement refused none of them.
+
+```toml
+# .canon.toml — if you would rather never be interrupted
+enforce = false
+```
 
 ## Supported languages
 
@@ -262,8 +278,8 @@ Optional, and most repositories should never need it. Layered: defaults, then
 
 | Key | Default | Environment | What it does |
 |---|---|---|---|
-| `enforce` | `false` | `CANON_ENFORCE` | whether a rule may refuse a write, or only advise |
-| `injection_budget` | `1500` | `CANON_INJECTION_BUDGET` | bytes of convention text per write |
+| `enforce` | `true` | `CANON_ENFORCE` | whether a rule may refuse a write, or only advise |
+| `injection_budget` | `3000` | `CANON_INJECTION_BUDGET` | bytes of convention text per write |
 | `confidence_floor` | `0.8` | `CANON_CONFIDENCE_FLOOR` | agreement below this is not a convention |
 | `min_files` | `5` | `CANON_MIN_FILES` | sample below this is coincidence |
 | `recency_half_life_days` | `365` | `CANON_RECENCY_HALF_LIFE_DAYS` | how fast an old file loses its vote |

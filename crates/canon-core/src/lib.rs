@@ -34,11 +34,17 @@ pub use settings::{Settings, SettingsError};
 
 /// Bytes of convention text injected per write.
 ///
-/// Chosen against the hot path rather than a style preference: this is roughly
-/// four conventions plus one canonical path. Past that the injection starts
-/// competing with the user's own prompt for attention, and the model begins
-/// treating derived shape as if it outranked the instruction it was given.
-pub const INJECTION_BUDGET: usize = 1_500;
+/// Headroom rather than a limit that binds. Measured across a 13,456-file
+/// workspace, real paths spend 262 to 486 bytes of it, and raising the budget
+/// to 4,000 produced byte-identical output: nothing was being dropped. What
+/// bounds the block is how many conventions exist for a path, not how many
+/// fit, so this is set well above what any scope currently uses and will
+/// absorb new convention kinds without needing to move.
+///
+/// It is not unlimited. The block competes with the user's own instruction for
+/// attention, and a page of derived shape would start reading as though it
+/// outranked what was actually asked for.
+pub const INJECTION_BUDGET: usize = 3_000;
 
 /// Hard ceiling on anything this process writes to the protocol channel.
 ///

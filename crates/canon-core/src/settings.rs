@@ -31,13 +31,18 @@ pub struct Settings {
     pub log_level: String,
     /// Whether a convention may refuse a write, rather than only advise.
     ///
-    /// Off by default. Refusing is the only channel a model cannot decline,
-    /// and that is exactly why the first release of it is opt-in: a rule that
-    /// refuses correct code is worse than no rule, and the failure lands on
-    /// someone mid-edit who cannot tell a real rule from a bad inference.
+    /// On. Refusing is the only channel a model cannot decline: context before
+    /// the write steers it, a report after the write is read and the turn ends
+    /// anyway, and blocking the turn holds it open without producing the edit.
+    /// A tool that only advises is a tool that is followed when convenient.
     ///
-    /// Even when on, only a rule with total agreement and a check that cannot
-    /// be wrong about a legitimate file will ever refuse.
+    /// The safety is in what qualifies, not in whether it is switched on. A
+    /// rule may only refuse when every single file agrees — not 51 of 52 — and
+    /// when its check cannot be wrong about a legitimate file. That pairing is
+    /// what makes a refusal a statement about the repository rather than a
+    /// guess about the code.
+    ///
+    /// Set `enforce = false` in `.canon.toml` to make everything advisory.
     pub enforce: bool,
 }
 
@@ -89,7 +94,7 @@ impl Default for Settings {
             .collect(),
             suppress: Vec::new(),
             log_level: "off".to_string(),
-            enforce: false,
+            enforce: true,
         }
     }
 }

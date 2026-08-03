@@ -153,11 +153,12 @@ fn indexing_then_injecting_produces_the_conventions_for_the_target() {
 }
 
 #[test]
-fn refusing_is_off_until_it_is_asked_for() {
-    // Refusing is the only channel a model cannot decline, so the first
-    // release of it is opt-in. A rule that refuses correct code is worse than
-    // no rule, and it lands on someone mid-edit.
+fn refusing_can_be_switched_off() {
+    // On by default, because advising is the channel a model may decline. The
+    // switch exists for a repository that would rather never be interrupted.
     let f = Fixture::service_repo("refuse-default");
+    f.write(".canon.toml", "enforce = false\n");
+    f.run(&["index", "--rebuild"], "");
     let payload = f.tool_payload(
         "s1",
         "PreToolUse",
@@ -167,7 +168,7 @@ fn refusing_is_off_until_it_is_asked_for() {
     let parsed = f.json(&["inject"], &payload);
     assert!(
         parsed["hookSpecificOutput"]["permissionDecision"].is_null(),
-        "enforcement must be off by default: {parsed}"
+        "enforce = false must not refuse: {parsed}"
     );
     assert!(context(&parsed).is_some(), "it should still advise");
 }
@@ -177,8 +178,6 @@ fn a_write_that_breaks_a_rule_held_without_exception_is_refused() {
     // The only channel the model cannot decline. Advisory context steers a
     // write; a refusal prevents it.
     let f = Fixture::service_repo("refuse");
-    f.write(".canon.toml", "enforce = true\n");
-    f.run(&["index", "--rebuild"], "");
     let payload = f.tool_payload(
         "s1",
         "PreToolUse",
@@ -200,7 +199,6 @@ fn a_rule_with_a_counterexample_never_refuses() {
     // One disagreeing file in the tree means the rule has an exception nobody
     // wrote down, and refusing a write that matches it would be indefensible.
     let f = Fixture::new("refuse-partial");
-    f.write(".canon.toml", "enforce = true\n");
     for i in 0..6 {
         f.write(
             &format!("app/services/item_{i}.rb"),
