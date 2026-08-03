@@ -118,6 +118,22 @@ pub(crate) fn outside_the_style_system(name: &str) -> bool {
     !Style::ALL.iter().any(|s| is_compatible(name, *s))
 }
 
+/// Whether `name` is an acronym written the only way an acronym is written.
+///
+/// `FAQ`, `API`, `SEO`, `HTTP`. No separator to read a style at, and no
+/// lowercase letter to read one from, so every project spells it identically
+/// whatever style it otherwise holds. It is compatible with `PascalCase` and
+/// `SCREAMING_SNAKE_CASE` and with nothing else, which means a `kebab-case` or
+/// `camelCase` directory reads it as a violation of a choice its author never
+/// made.
+#[must_use]
+pub(crate) fn is_bare_acronym(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(char::is_alphanumeric)
+        && name.chars().any(char::is_uppercase)
+        && !name.chars().any(char::is_lowercase)
+}
+
 /// Whether `name` has enough structure to tell two styles apart.
 ///
 /// A name is discriminating when it contains a separator or an internal case

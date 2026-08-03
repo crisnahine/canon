@@ -30,6 +30,30 @@ const MAX_DEPTH: usize = 32;
 /// would have been killed by its own timeout with nothing to show.
 const MAX_WALKED_FILES: usize = 150_000;
 
+/// Read a file, but only if it is one canon would ever have indexed.
+///
+/// Every read canon does is of a path someone else chose, and two of the
+/// things a path can name do not return: a FIFO blocks until something writes
+/// to it, and a character device streams until the process is killed —
+/// measured at 1.8 GB before the OOM killer stepped in. A hook that never
+/// returns is worse than one that returns nothing, and it is the single
+/// failure a fail-open harness cannot report, because there is no output to
+/// inspect.
+///
+/// The size bound is the index's own. A file above it never voted on any rule,
+/// so reading it can only produce a judgement no evidence supports.
+///
+/// `symlink_metadata` rather than `metadata`, so a symlink pointing at a FIFO
+/// is not followed into the same hang.
+#[must_use]
+pub fn read_indexable(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// One file in the index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileEntry {

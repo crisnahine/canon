@@ -183,6 +183,7 @@ fn public_arity(
         total: observations.len(),
         exemplar: exemplar(&observations, &arity),
         evidence: evidence(&observations, &arity),
+        sample_roots: Vec::new(),
         enforcement: canon_core::enforcement_for("shape.public-arity", confidence, settings),
     })
 }
@@ -219,6 +220,7 @@ fn entrypoint_name(
         total: observations.len(),
         exemplar: exemplar(&observations, &name),
         evidence: evidence(&observations, &name),
+        sample_roots: Vec::new(),
         enforcement: canon_core::enforcement_for("shape.entrypoint", confidence, settings),
     })
 }
@@ -249,6 +251,7 @@ fn base_class(
         total: observations.len(),
         exemplar: exemplar(&observations, &winner),
         evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
         enforcement: canon_core::enforcement_for("shape.base", confidence, settings),
     })
 }
@@ -286,6 +289,7 @@ fn module_arity(
         total: observations.len(),
         exemplar: exemplar(&observations, &count),
         evidence: evidence(&observations, &count),
+        sample_roots: Vec::new(),
         enforcement: Enforcement::Advisory,
     })
 }
@@ -337,6 +341,7 @@ fn collaborator(
         total: observations.len(),
         exemplar: exemplar(&observations, &winner),
         evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
         enforcement: Enforcement::Advisory,
     })
 }
@@ -386,6 +391,7 @@ fn import_source(
         total: observations.len(),
         exemplar: exemplar(&observations, &winner),
         evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
         enforcement: Enforcement::Advisory,
     })
 }

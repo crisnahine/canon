@@ -224,6 +224,61 @@ to.
 - **`bin/install-local` deleted every binary and installed none** when the
   version line did not parse.
 
+
+### Fixed — what a second review round found in the first round's fixes
+
+Told the first round's ground was covered, a second round found seven more
+criticals. Four of them were in the fix for the first round's headline defect,
+which is the argument for the second round.
+
+- **The scope-versus-sample guard switched itself off** as soon as a rule's
+  sample spanned two top-level directories — markdown in `docs/` and
+  `website/`, which is every project with a docs site. The rule it was written
+  to stop then refused `.github/PULL_REQUEST_TEMPLATE.md` again. Conventions
+  now carry the complete set of directories their sample came from, rather than
+  it being inferred from twelve capped evidence paths.
+- **One branch skipped that guard entirely.** `blocking_violations` falls
+  through to a path-only check whenever the resulting file cannot be known — a
+  `NotebookEdit`, or an `Edit` whose `old_string` no longer matches — and that
+  branch refused what an identical `Write` allowed. The same
+  "depends which tool the model reached for" defect, one branch over from where
+  it was fixed.
+- **An acronym was still refused everywhere except `PascalCase`.** Relaxing
+  `Style::Pascal` fixed `SEO.tsx` in a components directory and left
+  `docs/FAQ.md` and `docs/API.md` refused by a `kebab-case` rule. A
+  separator-free all-uppercase name is how every project spells an acronym,
+  whatever style it otherwise holds.
+- **The nested-type filter discarded the module holding the real subject.** A
+  root-level marker — `pub struct Sealed;`, a unit error type — was enough to
+  drop a public module with the actual type in it, and the file then resolved
+  to something with no surface at all. A root-level type only wins when it has
+  methods of its own.
+- **Three unguarded reads, each of which hangs forever on a FIFO**: `verify`
+  reading the written file, `reconcile` reading everything touched this turn,
+  and `load_file` reading `.canon.toml` — the last of which runs before every
+  hook, including the one that would have reported it. A character device was
+  measured streaming to 1.8 GB before the process was killed. This is the only
+  failure a fail-open harness cannot report, because there is no output to
+  inspect. One shared `read_indexable` now guards all of them.
+- `canon explain` normalises its path argument, so `./app/services` and an
+  absolute path answer the same as the relative one, and decides
+  file-versus-directory from the snapshot rather than from punctuation — so
+  `.github` and `api.v2` stop reporting "no conventions match".
+
+### Verified — the regression tests were themselves tested
+
+Every one of the 33 refusal assertions was run against the binary from before
+its fix. Twelve fail on the immediately preceding commit; three more need the
+commit before that. Two assertions in the first batch turned out to pass with
+or without the fix they claimed to pin — one was saved by a stem name-match
+that short-circuits the code path it tested, the other by a fixture that never
+derived a rule of the relevant kind. Both were rebuilt until they failed on the
+old binary.
+
+The corpus is seventeen repositories now: 15,974 tracked files replayed and
+5,946 new files written into real directories, none refused. `SNAPSHOT_VERSION`
+is 8.
+
 ### Verified
 
 - Every one of the eight open issues has a check in a harness that runs against
@@ -231,9 +286,9 @@ to.
 - Every critical from the review has one too: 18 assertions covering four
   frameworks' route conventions, acronyms and non-Latin names, scope-versus-
   sample mismatches, oversized files, and both Rust attribution defects.
-- 15,265 tracked files from the fourteen repositories replayed through the
-  write path: 11,299 given conventions, none refused, none errored.
-- 5,700 *new* files written into those same directories — one file's content at
+- 15,974 tracked files from the seventeen repositories replayed through the
+  write path: 11,700 given conventions, none refused, none errored.
+- 5,946 *new* files written into those same directories — one file's content at
   its neighbour's name, and a test in each naming idiom into every directory
   with an enforceable rule — none refused. This is the harness that matters:
   every file already in the index has voted, so the first replay confirms the

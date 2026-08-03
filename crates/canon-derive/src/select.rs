@@ -62,6 +62,7 @@ mod tests {
             total,
             exemplar: None,
             evidence: vec![],
+            sample_roots: vec![],
             enforcement: Enforcement::Advisory,
         }
     }

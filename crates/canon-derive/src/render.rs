@@ -82,6 +82,7 @@ mod tests {
             total: 52,
             exemplar: exemplar.map(String::from),
             evidence: vec![],
+            sample_roots: vec![],
             enforcement: Enforcement::Advisory,
         }
     }

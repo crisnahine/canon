@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 7;
+pub const SNAPSHOT_VERSION: u32 = 8;
+// 8: conventions carry the complete set of top-level directories their sample
+//    came from. Inferring it from the capped evidence was wrong in both
+//    directions, and the guard written to compensate switched itself off as
+//    soon as the sample spanned two directories.
 // 7: a name no style accepts is excluded from naming rules rather than counted
 //    against them, which changes which files voted. A snapshot from before
 //    this holds rules derived while `[id].tsx` and `+page.ts` were being read
@@ -178,6 +182,7 @@ mod tests {
             total: 52,
             exemplar: Some("app/a.rb".into()),
             evidence: vec![],
+            sample_roots: vec![],
             enforcement: Enforcement::Advisory,
         }
     }

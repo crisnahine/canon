@@ -48,7 +48,7 @@ pub use render::render_block;
 pub use select::for_path;
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot};
 pub use verify::{Violation, blocking_violations, missing_test, verify_source};
-pub use walk::{FileEntry, MAX_FILE_BYTES, entries_for, walk};
+pub use walk::{FileEntry, MAX_FILE_BYTES, entries_for, read_indexable, walk};
 
 use canon_core::{Confidence, Convention, Settings};
 
@@ -191,6 +191,7 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
             total,
             exemplar: widest.exemplar.clone(),
             evidence: holders.iter().flat_map(|c| c.evidence.clone()).take(12).collect(),
+            sample_roots: holders.iter().flat_map(|c| c.sample_roots.clone()).collect(),
             // A rule assembled from other rules is never enforced. The evidence
             // is real, but it is one inference further from the code than the
             // rules it was built from.

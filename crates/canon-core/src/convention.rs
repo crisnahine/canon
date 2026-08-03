@@ -135,6 +135,16 @@ pub struct Convention {
     pub exemplar: Option<String>,
     /// A sample of supporting files, capped at render time.
     pub evidence: Vec<Evidence>,
+    /// Every top-level directory the counted files came from, deduplicated.
+    ///
+    /// The complete set, unlike [`Convention::evidence`], which is capped so a
+    /// snapshot stays small. A repository-wide rule may only refuse a file in a
+    /// directory that voted on it, and inferring that from the capped sample
+    /// got it wrong in both directions: it withheld refusals on large
+    /// repositories where twelve evidence paths cannot cover the tree, and a
+    /// guard written to compensate switched itself off as soon as the sample
+    /// spanned two directories — which is every project with a docs site.
+    pub sample_roots: Vec<String>,
     /// How far it may go.
     pub enforcement: Enforcement,
 }
@@ -246,6 +256,7 @@ mod tests {
             total: 52,
             exemplar: None,
             evidence: vec![],
+            sample_roots: vec![],
             enforcement: Enforcement::Advisory,
         }
     }

@@ -84,6 +84,7 @@ fn colocation(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
             total: members.len(),
             exemplar: exemplar_of(&members),
             evidence: evidence_of(&members),
+            sample_roots: Vec::new(),
             // Path-shaped, but not exact: a file may legitimately be the one
             // thing in a directory that needs no test.
             enforcement: Enforcement::Advisory,
@@ -306,6 +307,9 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
             total: members.len(),
             exemplar: exemplar_of(&members),
             evidence: evidence_of(&members),
+            // The complete set, not the capped evidence: a repository-wide rule
+            // may only refuse a file in a directory that actually voted on it.
+            sample_roots: roots_of(&members),
             enforcement: canon_core::enforcement_for("naming", confidence, settings),
         });
     }
@@ -364,6 +368,7 @@ fn test_suffix(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
             total: members.len(),
             exemplar: exemplar_of(&members),
             evidence: evidence_of(&members),
+            sample_roots: Vec::new(),
             enforcement: Enforcement::Advisory,
         });
     }
@@ -549,6 +554,20 @@ pub(crate) fn is_test_path(rel: &str) -> bool {
 /// shape they are supposed to be replacing.
 fn exemplar_of(members: &[&FileEntry]) -> Option<String> {
     members.iter().max_by_key(|f| (f.modified_unix, f.rel.clone())).map(|f| f.rel.clone())
+}
+
+/// Every top-level directory the sample came from, deduplicated.
+///
+/// The repository root is the empty string, which is a directory like any
+/// other: a rule counted over files at the root speaks for the root.
+fn roots_of(members: &[&FileEntry]) -> Vec<String> {
+    let mut roots: Vec<String> = members
+        .iter()
+        .map(|f| f.rel.split_once('/').map_or("", |(head, _)| head).to_string())
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 fn evidence_of(members: &[&FileEntry]) -> Vec<Evidence> {

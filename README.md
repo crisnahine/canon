@@ -41,7 +41,6 @@ Conventions for app/services/**/*.rb, derived from this repository:
 - Types here expose exactly 1 public method. (1248/1550, 0.80)
 - Files here call `Ledger`. (9/10, 0.90)
 - Files here are named in snake_case. (2399/2399, 1.00)
-- Test files are named `*_spec.rb`. (1321/1462, 0.90)
 
 Canonical example, most recently modified: app/services/billing/settle_batch.rb
 ```

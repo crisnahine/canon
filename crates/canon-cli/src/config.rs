@@ -116,6 +116,19 @@ pub(crate) fn log_level_for(root: &Path) -> String {
 
 fn load_file(root: &Path) -> Result<Settings, ConfigError> {
     let path = root.join(CONFIG_FILE);
+    // A `.canon.toml` that is a FIFO hangs every hook before any of them has
+    // done anything, including the one that would have reported it. Anything
+    // that is not a regular file takes the unreadable path, which already
+    // fails permissive and already says so on `canon check`.
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(ConfigError::Unreadable {
+                path: path.display().to_string(),
+                detail: "not a regular file".to_string(),
+            });
+        }
+        _ => {}
+    }
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         // No config is the ordinary case and means the defaults.

@@ -167,17 +167,7 @@ fn resulting_file(root: &Path, rel: &str, input: &HookInput) -> Option<String> {
     }
     let (old, new) =
         (input.tool_input.old_string.as_deref()?, input.tool_input.new_string.as_deref()?);
-    // Only a regular file, and only one small enough to have been indexed.
-    // `read_to_string` on a FIFO inside the tree blocks forever, and a hook
-    // that never returns is worse than a hook that returns nothing; a device
-    // node or a directory is not a thing to reconstruct either. `symlink_metadata`
-    // rather than `metadata`, so a symlink to a FIFO is not followed into the
-    // same hang.
-    let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
-    if !meta.is_file() || meta.len() > canon_derive::MAX_FILE_BYTES {
-        return None;
-    }
-    let current = std::fs::read_to_string(root.join(rel)).ok()?;
+    let current = canon_derive::read_indexable(&root.join(rel))?;
     // An `old_string` that is not there means the edit will not apply, and
     // guessing at the result would refuse a write that was never going to
     // happen in the shape we imagined.
@@ -241,7 +231,9 @@ pub(crate) fn verify(input: &HookInput) -> HookOutput {
 
     record_touch(&root, &input.session_id, &rel);
 
-    let Ok(source) = std::fs::read_to_string(root.join(&rel)) else {
+    // Guarded the same way the write path is. A FIFO at the target path never
+    // returns, and this read had none of the checks its neighbour got.
+    let Some(source) = canon_derive::read_indexable(&root.join(&rel)) else {
         return HookOutput::silent();
     };
 
@@ -296,7 +288,7 @@ pub(crate) fn reconcile(input: &HookInput) -> HookOutput {
 
     let mut lines = Vec::new();
     for rel in touched.iter().take(20) {
-        let Ok(source) = std::fs::read_to_string(root.join(rel)) else { continue };
+        let Some(source) = canon_derive::read_indexable(&root.join(rel)) else { continue };
         for hit in duplicates_against_siblings(&root, rel, &source, &index).into_iter().take(2) {
             lines.push(format!("- {}: {}", rel, hit.render()));
         }
@@ -416,12 +408,14 @@ pub(crate) fn explain(root: &Path, path: Option<&str>, id: Option<&str>) -> Stri
         return "no snapshot yet; run `canon index`\n".to_string();
     };
 
+    let query = path.map(|p| normalise_query(root, p)).unwrap_or_default();
+    let names_file = path.is_some() && names_a_file(&query, &snapshot);
     let mut matching: Vec<&canon_core::Convention> = snapshot
         .conventions
         .iter()
         .filter(|c| match (path, id) {
             (_, Some(wanted)) => c.id == wanted,
-            (Some(p), None) => relevant_to(&c.scope, p, &c.evidence),
+            (Some(_), None) => relevant_to(&c.scope, &query, &c.evidence, names_file),
             (None, None) => true,
         })
         .collect();
@@ -485,16 +479,21 @@ pub(crate) fn explain(root: &Path, path: Option<&str>, id: Option<&str>) -> Stri
 /// both directions are interesting: rules for `app/` apply inside
 /// `app/services/`, and rules for `app/services/enrolments/` are what someone
 /// asking about `app/services/` wants to see.
-fn relevant_to(scope: &canon_core::Scope, query: &str, evidence: &[canon_core::Evidence]) -> bool {
+fn relevant_to(
+    scope: &canon_core::Scope,
+    query: &str,
+    evidence: &[canon_core::Evidence],
+    names_file: bool,
+) -> bool {
     let query = query.trim_end_matches('/');
     if query.is_empty() {
         return true;
     }
-    // A path with a dot in its last segment is a file, and a file has exactly
-    // one right answer: the same filter injection uses. Asking about a `.rake`
-    // file and being shown the rule for `**/*.csv` is the whole of issue #15,
-    // and it lands on someone who was just refused and told to run this.
-    if names_a_file(query) {
+    // A file has exactly one right answer: the same filter injection uses.
+    // Asking about a `.rake` file and being shown the rule for `**/*.csv` is
+    // the whole of issue #15, and it lands on someone who was just refused and
+    // told to run this.
+    if names_file {
         return scope.matches(query);
     }
     match scope {
@@ -515,8 +514,56 @@ fn relevant_to(scope: &canon_core::Scope, query: &str, evidence: &[canon_core::E
     }
 }
 
-fn names_a_file(query: &str) -> bool {
-    query.rsplit_once('/').map_or(query, |(_, name)| name).contains('.')
+/// Whether a query names a file rather than a directory.
+///
+/// Guessing from "the last segment has a dot" is wrong twice over: `.github`,
+/// `.circleci` and `.storybook` are directories whose only dot is the first
+/// character, and `api.v2` or `src/v1.2` are directories with a dot in the
+/// middle. Both answered "no conventions match", which is the least helpful
+/// thing this command can say.
+///
+/// So the snapshot decides where it can. A path that something in the index
+/// sits *under* is a directory, whatever its punctuation. Only when the index
+/// is silent does the shape of the name break the tie, and then a leading dot
+/// does not count as an extension.
+fn names_a_file(query: &str, snapshot: &Snapshot) -> bool {
+    let prefix = format!("{query}/");
+    let holds_files =
+        snapshot.conventions.iter().any(|c| c.evidence.iter().any(|e| e.rel.starts_with(&prefix)));
+    if holds_files {
+        return false;
+    }
+    let name = query.rsplit_once('/').map_or(query, |(_, n)| n);
+    name.trim_start_matches('.').contains('.')
+}
+
+/// A query as the snapshot spells paths: repository-relative, no `./`, no `..`.
+///
+/// `explain` compared the raw string, so `./app/services` and an absolute path
+/// both missed every directory-scoped rule while the identical relative query
+/// matched. The hook path has done this since it started resolving targets;
+/// this is the same normalisation, one command later than it should have been.
+fn normalise_query(root: &Path, query: &str) -> String {
+    let trimmed = query.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let candidate = Path::new(trimmed);
+    let absolute =
+        if candidate.is_absolute() { candidate.to_path_buf() } else { root.join(candidate) };
+    let normal = lexically_normal(&absolute);
+
+    let relative = normal.strip_prefix(root).map(Path::to_path_buf).ok().or_else(|| {
+        // Same fallback the hook path uses, for a root reached by a symlink.
+        let real = root.canonicalize().ok()?;
+        normal.strip_prefix(real).map(Path::to_path_buf).ok()
+    });
+    // A path outside the repository is left as typed rather than mangled into
+    // something that would match the wrong rules.
+    relative
+        .as_deref()
+        .and_then(Path::to_str)
+        .map_or_else(|| trimmed.trim_start_matches("./").to_string(), str::to_string)
 }
 
 fn has_extension(rel: &str, ext: &str) -> bool {
@@ -953,16 +1000,16 @@ mod tests {
         let other = Scope::DirExt("app/models".into(), "rb".into());
 
         // Asking about a directory shows the rules above and below it.
-        assert!(relevant_to(&mid, "app/services", &[]));
-        assert!(relevant_to(&deep, "app/services", &[]), "descendants are interesting");
-        assert!(relevant_to(&mid, "app/services/enrolments", &[]), "ancestors govern it");
-        assert!(!relevant_to(&other, "app/services", &[]), "siblings are not");
+        assert!(relevant_to(&mid, "app/services", &[], false));
+        assert!(relevant_to(&deep, "app/services", &[], false), "descendants are interesting");
+        assert!(relevant_to(&mid, "app/services/enrolments", &[], false), "ancestors govern it");
+        assert!(!relevant_to(&other, "app/services", &[], false), "siblings are not");
 
         // A trailing slash is how people type directories.
-        assert!(relevant_to(&mid, "app/services/", &[]));
+        assert!(relevant_to(&mid, "app/services/", &[], false));
 
         // The repository-wide rule governs every directory.
-        assert!(relevant_to(&Scope::Repo, "app/services", &[]));
+        assert!(relevant_to(&Scope::Repo, "app/services", &[], false));
 
         // An extension rule governs a directory only if it was counted over
         // something in it. Answering "yes, always" is how asking about a
@@ -970,9 +1017,9 @@ mod tests {
         let ext = Scope::Ext("rb".into());
         let here = [ev("app/services/charge_card.rb")];
         let elsewhere = [ev("lib/tasks/backfill.rb")];
-        assert!(relevant_to(&ext, "app/services", &here));
-        assert!(!relevant_to(&ext, "app/services", &elsewhere));
-        assert!(!relevant_to(&ext, "app/services", &[]));
+        assert!(relevant_to(&ext, "app/services", &here, false));
+        assert!(!relevant_to(&ext, "app/services", &elsewhere, false));
+        assert!(!relevant_to(&ext, "app/services", &[], false));
     }
 
     fn ev(rel: &str) -> canon_core::Evidence {
@@ -986,18 +1033,21 @@ mod tests {
         // this to find the rule that stopped them, and the whole snapshot is
         // not an answer.
         let rake = "lib/tasks/backfill.rake";
-        assert!(relevant_to(&Scope::Ext("rake".into()), rake, &[]));
-        assert!(!relevant_to(&Scope::Ext("csv".into()), rake, &[ev("data/a.csv")]));
-        assert!(!relevant_to(&Scope::DirExt("app".into(), "rb".into()), rake, &[]));
-        assert!(relevant_to(&Scope::DirExt("lib/tasks".into(), "rake".into()), rake, &[]));
-        assert!(relevant_to(&Scope::Repo, rake, &[]));
+        assert!(relevant_to(&Scope::Ext("rake".into()), rake, &[], true));
+        assert!(!relevant_to(&Scope::Ext("csv".into()), rake, &[ev("data/a.csv")], true));
+        assert!(!relevant_to(&Scope::DirExt("app".into(), "rb".into()), rake, &[], true));
+        assert!(relevant_to(&Scope::DirExt("lib/tasks".into(), "rake".into()), rake, &[], true));
+        assert!(relevant_to(&Scope::Repo, rake, &[], true));
     }
 
     #[test]
     fn a_prefix_that_is_not_a_path_boundary_does_not_match() {
         use canon_core::Scope;
         let scope = Scope::DirExt("app/service".into(), "rb".into());
-        assert!(!relevant_to(&scope, "app/services", &[]), "`service` must not capture `services`");
+        assert!(
+            !relevant_to(&scope, "app/services", &[], false),
+            "`service` must not capture `services`"
+        );
     }
 
     // The end-to-end cycle lives in `tests/cli.rs`, which runs the real

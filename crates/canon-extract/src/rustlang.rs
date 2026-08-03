@@ -47,18 +47,6 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
         }
     }
 
-    // A type declared inside an inline module is only the file's subject when
-    // the file declares none at the root. `subject::primary_type` takes the
-    // largest surface it is given and cannot tell a nested type from a
-    // top-level one, so a private helper module with more methods than the
-    // real type became what the file was judged as.
-    if facts.types.iter().zip(&modules).any(|(_, m)| m.is_empty()) {
-        let root_only: Vec<bool> = modules.iter().map(String::is_empty).collect();
-        let mut keep = root_only.iter();
-        facts.types.retain(|_| keep.next().copied().unwrap_or(true));
-        modules.retain(String::is_empty);
-    }
-
     for (module, child) in items.iter().filter(|(_, c)| c.kind() == "impl_item") {
         let Some(raw) = field_text(*child, "type", source) else { continue };
         // A path-qualified target is a foreign type unless the path is rooted
@@ -85,6 +73,26 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
                 target.private_methods.push(name);
             }
         }
+    }
+
+    // Which declarations are the file's own, when it has both root-level and
+    // module-nested ones. `subject::primary_type` takes the largest surface it
+    // is given and cannot tell the two apart, so this has to decide here — and
+    // only after the impl pass, because until then no type has any surface.
+    //
+    // A root-level type that actually has methods wins: otherwise a private
+    // helper module with more of them became what the file was judged as.
+    // A root-level type with no surface at all does not, because that is a
+    // marker — `pub struct Sealed;`, a unit error type, a phantom — and
+    // discarding the module beside it left the file resolving to something
+    // with nothing on it, which then failed an arity rule it satisfies.
+    let root_has_surface = facts.types.iter().zip(&modules).any(|(t, m)| {
+        m.is_empty() && !(t.public_methods.is_empty() && t.private_methods.is_empty())
+    });
+    if root_has_surface {
+        let keep: Vec<bool> = modules.iter().map(String::is_empty).collect();
+        let mut it = keep.iter();
+        facts.types.retain(|_| it.next().copied().unwrap_or(true));
     }
 
     facts

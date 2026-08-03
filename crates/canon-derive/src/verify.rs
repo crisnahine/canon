@@ -151,6 +151,15 @@ fn check_naming(rel: &str, convention: &Convention) -> Option<Violation> {
     if !naming::is_discriminating(stem) {
         return None;
     }
+    // And an acronym is written the same way whatever the surrounding style.
+    // `docs/FAQ.md`, `docs/API.md`, `src/lib/API.ts` — a separator-free
+    // all-uppercase name is how every project spells one, so it is a name the
+    // style system does not reach rather than a name that broke it. Relaxing
+    // `PascalCase` alone left it refused in every directory that is not
+    // `PascalCase`.
+    if naming::is_bare_acronym(stem) {
+        return None;
+    }
     Some(Violation {
         convention_id: convention.id.clone(),
         message: format!(
@@ -198,10 +207,7 @@ fn naming_speaks_for(rel: &str, convention: &Convention) -> bool {
     // speaks for that directory.
     if matches!(convention.scope, canon_core::Scope::Ext(_)) {
         let top = |path: &str| path.split_once('/').map_or("", |(head, _)| head).to_string();
-        let mut tops: Vec<String> = convention.evidence.iter().map(|e| top(&e.rel)).collect();
-        tops.sort();
-        tops.dedup();
-        if tops.len() < 2 && !tops.iter().any(|t| *t == top(rel)) {
+        if !convention.sample_roots.iter().any(|t| *t == top(rel)) {
             return false;
         }
     }
@@ -473,6 +479,11 @@ fn path_violations(rel: &str, conventions: &[Convention]) -> Vec<Violation> {
     conventions
         .iter()
         .filter(|c| c.scope.matches(rel))
+        // The same gate `verify_with` applies. Without it a `NotebookEdit`, or
+        // an `Edit` whose `old_string` no longer matches the file, refused
+        // writes an identical `Write` allowed — the "depends which tool the
+        // model reached for" defect, one branch over from where it was fixed.
+        .filter(|c| naming_speaks_for(rel, c))
         .filter_map(|c| check_naming(rel, c))
         .collect()
 }
@@ -492,6 +503,7 @@ mod tests {
             total: 52,
             exemplar: None,
             evidence: vec![],
+            sample_roots: vec![],
             enforcement: Enforcement::Advisory,
         }
     }
@@ -651,6 +663,13 @@ mod tests {
 
     fn blocking(id: &str, statement: &str, scope: Scope) -> Convention {
         let mut c = conv(id, statement);
+        // Every top-level directory a test path can sit in, so a fixture that
+        // is not about scope-versus-sample is not silenced by that guard.
+        c.sample_roots =
+            ["", "app", "src", "pages", "lib", "spec", "docs", "packages", "test", "tests"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
         c.scope = scope;
         c.confidence = Confidence::derive(7, 7).expect("valid");
         c.agreeing = 7;
@@ -802,6 +821,7 @@ mod tests {
             .iter()
             .map(|n| canon_core::Evidence { rel: format!("docs/{n}.md"), line: 0 })
             .collect();
+        docs.sample_roots = vec!["docs".to_string()];
         assert!(
             blocking_violations(
                 ".github/PULL_REQUEST_TEMPLATE.md",
@@ -828,6 +848,7 @@ mod tests {
             .iter()
             .map(|n| canon_core::Evidence { rel: format!("src/{n}.module.css"), line: 0 })
             .collect();
+        modules.sample_roots = vec!["src".to_string()];
         assert!(
             blocking_violations("src/globals.css", Some(".a{}".into()), &[modules], &settings)
                 .is_empty()

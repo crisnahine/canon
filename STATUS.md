@@ -5,13 +5,27 @@ Every number below was executed. Reproduce with the commands shown.
 ## Gates
 
 ```
-cargo build --release              0 errors
-cargo test --workspace             356 passing
-cargo clippy --workspace           0 warnings
-cargo fmt --all --check            clean
-./tests/fail-open.sh               75/75
-./tests/asset-coverage.sh          8 of 8 platforms
-./tests/injection-reaches-the-model.sh   PASS
+cargo build --release                      0 errors
+cargo test --workspace                     356 passing
+cargo clippy --workspace                   0 warnings
+cargo fmt --all --check                    clean
+./tests/fail-open.sh                       75/75
+./tests/asset-coverage.sh                  8 of 8 platforms
+./tests/injection-reaches-the-model.sh     PASS
+tests/refusal-regressions.py               33/33
+tests/issue-regressions.py                 23/23
+```
+
+The last two need fixtures and the corpus:
+
+```
+tests/fixtures-for-issue-regressions.sh /tmp/canon-fixtures
+python3 tests/issue-regressions.py    ./target/release/canon /tmp/canon-fixtures
+python3 tests/refusal-regressions.py  ./target/release/canon
+
+tests/clone-corpus.sh /tmp/canon-corpus/realrepos
+python3 tests/replay-tracked-files.py ./target/release/canon /tmp/canon-corpus
+python3 tests/replay-new-files.py     ./target/release/canon /tmp/canon-corpus
 ```
 
 11,437 lines of Rust across five crates, of which roughly half are tests,
@@ -38,9 +52,23 @@ qualifier its sample never covered, a file too large for the index refused by
 rules it never voted on, and two ways a Rust `impl` block was attributed to the
 wrong type.
 
-Every one has a check in a harness of 18 assertions covering four frameworks'
-route conventions, acronyms and non-Latin names, scope-versus-sample
-mismatches, oversized files, and both attribution defects.
+Every one has a check in a harness of 33 assertions, and each of those
+assertions was run against the binary from before its fix to confirm it
+actually fails there. Twelve fail on the immediately preceding commit; three
+more need the commit before that. A regression test that passes on the code it
+was written to catch is worth nothing, and two of the first batch were exactly
+that — one was saved by a stem name-match rather than by the fix it claimed to
+pin, the other by a fixture that derived no rule of the kind it tested.
+
+A second review round, told the first round's ground was covered, found seven
+more criticals. Four were in the fix for the first round's own headline defect:
+a guard that switched itself off as soon as a rule's sample spanned two
+directories, a branch that skipped that guard entirely, an acronym still
+refused everywhere except `PascalCase`, and a filter that discarded the module
+holding a file's real subject. The other three were unguarded reads — `verify`,
+`reconcile` and `.canon.toml` — each of which hangs forever on a FIFO, which is
+the single failure a fail-open harness cannot report, because there is no
+output to inspect.
 
 ## Every open issue, reproduced rather than read
 
@@ -95,17 +123,17 @@ until the next session, because the decision was baked into the snapshot. The
 escape hatch a refusal points at was inert at the only moment anyone reaches
 for it.
 
-## Nothing legitimate is refused, at 15,265 files and 5,700 new ones
+## Nothing legitimate is refused, at 15,974 files and 5,946 new ones
 
 The safety claim behind enforcement is that a rule may only refuse when every
 file in scope already agrees, so nothing already in the tree can break one.
 
 Measured rather than argued. Every tracked file of a supported extension in all
-fourteen repositories was replayed through the write path, as though the model
+seventeen repositories was replayed through the write path, as though the model
 had just written it:
 
 ```
-15,265 files   11,299 given conventions   0 refused   0 errors
+15,974 files   11,700 given conventions   0 refused   0 errors
 ```
 
 That result is weaker than it sounds, and it is worth being precise about why.
@@ -120,7 +148,7 @@ and the shape idiomatic for that directory — and a test file in each of the
 common naming idioms, into every directory that has an enforceable shape rule:
 
 ```
-5,700 new files   0 refused   0 errors
+5,946 new files   0 refused   0 errors
 ```
 
 Three false positives were found this way and by nothing else. Two Rust files
