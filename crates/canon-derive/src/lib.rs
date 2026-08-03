@@ -46,7 +46,7 @@ pub use naming::Style;
 pub use render::render_block;
 pub use select::for_path;
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot};
-pub use verify::{Violation, verify_source};
+pub use verify::{Violation, blocking_violations, verify_source};
 pub use walk::{FileEntry, entries_for, walk};
 
 use canon_core::{Convention, Settings};

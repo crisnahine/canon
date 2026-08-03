@@ -9,7 +9,8 @@ use std::path::Path;
 
 use canon_core::Settings;
 use canon_derive::{
-    FileEntry, Snapshot, duplicates_against_siblings, for_path, render_block, verify_source,
+    FileEntry, Snapshot, blocking_violations, duplicates_against_siblings, for_path, render_block,
+    verify_source,
 };
 use canon_hook::{Event, HookInput, HookOutput};
 
@@ -75,10 +76,43 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
         return HookOutput::silent();
     };
     let (settings, _) = config::load_or_default(&root);
+
+    // Refusing the write is the only channel the model cannot decline. Every
+    // other one was measured: context before the write steers it, a
+    // `PostToolUse` block delivers a reason and the turn ends anyway, and a
+    // `Stop` block genuinely prevents the turn ending and still does not
+    // compel the edit. So a rule the repository holds without exception is
+    // enforced here, before anything is written, and everything else advises.
+    if let Some(content) = input.tool_input.content.as_deref() {
+        let violations = blocking_violations(&rel, content, &snapshot.conventions);
+        if !violations.is_empty() {
+            logging::info(&format!("refused a write to {rel}: {} violations", violations.len()));
+            return HookOutput::deny(refusal(&rel, &violations));
+        }
+    }
+
     let selected = for_path(&snapshot.conventions, &rel, settings.injection_budget);
     let Some(block) = render_block(&rel, &selected) else { return HookOutput::silent() };
     logging::debug(&format!("injected {} conventions for {rel}", selected.len()));
     HookOutput::context(Event::PreToolUse, block)
+}
+
+/// Why the write was refused, and what would satisfy the rule.
+///
+/// The counts are load-bearing. A refusal without them reads as an arbitrary
+/// gate; with them it reads as a fact about the repository the author can
+/// check, and disagree with, in one command.
+fn refusal(rel: &str, violations: &[canon_derive::Violation]) -> String {
+    let mut text = format!(
+        "canon refused this write to {rel}. It breaks a rule every file in this directory follows, without exception:\n\n"
+    );
+    for v in violations.iter().take(3) {
+        text.push_str(&format!("- {}\n", v.message));
+    }
+    text.push_str(
+        "\nRewrite the file to match, or run `canon explain` to see the files this was derived from and suppress it in .canon.toml if it is wrong.\n",
+    );
+    text
 }
 
 /// Compare what was written against the conventions that applied.

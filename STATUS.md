@@ -1,4 +1,4 @@
-# Measured status — v0.2.0
+# Measured status — v0.3.0
 
 Every number below was executed. Reproduce with the commands shown.
 
@@ -137,9 +137,11 @@ tool a team installs next, which is why the cap exists as well.
 - **Vue and ERB.** Both are two grammars in one file. `Parser::set_included_ranges`
   is the mechanism and it is not wired yet, which leaves 339 `.erb` files
   invisible in the Rails repository measured above.
-- **Blocking enforcement.** The type exists and nothing constructs it. No rule
-  derived by counting should ever refuse a write, and every rule here is
-  derived by counting.
+- **Rewriting a write rather than refusing it.** `PreToolUse` accepts an
+  `updatedInput`, and it works: a hook can replace the content before it is
+  written. Measured, and deliberately not used. canon silently authoring
+  someone's code on a derived rule is a worse failure than anything it would
+  prevent.
 
 ## Facts by query rather than by hand
 
@@ -178,6 +180,31 @@ filter took ten rules down to the two that are real.
 covering `spec/`, `vendor/`, `config/`, `db/` and the whole of `app/`, every one
 arithmetic rather than a choice. A rule whose entire output on a 9,546-file
 repository is noise does not ship, so it was removed rather than tuned.
+
+## What the model can decline, measured
+
+Advisory context is ignorable. The escalation above it was tested against the
+running host rather than assumed, with a hook demanding a marker line the model
+had no other reason to write:
+
+| Channel | Result |
+|---|---|
+| `PreToolUse` `additionalContext` | reaches the model in time and steers the write |
+| `PostToolUse` `decision: block` | reason delivered, hook fired once, turn ended anyway |
+| `Stop` `decision: block` | turn genuinely held open three times, edit still not made |
+| `PreToolUse` `updatedInput` | content rewritten before the write; the model has no say |
+| `PreToolUse` `permissionDecision: deny` | the write does not happen |
+
+Three of the five are persuasion and can be declined. Two are not.
+
+canon uses `deny`, and only for a rule with total agreement and an exact check.
+It does not use `updatedInput`, though it works: rewriting someone's code from
+a rule derived by counting is a worse failure than the one it would prevent.
+
+Verified end to end. Asked directly for a violation — "two public methods named
+`perform` and `also`, do not use a base class" — against a directory where six
+of six files disagree, no file was written. The model stopped and offered the
+suppression path the refusal names.
 
 ## Known limits
 

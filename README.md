@@ -90,10 +90,10 @@ Three reasons, in increasing order of importance:
 
 ## What it deliberately does not do
 
-- **It never blocks a write on a derived rule.** Everything is advisory. A
-  heuristic that denies your tool call is worse than no heuristic, because you
-  cannot tell a real rule from a bad inference at the moment you're
-  interrupted.
+- **It almost never refuses a write.** Everything advises, with one exception:
+  a rule the repository holds *without a single exception*, checked by a test
+  that cannot be wrong about a legitimate file, may refuse. Not 51 of 52 —
+  every file. See "When it refuses" below.
 - **It doesn't replace your linter.** RuboCop and ESLint encode conventions
   someone already wrote down. `canon` covers the ones nobody did: architectural
   shape, naming topology, layering, canonical examples.
@@ -129,6 +129,34 @@ HEAD, so a commit in any one of them refreshes the snapshot.
 This is not a nicety. On the layout above, walking the filesystem instead did
 not finish indexing inside a minute, because one child held a 24 GB tool cache.
 Asking git takes 3.4 seconds for 13,456 files.
+
+## When it refuses
+
+Advisory context is ignorable, and this was measured rather than assumed. Four
+channels reach the model, and three of them the model may simply decline:
+
+| Channel | What happens |
+|---|---|
+| context before the write | steers it, and it can be ignored |
+| a block after the write | the reason is delivered; the turn ended anyway |
+| a block on the turn ending | the turn is genuinely held open, and the edit still may not come |
+| **refusing the write** | the file never lands |
+
+Only the last does not depend on the model cooperating, so it is the only one
+canon uses for a rule it is certain of. Two conditions both have to hold:
+
+**Total agreement.** Every file, not most. One counterexample already in the
+tree means the rule has an exception nobody wrote down, and refusing a write
+that matches an existing file is the fastest way to get a tool uninstalled.
+
+**A check that cannot be wrong.** Counting a type's public methods, reading its
+base type, reading the name of its single public method. Not naming style,
+where a single-word name is compatible with three styles at once. Not "files
+here call `X`", where a new file may legitimately not need that collaborator.
+
+A refusal states the counts and points at `canon explain`, so you can see the
+files it was derived from and suppress it in `.canon.toml` if it is wrong.
+Everything else in this document is advisory and always will be.
 
 ## Supported languages
 

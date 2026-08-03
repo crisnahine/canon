@@ -174,6 +174,23 @@ fn backticked(statement: &str, prefix: &str) -> Option<String> {
     inner.split_once('`').map(|(name, _)| name.to_string())
 }
 
+/// The violations that justify refusing a write.
+///
+/// Only rules the repository agrees on totally and whose check cannot be wrong
+/// about a legitimate file. Everything else is reported and not enforced.
+#[must_use]
+pub fn blocking_violations(rel: &str, source: &str, conventions: &[Convention]) -> Vec<Violation> {
+    let enforceable: Vec<Convention> = conventions
+        .iter()
+        .filter(|c| c.enforcement == canon_core::Enforcement::Blocking)
+        .cloned()
+        .collect();
+    if enforceable.is_empty() {
+        return Vec::new();
+    }
+    verify_source(rel, source, &enforceable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

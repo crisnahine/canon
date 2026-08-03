@@ -62,8 +62,11 @@ where
         start_logging(&input.root());
         handler(&input)
     });
-    // Always zero. Exit 2 blocks the tool call, and no rule derived by
-    // counting is ever confident enough to be worth stopping someone's work.
+    // Always zero. A refusal travels as `permissionDecision: deny` in the
+    // JSON, never as an exit code: exit 2 would block the tool call with
+    // whatever is on stderr, and stderr is a channel this binary must not
+    // touch. Exiting non-zero would also turn every internal failure into a
+    // blocked write, which is the opposite of the contract.
     std::process::ExitCode::SUCCESS
 }
 

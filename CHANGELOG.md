@@ -3,6 +3,34 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-03
+
+### Added
+
+- canon can refuse a write. `Enforcement::Blocking` existed from the first
+  release and nothing ever constructed it; it is now derived for the three
+  rules whose check cannot be wrong about a legitimate file — public method
+  count, entrypoint name, base type — and only where the repository agrees
+  without a single exception.
+- Stale state is swept on the cold path. A snapshot is written per repository
+  and nothing removed it when that repository was deleted; a touched-file list
+  is removed when a turn ends, and a session that is killed never ends.
+
+### Why refusing, and not something gentler
+
+Advisory context is ignorable, which was measured rather than assumed. A hook
+demanded a marker line the model had no other reason to write:
+
+- context before the write reaches the model in time and steers it
+- a `PostToolUse` block delivered its reason and the turn ended anyway
+- a `Stop` block held the turn open three times and the edit still never came
+- refusing the write is the only channel that does not need the model to agree
+
+`PreToolUse` also accepts an `updatedInput`, and it works: a hook can replace
+the content before it is written. canon does not use it. Silently authoring
+someone's code from a rule derived by counting is a worse failure than the one
+it would prevent.
+
 ## [0.2.0] — 2026-08-03
 
 ### Added

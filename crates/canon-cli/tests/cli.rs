@@ -135,11 +135,13 @@ fn context(parsed: &Value) -> Option<&str> {
 #[test]
 fn indexing_then_injecting_produces_the_conventions_for_the_target() {
     let f = Fixture::service_repo("inject");
+    // Content that already satisfies the rules the repository holds without
+    // exception, so this exercises the advisory path rather than the refusal.
     let payload = f.tool_payload(
         "s1",
         "PreToolUse",
         "app/services/item_new.rb",
-        Some("class New\n  def call; end\nend\n"),
+        Some("class ItemNew < ApplicationService\n  def call; end\nend\n"),
     );
     let parsed = f.json(&["inject"], &payload);
 
@@ -148,6 +150,55 @@ fn indexing_then_injecting_produces_the_conventions_for_the_target() {
     assert!(block.contains("exactly 1 public method"), "got {block}");
     assert!(block.contains("named `call`"), "got {block}");
     assert!(block.contains("ApplicationService"), "got {block}");
+}
+
+#[test]
+fn a_write_that_breaks_a_rule_held_without_exception_is_refused() {
+    // The only channel the model cannot decline. Advisory context steers a
+    // write; a refusal prevents it.
+    let f = Fixture::service_repo("refuse");
+    let payload = f.tool_payload(
+        "s1",
+        "PreToolUse",
+        "app/services/item_new.rb",
+        Some("class ItemNew\n  def perform; end\n  def also; end\nend\n"),
+    );
+    let parsed = f.json(&["inject"], &payload);
+
+    assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "deny");
+    let reason =
+        parsed["hookSpecificOutput"]["permissionDecisionReason"].as_str().expect("a reason");
+    assert!(reason.contains("without exception"), "got {reason}");
+    assert!(reason.contains("/6"), "the counts have to be there: {reason}");
+    assert!(reason.contains("canon explain"), "a refusal must be auditable: {reason}");
+}
+
+#[test]
+fn a_rule_with_a_counterexample_never_refuses() {
+    // One disagreeing file in the tree means the rule has an exception nobody
+    // wrote down, and refusing a write that matches it would be indefensible.
+    let f = Fixture::new("refuse-partial");
+    for i in 0..6 {
+        f.write(
+            &format!("app/services/item_{i}.rb"),
+            &format!("class Item{i} < ApplicationService\n  def call; end\nend\n"),
+        );
+    }
+    // The counterexample: same directory, no base class.
+    f.write("app/services/odd_one.rb", "class OddOne\n  def call; end\nend\n");
+    f.run(&["index", "--rebuild"], "");
+
+    let payload = f.tool_payload(
+        "s1",
+        "PreToolUse",
+        "app/services/item_new.rb",
+        Some("class ItemNew\n  def call; end\nend\n"),
+    );
+    let parsed = f.json(&["inject"], &payload);
+    assert!(
+        parsed["hookSpecificOutput"]["permissionDecision"].is_null(),
+        "a rule with a counterexample must only advise: {parsed}"
+    );
 }
 
 #[test]
