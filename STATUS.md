@@ -1,4 +1,4 @@
-# Measured status — v0.4.0
+# Measured status — v0.4.1
 
 Every number below was executed. Reproduce with the commands shown.
 
@@ -6,7 +6,7 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release              0 errors
-cargo test --workspace             311 passing
+cargo test --workspace             342 passing
 cargo clippy --workspace           0 warnings
 cargo fmt --all --check            clean
 ./tests/fail-open.sh               75/75
@@ -14,8 +14,106 @@ cargo fmt --all --check            clean
 ./tests/injection-reaches-the-model.sh   PASS
 ```
 
-9,380 lines of Rust across five crates, of which roughly half are tests,
-plus 105 lines of tree-sitter query across seven languages.
+10,516 lines of Rust across five crates, of which roughly half are tests,
+plus 195 lines of tree-sitter query across seven languages.
+
+## Fourteen public repositories, and what they found
+
+The gates above were green before any of this. Every defect in the 0.4.1
+changelog was found by running the release binary against real code: Mastodon,
+Laravel, RuboCop, Nuxt, Vue, Redux Toolkit, ripgrep, Flask, requests, gin,
+cobra, Slim, Sinatra and axios, plus twenty-four purpose-shaped repositories
+covering the idioms each supported language actually uses.
+
+| | files | languages | conventions | index |
+|---|---|---|---|---|
+| Mastodon | 9,870 | ERB, JSX, JS, Ruby, TSX, TS | 106 | 1.6 s |
+| Laravel | 3,338 | JS, PHP | 127 | 2.4 s |
+| RuboCop | 2,205 | ERB, Ruby | 41 | 1.2 s |
+| Nuxt | 1,873 | JS, TSX, TS, Vue | 30 | 0.5 s |
+| Redux Toolkit | 1,149 | JSX, JS, TSX, TS | 19 | 0.4 s |
+| Vue | 704 | JS, TSX, TS, Vue | 26 | 0.6 s |
+| axios | 460 | JS, TS | 11 | 0.2 s |
+| ripgrep | 236 | Ruby, Rust | 5 | 0.2 s |
+
+Three classes of defect came out that a fixture cannot produce. A naming rule
+derived from one name repeated ten times, enforced, refusing an ordinary file.
+Extractors blind to the idioms real code is written in — a decorated Python
+class, a generic Go or Rust type, a type inside an inline `mod`. And a hot path
+paying 25 ms per write to compile a tree-sitter query whose results the check
+then discarded.
+
+The one that mattered most was none of those. `enforce = false` did nothing
+until the next session, because the decision was baked into the snapshot. The
+escape hatch a refusal points at was inert at the only moment anyone reaches
+for it.
+
+## Nothing legitimate is refused, at 15,265 files and 5,700 new ones
+
+The safety claim behind enforcement is that a rule may only refuse when every
+file in scope already agrees, so nothing already in the tree can break one.
+
+Measured rather than argued. Every tracked file of a supported extension in all
+fourteen repositories was replayed through the write path, as though the model
+had just written it:
+
+```
+15,265 files   11,299 given conventions   0 refused   0 errors
+```
+
+That result is weaker than it sounds, and it is worth being precise about why.
+Every file in the index has already voted, so a rule that refused one of them
+could not have reached total agreement in the first place. The replay confirms
+the invariant holds; it cannot find the case where a refusal actually happens,
+which is a file that does not exist yet.
+
+So the second harness writes *new* files into real directories. The content of
+one tracked file at the path of another in the same directory — both the name
+and the shape idiomatic for that directory — and a test file in each of the
+common naming idioms, into every directory that has an enforceable shape rule:
+
+```
+5,700 new files   0 refused   0 errors
+```
+
+Three false positives were found this way and by nothing else. Two Rust files
+that satisfy the arity rule they were refused by — two modules declaring the
+same type name, and a type implemented from two `#[cfg]`-gated modules — and
+the first test file written into any directory of service objects, which was
+told it must inherit `BaseService` and expose one public method.
+
+Deliberate violations are still caught, through the same code path: a Laravel
+console command whose entrypoint is `run` rather than `handle`, a RuboCop cop
+exposing `check` rather than `on_send`, a `newBinding.go` in a repository of 58
+unanimous `snake_case` names.
+
+## The whole loop, against the running host
+
+Not the hook in isolation — the plugin installed, in a real session, in a
+six-file Python repository canon had never seen.
+
+Asked for "a service in `app/services/` that voids a subscription", with
+nothing said about house style, the first write was:
+
+```python
+from app.services.base import BaseService
+
+
+class VoidSubscription(BaseService):
+    def execute(self, payload):
+        return self._run(payload)
+
+    def _run(self, payload):
+        return payload
+```
+
+All five derived conventions, on the first attempt.
+
+Asked for one that broke three of them on purpose, the file never landed. The
+refusal named each rule with its counts and its id and printed the `suppress`
+line. Told to use whatever escape hatch the tooling offered, the model wrote
+that line into `.canon.toml` and the retry succeeded — in the same session,
+which is the fix that release is mostly about.
 
 ## The assumption everything rests on, and how it was checked
 
@@ -50,8 +148,21 @@ Hot path, the one that runs before every write, on the 9,545-file repository:
 inject   median 2.6 ms   p95 3.6 ms   max 6.1 ms      (budget 50 ms)
 ```
 
-It is a single file read and a filter over a 52 KB snapshot. No tree walk, no
-parsing, no subprocess.
+One file read, a filter over the snapshot, and a parse of the content about to
+be written. No tree walk and no subprocess.
+
+That parse is the only expensive thing on the path, and it was five times the
+cost of everything else put together until 0.4.1. Measured again on a
+9,870-file Rails repository:
+
+```
+inject   median 2.6 ms   p95 4.2 ms       (was 27.3 ms)
+```
+
+A tree-sitter query is compiled once per process and a hook is one process per
+write, so 25 ms of Ruby query compilation landed on every single write — to
+produce call and raise facts that the check does not read. The write path
+extracts structure only. Nothing else changed.
 
 What it derived for the Rails repository. Counts and confidences are as
 measured; class and file names are changed, because that repository is private:
@@ -226,8 +337,8 @@ it would prevent.
 The default is on because the alternative is a tool followed when convenient,
 and because the condition for refusing makes a false positive a contradiction:
 a rule only qualifies when every file in scope already agrees, so no existing
-file can break one. Checked rather than argued — 400 tracked Ruby files from a
-production repository, replayed through the write path, refused none.
+file can break one. Checked rather than argued — 15,265 tracked files from
+fourteen public repositories, replayed through the write path, refused none.
 
 The injection budget is not what bounds the block. Measured on the same
 workspace, real paths spend 262 to 486 bytes of it, and raising it from 1,500
@@ -248,10 +359,17 @@ three lines. Being wrong about duplication is more insulting than being silent
 about it, so the floor is set high: a ten-line service object shares its whole
 shape with every sibling by design and is never flagged.
 
-**A single-word file name proves nothing.** `create` is valid `snake_case`,
-`kebab-case` and `camelCase` simultaneously. A directory of single-word names is
-compatible with every style and evidence for none, so no naming rule is derived
-unless the sample contains a name that actually distinguishes them.
+**A single-word file name proves nothing, and a repeated one proves less.**
+`create` is valid `snake_case`, `kebab-case` and `camelCase` simultaneously, so
+no naming rule is derived unless the sample contains a name that actually
+distinguishes them. Ten copies of one name are one observation, so the sample
+is counted in distinct names — the gate that stops `crates/*/Cargo.toml` from
+deriving `PascalCase` and refusing a `deny.toml`.
+
+**Style is read from the name root.** `charge_card.html.erb` is named
+`charge_card`, `globals.d.ts` is named `globals`, `payments.service.ts` is
+named `payments`. Reading up to the last dot instead made all three compatible
+with no style at all, and one of them was enough to silence a whole directory.
 
 **Old code still votes, at a discount.** Weight halves every 365 days by
 default, floored at 5%. A directory nobody has touched in three years still

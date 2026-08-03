@@ -81,7 +81,7 @@ fn embedded_type(spec: tree_sitter::Node<'_>, src: &str) -> Option<String> {
         .filter(|f| f.kind() == "field_declaration")
         .find(|f| f.child_by_field_name("name").is_none())
         .and_then(|f| f.child_by_field_name("type"))
-        .map(|t| text(t, src).trim_start_matches('*').to_string())
+        .map(|t| bare_name(&text(t, src)))
 }
 
 fn receiver_type(method: tree_sitter::Node<'_>, src: &str) -> Option<String> {
@@ -94,7 +94,18 @@ fn receiver_type(method: tree_sitter::Node<'_>, src: &str) -> Option<String> {
     } else {
         ty
     };
-    Some(text(ident, src).trim_start_matches('*').to_string())
+    Some(bare_name(&text(ident, src)))
+}
+
+/// A type name without its pointer marker or its type arguments.
+///
+/// `type Cache[T any] struct` declares `Cache`, and its methods are written
+/// `func (c *Cache[T]) Get()`. Comparing the receiver text against the declared
+/// name left every generic type with no methods at all: no arity rule, no
+/// entrypoint rule, nothing.
+fn bare_name(text: &str) -> String {
+    let text = text.trim_start_matches('*');
+    text.split_once('[').map_or(text, |(name, _)| name).trim().to_string()
 }
 
 fn collect_imports(node: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
@@ -136,6 +147,22 @@ mod tests {
     fn value_and_pointer_receivers_bind_to_the_same_type() {
         let f = f("package a\ntype S struct{}\nfunc (s S) A() {}\nfunc (s *S) B() {}\n");
         assert_eq!(f.types[0].public_arity(), 2);
+    }
+
+    #[test]
+    fn a_generic_type_keeps_the_methods_declared_against_it() {
+        let f = f(
+            "package a\ntype Cache[T any] struct{}\nfunc (c *Cache[T]) Get() {}\nfunc (c Cache[T]) put() {}\n",
+        );
+        assert_eq!(f.types[0].name, "Cache");
+        assert_eq!(f.types[0].public_methods, vec!["Get"]);
+        assert_eq!(f.types[0].public_arity(), 1);
+    }
+
+    #[test]
+    fn a_generic_embedded_field_reduces_to_its_base_name() {
+        let f = f("package a\ntype S struct {\n  Base[int]\n}\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("Base"));
     }
 
     #[test]

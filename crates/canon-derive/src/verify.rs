@@ -29,6 +29,35 @@ pub struct Violation {
 /// nothing to say.
 #[must_use]
 pub fn verify_source(rel: &str, source: &str, conventions: &[Convention]) -> Vec<Violation> {
+    verify_with(rel, source, conventions, Strictness::Advisory)
+}
+
+/// How closely a check has to match the sample the rule was derived from.
+///
+/// The two callers want different things and used to get the same thing.
+///
+/// Advice is generous on purpose: a type with `up` and `down` is told the
+/// entrypoint here is named `change`, even though only single-method files
+/// were counted, because withholding that costs two round trips to fix one
+/// file.
+///
+/// A refusal cannot be generous. A rule may only refuse when every file in
+/// scope agrees, and "in scope" has to mean the files the rule was actually
+/// counted over. Applied to the others it refused correct code: `RuboCop`'s
+/// `lib/rubocop/server/core.rb`, which has two public methods where the rule
+/// was derived from seven files that have one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Strictness {
+    Advisory,
+    OnlyWhatWasCounted,
+}
+
+fn verify_with(
+    rel: &str,
+    source: &str,
+    conventions: &[Convention],
+    strictness: Strictness,
+) -> Vec<Violation> {
     let applicable: Vec<&Convention> =
         conventions.iter().filter(|c| c.scope.matches(rel)).collect();
     if applicable.is_empty() {
@@ -36,23 +65,40 @@ pub fn verify_source(rel: &str, source: &str, conventions: &[Convention]) -> Vec
     }
 
     let mut out = Vec::new();
-    for convention in &applicable {
-        if let Some(v) = check_naming(rel, convention) {
-            out.push(v);
+    if crate::tier0::counts_toward_naming(rel) {
+        for convention in &applicable {
+            if let Some(v) = check_naming(rel, convention) {
+                out.push(v);
+            }
         }
     }
 
+    // Structure only. Every check below reads declarations; none reads a call
+    // site, and compiling the query for facts nobody looks at is most of what
+    // a write costs.
     let facts = extension_of(rel)
         .and_then(canon_extract::lang::from_extension)
-        .and_then(|l| canon_extract::extract(l, source, rel).ok());
+        .and_then(|l| canon_extract::extract_structure(l, source, rel).ok());
     let Some(facts) = facts else { return out };
+
+    // A test is a different kind of file from the code beside it, and a shape
+    // rule derived from a directory is a rule about that code. The first test
+    // written into such a directory has no counterexample in the sample yet,
+    // so the rule is still at total agreement and refused it: a colocated
+    // `test_void_invoice.py` was told it must inherit `BaseService` and expose
+    // one public method. Advice on it is harmless and stays; a refusal is the
+    // check being wrong about a legitimate file, which is the one thing
+    // enforcement is not allowed to be.
+    if strictness == Strictness::OnlyWhatWasCounted && crate::tier0::is_test_path(rel) {
+        return out;
+    }
 
     // Resolved once, the same way deriving resolves it, so the two halves
     // cannot disagree about which type a convention is about.
     let subject = crate::subject::primary_type(&facts, crate::subject::stem_of(rel));
 
     for convention in &applicable {
-        out.extend(check_shape(&facts, subject, convention));
+        out.extend(check_shape(&facts, subject, convention, strictness));
     }
     out
 }
@@ -65,8 +111,11 @@ fn check_naming(rel: &str, convention: &Convention) -> Option<Violation> {
     let expected = convention.id.starts_with("naming.").then(|| {
         naming::Style::ALL.iter().copied().find(|s| convention.statement.contains(s.label()))
     })??;
-    let stem = crate::subject::stem_of(rel);
-    if naming::is_compatible(stem, expected) {
+    // The same root the rule was derived from. Reading up to the last dot here
+    // and up to the first dot there would report `Button.module.css` as
+    // breaking a rule it was never counted against.
+    let stem = naming::name_root(crate::subject::stem_of(rel));
+    if stem.is_empty() || naming::is_compatible(stem, expected) {
         return None;
     }
     Some(Violation {
@@ -84,6 +133,7 @@ fn check_shape(
     facts: &FileFacts,
     subject: Option<&canon_extract::TypeFacts>,
     convention: &Convention,
+    strictness: Strictness,
 ) -> Vec<Violation> {
     let evidence = format!("{}/{}", convention.agreeing, convention.total);
     let mut out = Vec::new();
@@ -123,11 +173,16 @@ fn check_shape(
         });
     }
 
-    // Whatever the arity. Gating this on a single public method withheld the
-    // rule from exactly the files that broke it hardest: a type with `up` and
-    // `down` was told its count was wrong and never told the expected name,
-    // which is two round trips to fix one file.
+    // Whatever the arity, when advising. Gating that on a single public method
+    // withheld the rule from exactly the files that broke it hardest: a type
+    // with `up` and `down` was told its count was wrong and never told the
+    // expected name, which is two round trips to fix one file.
+    //
+    // A refusal is gated, because the rule was derived over the files with one
+    // public method and says nothing about the rest.
+    let entrypoint_applies = strictness == Strictness::Advisory || t.public_arity() == 1;
     if let Some(expected) = backticked(&convention.statement, "That public method is named ")
+        && entrypoint_applies
         && !t.public_methods.is_empty()
         && !t.public_methods.contains(&expected)
     {
@@ -189,17 +244,31 @@ fn backticked(statement: &str, prefix: &str) -> Option<String> {
 ///
 /// Only rules the repository agrees on totally and whose check cannot be wrong
 /// about a legitimate file. Everything else is reported and not enforced.
+///
+/// Enforcement is recomputed from `settings` rather than read off the
+/// snapshot. A refusal tells the author to turn it off in `.canon.toml`, and
+/// reading the stored decision meant doing so had no effect until the next
+/// session rebuilt the snapshot — the escape hatch was inert at exactly the
+/// moment it was needed.
 #[must_use]
-pub fn blocking_violations(rel: &str, source: &str, conventions: &[Convention]) -> Vec<Violation> {
+pub fn blocking_violations(
+    rel: &str,
+    source: &str,
+    conventions: &[Convention],
+    settings: &canon_core::Settings,
+) -> Vec<Violation> {
+    if !settings.enforce {
+        return Vec::new();
+    }
     let enforceable: Vec<Convention> = conventions
         .iter()
-        .filter(|c| c.enforcement == canon_core::Enforcement::Blocking)
+        .filter(|c| c.enforcement_now(settings) == canon_core::Enforcement::Blocking)
         .cloned()
         .collect();
     if enforceable.is_empty() {
         return Vec::new();
     }
-    verify_source(rel, source, &enforceable)
+    verify_with(rel, source, &enforceable, Strictness::OnlyWhatWasCounted)
 }
 
 #[cfg(test)]
@@ -366,6 +435,169 @@ mod tests {
             verify_source("src/a.ts", "export const a = () => 1;\nexport const b = () => 2;", &[c]);
         assert_eq!(two.len(), 1);
         assert!(two[0].message.contains("exports 2 function"));
+    }
+
+    fn blocking(id: &str, statement: &str, scope: Scope) -> Convention {
+        let mut c = conv(id, statement);
+        c.scope = scope;
+        c.confidence = Confidence::derive(7, 7).expect("valid");
+        c.agreeing = 7;
+        c.total = 7;
+        c
+    }
+
+    #[test]
+    fn a_file_the_rule_was_never_counted_over_is_not_refused_for_breaking_it() {
+        // Every false positive fourteen real repositories produced, and all
+        // one defect: deriving excludes a file from the sample, then checking
+        // judges it against the resulting rule.
+        let settings = canon_core::Settings::default();
+        let rule = blocking(
+            "naming.repo.rb",
+            "Files here are named in snake_case",
+            Scope::Ext("rb".into()),
+        );
+        for excluded in [
+            "spec/views/auth/_status.html.haml_spec.rb",     // a test
+            "app/javascript/utils/__tests__/base64-test.rb", // a test, by directory
+        ] {
+            assert!(
+                blocking_violations(
+                    excluded,
+                    "class A; end\n",
+                    std::slice::from_ref(&rule),
+                    &settings
+                )
+                .is_empty(),
+                "{excluded} was refused by a rule derived without it"
+            );
+        }
+
+        let py = blocking(
+            "naming.repo.py",
+            "Files here are named in snake_case",
+            Scope::Ext("py".into()),
+        );
+        assert!(
+            blocking_violations("src/flask/json/__init__.py", "x = 1\n", &[py], &settings)
+                .is_empty(),
+            "a dunder name is excluded when deriving and must be when checking"
+        );
+
+        let rst = blocking(
+            "naming.repo.rst",
+            "Files here are named in kebab-case",
+            Scope::Ext("rst".into()),
+        );
+        assert!(
+            blocking_violations("AUTHORS.rst", "x\n", &[rst], &settings).is_empty(),
+            "a conventional name is excluded when deriving and must be when checking"
+        );
+
+        // A file the rule does speak for is still refused.
+        assert_eq!(
+            blocking_violations("app/services/NotSnake.rb", "class A; end\n", &[rule], &settings)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_first_test_written_into_a_directory_is_not_refused_by_its_code_rules() {
+        // The sample cannot contain it yet, so the rule is still at total
+        // agreement and refused it. A colocated `test_void_invoice.py` was told
+        // it must inherit `BaseService` and expose one public method.
+        let settings = canon_core::Settings::default();
+        let rules = vec![
+            blocking(
+                "shape.base.app.py",
+                "Types here inherit from `BaseService`",
+                Scope::DirExt("app".into(), "py".into()),
+            ),
+            blocking(
+                "shape.public-arity.app.py",
+                "Types here expose exactly 1 public method",
+                Scope::DirExt("app".into(), "py".into()),
+            ),
+        ];
+        let test_file = "class TestVoidInvoice:\n    def test_voids(self): pass\n    def test_rejects(self): pass\n";
+        for rel in [
+            "app/services/test_void_invoice.py",
+            "app/services/__tests__/test_void_invoice.py",
+            "app/services/void_invoice_test.py",
+        ] {
+            assert!(
+                blocking_violations(rel, test_file, &rules, &settings).is_empty(),
+                "{rel} was refused for not being shaped like the code it tests"
+            );
+        }
+
+        // The code beside it is still held to the rules.
+        assert!(
+            !blocking_violations("app/services/void_invoice.py", test_file, &rules, &settings)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_entrypoint_rule_advises_at_any_arity_and_refuses_at_the_one_it_counted() {
+        // Derived over files with a single public method. Advising a type with
+        // two is deliberate and saves a round trip; refusing it applies the
+        // rule to files it was never counted over, and it refused RuboCop's
+        // own `lib/rubocop/server/core.rb`.
+        let settings = canon_core::Settings::default();
+        let rule = blocking(
+            "shape.entrypoint.lib.rb",
+            "That public method is named `run`",
+            Scope::DirExt("lib".into(), "rb".into()),
+        );
+        let two = "class Core\n  def token; end\n  def start; end\nend\n";
+
+        let advice = verify_source("lib/core.rb", two, std::slice::from_ref(&rule));
+        assert!(advice.iter().any(|v| v.message.contains("`run`")), "advice was withheld");
+
+        assert!(
+            blocking_violations("lib/core.rb", two, std::slice::from_ref(&rule), &settings)
+                .is_empty(),
+            "a two-method type was refused by a rule counted over one-method files"
+        );
+
+        let one = "class Core\n  def token; end\nend\n";
+        assert_eq!(blocking_violations("lib/core.rb", one, &[rule], &settings).len(), 1);
+    }
+
+    #[test]
+    fn enforcement_and_suppression_are_read_per_write_not_per_snapshot() {
+        // The stored decision made `.canon.toml` inert until the next session,
+        // which is the one moment nobody reaches for it.
+        let rule = blocking(
+            "naming.repo.rb",
+            "Files here are named in snake_case",
+            Scope::Ext("rb".into()),
+        );
+        let rel = "app/NotSnake.rb";
+        let source = "class A; end\n";
+
+        let on = canon_core::Settings::default();
+        assert_eq!(blocking_violations(rel, source, std::slice::from_ref(&rule), &on).len(), 1);
+
+        let off = canon_core::Settings { enforce: false, ..canon_core::Settings::default() };
+        assert!(blocking_violations(rel, source, std::slice::from_ref(&rule), &off).is_empty());
+
+        let suppressed = canon_core::Settings {
+            suppress: vec!["naming.repo.rb".to_string()],
+            ..canon_core::Settings::default()
+        };
+        assert!(
+            blocking_violations(rel, source, std::slice::from_ref(&rule), &suppressed).is_empty()
+        );
+
+        let mut rollup = rule;
+        rollup.id = "naming.repo.rb.rollup".to_string();
+        assert!(
+            blocking_violations(rel, source, &[rollup], &on).is_empty(),
+            "a rule assembled from other rules generalises to directories that never voted"
+        );
     }
 
     #[test]

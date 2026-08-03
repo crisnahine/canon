@@ -45,34 +45,51 @@ impl Style {
     }
 }
 
+/// The part of a file name a style rule is about.
+///
+/// Everything before the first dot, not the last. `charge_card.html.erb`,
+/// `globals.d.ts`, `Button.module.css` and `payments.service.ts` are all named
+/// after the thing before the qualifiers, and the qualifiers are not part of
+/// anybody's naming convention.
+///
+/// Reading up to the last dot instead made every one of those compatible with
+/// no style at all, because a `.` is not a word character. One `globals.d.ts`
+/// in a directory of six `snake_case` files took that directory from four
+/// conventions to none, and every Rails view is a `*.html.erb`.
+#[must_use]
+pub(crate) fn name_root(stem: &str) -> &str {
+    stem.split_once('.').map_or(stem, |(root, _)| root)
+}
+
 /// Whether `name` could have been written in `style`.
 ///
 /// Compatibility, not classification. One name can be compatible with several
 /// styles and that is the normal case for short names.
+///
+/// Unicode-aware rather than ASCII-only. `café_service` is `snake_case` by any
+/// reading, and treating it as compatible with nothing meant a blocking naming
+/// rule refused it in a repository whose other file names happened to be
+/// ASCII. Scripts with no case distinction classify as lowercase, which is the
+/// right answer: they cannot witness a style and they cannot break one.
 #[must_use]
 pub(crate) fn is_compatible(name: &str, style: Style) -> bool {
     if name.is_empty() {
         return false;
     }
-    let alnum_ok = |sep: char| {
-        name.chars().all(|c| c.is_ascii_alphanumeric() || c == sep)
+    let word_ok = |sep: char| {
+        name.chars().all(|c| c.is_alphanumeric() || c == sep)
             && !name.starts_with(sep)
             && !name.ends_with(sep)
             && !name.contains([sep, sep].iter().collect::<String>().as_str())
     };
+    let alnum = || name.chars().all(char::is_alphanumeric);
     let first = name.chars().next().unwrap_or('_');
     match style {
-        Style::Snake => alnum_ok('_') && !name.chars().any(|c| c.is_ascii_uppercase()),
-        Style::Kebab => alnum_ok('-') && !name.chars().any(|c| c.is_ascii_uppercase()),
-        Style::Camel => {
-            first.is_ascii_lowercase() && name.chars().all(|c| c.is_ascii_alphanumeric())
-        }
-        Style::Pascal => {
-            first.is_ascii_uppercase()
-                && name.chars().all(|c| c.is_ascii_alphanumeric())
-                && name.chars().any(|c| c.is_ascii_lowercase())
-        }
-        Style::ScreamingSnake => alnum_ok('_') && !name.chars().any(|c| c.is_ascii_lowercase()),
+        Style::Snake => word_ok('_') && !name.chars().any(char::is_uppercase),
+        Style::Kebab => word_ok('-') && !name.chars().any(char::is_uppercase),
+        Style::Camel => first.is_lowercase() && alnum(),
+        Style::Pascal => first.is_uppercase() && alnum() && name.chars().any(char::is_lowercase),
+        Style::ScreamingSnake => word_ok('_') && !name.chars().any(char::is_lowercase),
     }
 }
 
@@ -88,17 +105,32 @@ pub(crate) fn is_discriminating(name: &str) -> bool {
     }
     let mut chars = name.chars();
     let Some(first) = chars.next() else { return false };
-    first.is_ascii_uppercase() || chars.any(|c| c.is_ascii_uppercase())
+    first.is_uppercase() || chars.any(char::is_uppercase)
 }
 
 /// The styles every name in `names` is compatible with, but only when the
-/// sample contains at least one name that distinguishes between styles.
+/// sample is large enough and varied enough to have witnessed one.
 ///
-/// Returns an empty vector when the sample is all single lowercase words,
-/// because there is genuinely nothing to say.
+/// Two gates, and both were needed against real repositories.
+///
+/// At least one name has to *distinguish* between styles, or the sample is all
+/// single lowercase words and is evidence for three styles at once.
+///
+/// And the sample has to contain `min_distinct` different names. Ten files all
+/// called `Cargo.toml` are one observation, not ten, and the rule they produced
+/// — "files here are named in `PascalCase`", at total agreement, enforced —
+/// refused a perfectly ordinary `deny.toml`. Counting files rather than names
+/// is what let one repeated name look unanimous.
+///
+/// Returns an empty vector when either gate fails, because there is genuinely
+/// nothing to say.
 #[must_use]
-pub(crate) fn shared_styles(names: &[String]) -> Vec<Style> {
+pub(crate) fn shared_styles(names: &[String], min_distinct: usize) -> Vec<Style> {
     if !names.iter().any(|n| is_discriminating(n)) {
+        return Vec::new();
+    }
+    let distinct: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+    if distinct.len() < min_distinct {
         return Vec::new();
     }
     Style::ALL.iter().copied().filter(|s| names.iter().all(|n| is_compatible(n, *s))).collect()
@@ -138,18 +170,55 @@ mod tests {
 
     #[test]
     fn a_sample_of_single_words_yields_no_style_convention() {
-        assert!(shared_styles(&owned(&["create", "update", "delete"])).is_empty());
+        assert!(shared_styles(&owned(&["create", "update", "delete"]), 3).is_empty());
     }
 
     #[test]
     fn one_discriminating_name_is_enough_to_pin_the_style() {
-        let got = shared_styles(&owned(&["create", "update", "cancel_enrolment"]));
+        let got = shared_styles(&owned(&["create", "update", "cancel_enrolment"]), 3);
         assert_eq!(got, vec![Style::Snake]);
     }
 
     #[test]
     fn a_mixed_sample_agrees_on_nothing() {
-        assert!(shared_styles(&owned(&["create_a", "createB"])).is_empty());
+        assert!(shared_styles(&owned(&["create_a", "createB"]), 2).is_empty());
+    }
+
+    #[test]
+    fn one_name_repeated_is_one_observation_not_many() {
+        // Ten `Cargo.toml` files derived an enforced PascalCase rule that
+        // refused `deny.toml`. Distinct names, not file count, is the sample.
+        let repeated = owned(&["Cargo", "Cargo", "Cargo", "Cargo", "Cargo"]);
+        assert!(shared_styles(&repeated, 5).is_empty());
+        assert_eq!(shared_styles(&repeated, 1), vec![Style::Pascal]);
+    }
+
+    #[test]
+    fn a_name_root_stops_at_the_first_dot() {
+        assert_eq!(name_root("charge_card.html"), "charge_card");
+        assert_eq!(name_root("globals.d"), "globals");
+        assert_eq!(name_root("payments.service"), "payments");
+        assert_eq!(name_root("charge_card"), "charge_card");
+        assert_eq!(name_root(""), "");
+    }
+
+    #[test]
+    fn an_accented_name_is_snake_case_like_any_other() {
+        // Blocking on naming refused `café_service.py` in a repository whose
+        // other names happened to be ASCII.
+        assert!(is_compatible("café_service", Style::Snake));
+        assert!(is_compatible("héllo_wörld", Style::Snake));
+        assert!(!is_compatible("Café_Service", Style::Snake));
+        assert_eq!(
+            shared_styles(&owned(&["café_service", "refund_payment"]), 2),
+            vec![Style::Snake]
+        );
+    }
+
+    #[test]
+    fn a_script_without_case_cannot_witness_a_style_or_break_one() {
+        assert!(is_compatible("請求書", Style::Snake));
+        assert!(!is_discriminating("請求書"));
     }
 
     #[test]

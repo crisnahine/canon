@@ -13,44 +13,6 @@ use canon_extract::FileFacts;
 use crate::tier0::{id_fragment, scope_for};
 use crate::walk::FileEntry;
 
-/// How far a rule of this kind may go when the code disagrees.
-///
-/// Advisory is the default and stays the default. Refusing a write on a
-/// heuristic is worse than not having the heuristic, because the developer
-/// cannot tell a real rule from a bad inference at the moment they are
-/// interrupted.
-///
-/// Two conditions have to hold together before a rule may refuse anything.
-///
-/// The repository has to agree *totally*. Not 51 of 52: every single file. One
-/// counterexample already in the tree means the rule has an exception nobody
-/// wrote down, and blocking a write that matches an existing file is the
-/// fastest way to get a tool uninstalled.
-///
-/// And the check has to be one that cannot be wrong about a legitimate file.
-/// Counting a type's public methods, reading its base, and reading the name of
-/// its single public method are all exact. Naming style is not: a single-word
-/// file name is compatible with three styles at once. "Files here call `X`" is
-/// not: a new file may legitimately not need that collaborator yet.
-pub(crate) fn enforcement_for(
-    kind: &str,
-    confidence: Confidence,
-    settings: &Settings,
-) -> Enforcement {
-    /// Checks that cannot be wrong about a legitimate file.
-    ///
-    /// `naming` is the safest of them: a string comparison on the path, with
-    /// no parsing, no language extractor, and no question about which type in
-    /// the file is the subject. The shape checks read one resolved subject,
-    /// which is only true since they stopped judging every declared type.
-    const EXACT: &[&str] = &["naming", "shape.public-arity", "shape.entrypoint", "shape.base"];
-    if settings.enforce && confidence.is_blocking_grade() && EXACT.contains(&kind) {
-        Enforcement::Blocking
-    } else {
-        Enforcement::Advisory
-    }
-}
-
 /// Facts for one file, tagged with where it lives and how much it counts.
 pub(crate) struct FactSet {
     pub rel: String,
@@ -221,7 +183,7 @@ fn public_arity(
         total: observations.len(),
         exemplar: exemplar(&observations, &arity),
         evidence: evidence(&observations, &arity),
-        enforcement: enforcement_for("shape.public-arity", confidence, settings),
+        enforcement: canon_core::enforcement_for("shape.public-arity", confidence, settings),
     })
 }
 
@@ -257,7 +219,7 @@ fn entrypoint_name(
         total: observations.len(),
         exemplar: exemplar(&observations, &name),
         evidence: evidence(&observations, &name),
-        enforcement: enforcement_for("shape.entrypoint", confidence, settings),
+        enforcement: canon_core::enforcement_for("shape.entrypoint", confidence, settings),
     })
 }
 
@@ -287,7 +249,7 @@ fn base_class(
         total: observations.len(),
         exemplar: exemplar(&observations, &winner),
         evidence: evidence(&observations, &winner),
-        enforcement: enforcement_for("shape.base", confidence, settings),
+        enforcement: canon_core::enforcement_for("shape.base", confidence, settings),
     })
 }
 

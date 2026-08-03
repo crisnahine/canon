@@ -207,16 +207,35 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
 /// happen to share a sentence each speak for their own files, and dropping
 /// either would leave those files with no rule at all.
 fn collapse_redundant(conventions: &mut Vec<Convention>) {
-    let keyed: Vec<(String, String, String)> =
-        conventions.iter().map(|c| (c.statement.clone(), scope_ext(c), scope_dir(c))).collect();
+    let keyed: Vec<(String, String, String, bool)> = conventions
+        .iter()
+        .map(|c| {
+            (
+                c.statement.clone(),
+                scope_ext(c),
+                scope_dir(c),
+                c.id.ends_with(canon_core::ROLLUP_SUFFIX),
+            )
+        })
+        .collect();
 
     // `is_ancestor` is false for equal directories, so a rule never eliminates
     // itself and no index bookkeeping is needed to skip it.
+    //
+    // A rolled-up ancestor does not absorb a child, because the two do not say
+    // the same thing with the same authority: the child was counted over the
+    // files it speaks for and may refuse a write, while the rollup generalises
+    // to sibling directories that have not voted and never refuses anything.
+    // Dropping the child moved a directory from enforced to advisory without
+    // anything in the output saying so.
     let keep: Vec<bool> = keyed
         .iter()
-        .map(|(statement, ext, dir)| {
-            !keyed.iter().any(|(other_statement, other_ext, other_dir)| {
-                other_statement == statement && other_ext == ext && is_ancestor(other_dir, dir)
+        .map(|(statement, ext, dir, _)| {
+            !keyed.iter().any(|(other_statement, other_ext, other_dir, other_rollup)| {
+                other_statement == statement
+                    && other_ext == ext
+                    && !other_rollup
+                    && is_ancestor(other_dir, dir)
             })
         })
         .collect();

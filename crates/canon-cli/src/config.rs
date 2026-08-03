@@ -73,11 +73,19 @@ pub(crate) fn load(root: &Path) -> Result<Settings, ConfigError> {
 ///
 /// Used by every hook. Returns the reason alongside, so the caller can log it
 /// to a file rather than pretending nothing happened.
+///
+/// Enforcement is off in that fallback, which is the one place the defaults are
+/// not the defaults. A refusal tells the author to edit `.canon.toml`, and the
+/// two likeliest ways to get that wrong both produce a file that will not
+/// parse: a typo in a key, and appending a second `suppress =` line to a file
+/// that already has one. Falling back to `enforce = true` answered both by
+/// refusing the write again, silently, with no way to see why — the setting
+/// that can block a write has to fail toward permissive.
 #[must_use]
 pub(crate) fn load_or_default(root: &Path) -> (Settings, Option<ConfigError>) {
     match load(root) {
         Ok(settings) => (settings, None),
-        Err(e) => (Settings::default(), Some(e)),
+        Err(e) => (Settings { enforce: false, ..Settings::default() }, Some(e)),
     }
 }
 
@@ -252,7 +260,34 @@ mod tests {
         // A hook has no way to show an error, so it must keep working.
         let root = dir("degrade", Some("min_fils = 9\n"));
         let (settings, err) = load_or_default(&root);
-        assert_eq!(settings, Settings::default());
+        assert_eq!(settings, Settings { enforce: false, ..Settings::default() });
         assert!(err.is_some(), "the reason must survive for the log");
+    }
+
+    #[test]
+    fn a_config_that_will_not_parse_cannot_leave_enforcement_on() {
+        // The two likeliest ways to get `.canon.toml` wrong both produce a file
+        // that will not parse, and both happen while trying to turn a refusal
+        // off. Falling back to the default answered them by refusing again,
+        // silently.
+        for broken in [
+            "enforce = false\nmin_fils = 9\n",
+            "suppress = [\"a\"]\nsuppress = [\"shape.base.app.py\"]\n",
+            "enforce = \"no\"\n",
+            "this is not toml at all",
+        ] {
+            let root = dir("degrade-enforce", Some(broken));
+            let (settings, err) = load_or_default(&root);
+            assert!(err.is_some(), "{broken:?} should not have parsed");
+            assert!(!settings.enforce, "a config that will not parse must not block a write");
+        }
+    }
+
+    #[test]
+    fn a_config_that_parses_keeps_the_enforcement_it_asks_for() {
+        let on = dir("enforce-on", Some("min_files = 9\n"));
+        assert!(load_or_default(&on).0.enforce);
+        let off = dir("enforce-off", Some("enforce = false\n"));
+        assert!(!load_or_default(&off).0.enforce);
     }
 }

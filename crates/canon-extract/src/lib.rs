@@ -128,6 +128,34 @@ impl FileFacts {
 /// convention derived from files that were never parsed would be derived from
 /// no evidence at all.
 pub fn extract(language: Language, source: &str, path: &str) -> Result<FileFacts> {
+    extract_inner(language, source, path, true)
+}
+
+/// Parse `source` for its declarations only, skipping the query pass.
+///
+/// Same structural facts — types, their public surface, free functions — and
+/// no calls or raises. For the caller that has a written file in hand and a
+/// set of shape rules to check it against, which is every write.
+///
+/// The difference is not small. Compiling a tree-sitter query happens once per
+/// process, and a hook *is* one process per invocation, so the whole cost lands
+/// on every write: measured on a real Rails repository, `inject` for a two-line
+/// Ruby file spent 27 ms, of which 25 ms was compiling a query whose results
+/// were then discarded. Structure alone is 2.5 ms.
+///
+/// # Errors
+///
+/// As [`extract`].
+pub fn extract_structure(language: Language, source: &str, path: &str) -> Result<FileFacts> {
+    extract_inner(language, source, path, false)
+}
+
+fn extract_inner(
+    language: Language,
+    source: &str,
+    path: &str,
+    with_query: bool,
+) -> Result<FileFacts> {
     let provider = lang::provider(language);
     if !provider.grammar_ready {
         return Err(ExtractError::Unsupported { language: language.name() });
@@ -169,16 +197,42 @@ pub fn extract(language: Language, source: &str, path: &str) -> Result<FileFacts
         Language::Vue | Language::Erb => FileFacts::default(),
     };
 
-    let found = query::run(language, &tree, source);
-    facts.calls = found.calls;
-    facts.raises = found.raises;
-    // The query is the better import extractor where it has one: it reads the
-    // field rather than the first string it finds. Where it has none, the
-    // structural pass already filled these in.
-    if !found.imports.is_empty() {
-        facts.imports = found.imports;
+    // One name is one method. A type cannot expose two methods under the same
+    // name in any build, so a repeat means either a conditional alternative or
+    // an overload signature, and counting both inflates the arity:
+    //
+    //   #[cfg(unix)]    mod imp { impl super::Handle { pub fn open(&self) {} } }
+    //   #[cfg(windows)] mod imp { impl super::Handle { pub fn open(&self) {} } }
+    //
+    //   foo(a: string): void;
+    //   foo(a: number): void;
+    //
+    // The first was refused by an arity rule it satisfies; the second is one
+    // method however many signatures declare it. Neither is visible to a
+    // parser, which sees every branch at once.
+    for t in &mut facts.types {
+        dedupe(&mut t.public_methods);
+        dedupe(&mut t.private_methods);
+    }
+
+    if with_query {
+        let found = query::run(language, &tree, source);
+        facts.calls = found.calls;
+        facts.raises = found.raises;
+        // The query is the better import extractor where it has one: it reads
+        // the field rather than the first string it finds. Where it has none,
+        // the structural pass already filled these in.
+        if !found.imports.is_empty() {
+            facts.imports = found.imports;
+        }
     }
     Ok(facts)
+}
+
+/// Remove repeats, keeping the first of each and the original order.
+fn dedupe(names: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|n| seen.insert(n.clone()));
 }
 
 #[cfg(test)]

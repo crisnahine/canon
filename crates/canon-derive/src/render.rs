@@ -35,10 +35,17 @@ pub fn render_block(rel: &str, selected: &[&Convention]) -> Option<String> {
     // silence. When everything attached is a repository-wide fallback, the
     // block used to announce conventions for a component directory and then
     // offer one rule about test files, for a file that is not a test.
-    let anything_local = selected
-        .iter()
-        .any(|c| matches!(c.scope, canon_core::Scope::Dir(_) | canon_core::Scope::DirExt(..)));
-    if !anything_local {
+    //
+    // A repository-wide *naming* rule is not that case. It is measured over
+    // every file with this extension and it is about the name of the file
+    // being written, so it is exactly as relevant as a local rule would be.
+    // Excluding it left a Go repository whose only naming rule was unanimous
+    // across all 58 files saying nothing at all before a write.
+    let anything_about_this_file = selected.iter().any(|c| {
+        matches!(c.scope, canon_core::Scope::Dir(_) | canon_core::Scope::DirExt(..))
+            || c.id.starts_with("naming.")
+    });
+    if !anything_about_this_file {
         return None;
     }
 

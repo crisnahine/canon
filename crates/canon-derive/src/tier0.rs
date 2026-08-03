@@ -43,18 +43,20 @@ pub(crate) fn derive(files: &[FileEntry], settings: &Settings) -> Vec<Convention
 /// `__tests__/` sits beside the file in others, and guessing wrong produces a
 /// rule that tells someone to create a file in a directory nobody uses.
 fn colocation(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
-    let tested: std::collections::HashSet<String> = files
+    // Keyed by (name, extension). Matching on the name alone made every
+    // `src/**/composer.json` in a PHP framework "tested" because one fixture
+    // under `tests/` happened to be called `composer.json` too.
+    let tested: std::collections::HashSet<(String, String)> = files
         .iter()
         .filter(|f| is_test(f))
-        .map(|f| {
-            let stem = f.stem.as_str();
-            let base = test_marker(stem).map_or(stem, |m| stem.trim_end_matches(m));
-            base.to_ascii_lowercase()
+        .filter_map(|f| {
+            let base = subject_of_test(&f.stem, &f.ext);
+            (!base.is_empty()).then(|| (base.to_lowercase(), f.ext.clone()))
         })
         .collect();
 
     let mut groups: HashMap<(String, String), Vec<&FileEntry>> = HashMap::new();
-    for f in files.iter().filter(|f| !is_test(f) && nameable(f)) {
+    for f in files.iter().filter(|f| !is_test(f) && testable(f)) {
         for dir in group_keys(f) {
             groups.entry((dir, f.ext.clone())).or_default().push(f);
         }
@@ -65,8 +67,12 @@ fn colocation(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
         if members.len() < settings.min_files || dir.is_empty() {
             continue;
         }
-        let agreeing =
-            members.iter().filter(|f| tested.contains(&f.stem.to_ascii_lowercase())).count();
+        let agreeing = members
+            .iter()
+            .filter(|f| {
+                tested.contains(&(naming::name_root(&f.stem).to_lowercase(), f.ext.clone()))
+            })
+            .count();
         let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
 
         out.push(Convention {
@@ -139,10 +145,101 @@ const CONVENTIONAL_NAMES: &[&str] = &[
     "roadmap",
 ];
 
+/// Extensions that hold data rather than code, and therefore have no test.
+///
+/// Separate from [`ASSET_EXTENSIONS`], which is about names nobody chooses.
+/// These do get naming rules — `docs/**/*.md` in kebab-case is a real and
+/// useful convention — but "every file here has a test of the same name" is
+/// not a claim that can be true of a `composer.json` or a `.gitattributes`,
+/// and it was derived at total agreement for both.
+const DATA_EXTENSIONS: &[&str] = &[
+    "json",
+    "yml",
+    "yaml",
+    "toml",
+    "xml",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "properties",
+    "plist",
+    "md",
+    "mdx",
+    "rst",
+    "adoc",
+    "txt",
+    "csv",
+    "tsv",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "styl",
+    "snap",
+    "gitattributes",
+    "gitignore",
+    "gitmodules",
+    "editorconfig",
+    "dockerignore",
+    "npmrc",
+    "nvmrc",
+    "prettierrc",
+    "eslintrc",
+    "babelrc",
+];
+
 /// Whether a file may contribute to a naming rule.
+///
+/// A dotfile has an empty name root and nothing to classify. A dunder name
+/// describes a role the language assigns rather than a name anyone chose:
+/// `__init__.py` and `__main__.py` are in every Python package, and a leading
+/// underscore is compatible with no style at all, so counting them meant no
+/// Python directory could ever produce a naming rule.
 fn nameable(entry: &FileEntry) -> bool {
-    !ASSET_EXTENSIONS.contains(&entry.ext.as_str())
+    let root = naming::name_root(&entry.stem);
+    !root.is_empty()
+        && !is_dunder(root)
+        && !ASSET_EXTENSIONS.contains(&entry.ext.as_str())
         && !CONVENTIONAL_NAMES.contains(&entry.stem.to_ascii_lowercase().as_str())
+}
+
+fn is_dunder(root: &str) -> bool {
+    root.starts_with("__")
+        && root.ends_with("__")
+        && root.len() > 4
+        && !root.trim_matches('_').is_empty()
+}
+
+/// Whether a file is the kind of thing that has a test.
+fn testable(entry: &FileEntry) -> bool {
+    nameable(entry) && !DATA_EXTENSIONS.contains(&entry.ext.as_str())
+}
+
+/// Whether a naming rule has anything to say about this path.
+///
+/// The same exclusions [`nameable`] and [`is_test`] apply when deriving, from
+/// a path alone so the check can ask about a file that is about to be written.
+///
+/// Deriving and checking have to agree here or the rule is applied to files it
+/// was never counted over, and it refuses them. Measured against fourteen real
+/// repositories, that was every false positive enforcement produced:
+/// `__init__.py` against a `snake_case` rule derived from files that excluded
+/// it, `AUTHORS.rst` against a `kebab-case` one, and every
+/// `__tests__/foo-test.ts`, `*.spec.ts` and `test/fixtures/**/*.vue` against a
+/// rule derived only from the code they test.
+pub(crate) fn counts_toward_naming(rel: &str) -> bool {
+    let name = rel.rsplit_once('/').map_or(rel, |(_, n)| n);
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    let ext = ext.to_ascii_lowercase();
+    let root = naming::name_root(stem);
+    !root.is_empty()
+        && !is_dunder(root)
+        && !ASSET_EXTENSIONS.contains(&ext.as_str())
+        && !CONVENTIONAL_NAMES.contains(&stem.to_ascii_lowercase().as_str())
+        && !is_test_path(rel)
 }
 
 /// Every `(directory prefix, extension)` group a file belongs to.
@@ -176,13 +273,19 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
         if members.len() < settings.min_files {
             continue;
         }
-        let stems: Vec<String> = members.iter().map(|f| f.stem.clone()).collect();
-        let shared = naming::shared_styles(&stems);
+        let roots: Vec<String> =
+            members.iter().map(|f| naming::name_root(&f.stem).to_string()).collect();
+        // Gated on distinct names, not on file count. A directory of identical
+        // names is one observation however many files carry it.
+        let shared = naming::shared_styles(&roots, settings.min_files);
         // More than one surviving style means the sample never distinguished
         // them; take the most specific witnessed, or say nothing.
         let Some(style) = pick_style(&shared) else { continue };
 
-        let agreeing = members.iter().filter(|f| naming::is_compatible(&f.stem, style)).count();
+        let agreeing = members
+            .iter()
+            .filter(|f| naming::is_compatible(naming::name_root(&f.stem), style))
+            .count();
         let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
 
         out.push(Convention {
@@ -194,7 +297,7 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
             total: members.len(),
             exemplar: exemplar_of(&members),
             evidence: evidence_of(&members),
-            enforcement: crate::semantic::enforcement_for("naming", confidence, settings),
+            enforcement: canon_core::enforcement_for("naming", confidence, settings),
         });
     }
     out
@@ -228,18 +331,24 @@ fn test_suffix(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
         if members.len() < settings.min_files {
             continue;
         }
-        let mut counts: HashMap<&'static str, usize> = HashMap::new();
+        let mut counts: HashMap<Marker, usize> = HashMap::new();
         for f in &members {
-            if let Some(marker) = test_marker(&f.stem) {
+            if let Some(marker) = test_marker(&f.stem, &f.ext) {
                 *counts.entry(marker).or_default() += 1;
             }
         }
-        let Some((marker, agreeing)) = counts.into_iter().max_by_key(|(_, n)| *n) else { continue };
+        // Ties break on the marker text so an unchanged tree derives the same
+        // rule twice; `max_by_key` over a HashMap otherwise follows iteration
+        // order, which is not stable.
+        let Some((marker, agreeing)) = counts.into_iter().max_by_key(|(m, n)| (*n, m.glob(&ext)))
+        else {
+            continue;
+        };
         let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
 
         out.push(Convention {
             id: format!("tests.suffix.{ext}"),
-            statement: format!("Test files are named `*{marker}.{ext}`"),
+            statement: format!("Test files are named `{}`", marker.glob(&ext)),
             scope: Scope::Ext(ext.clone()),
             confidence,
             agreeing,
@@ -252,17 +361,80 @@ fn test_suffix(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
     out
 }
 
-/// The suffix a test file uses, when it uses one.
-fn test_marker(stem: &str) -> Option<&'static str> {
-    ["_spec", "_test", ".spec", ".test", "Test", "_tests"]
-        .into_iter()
-        .find(|&marker| stem.ends_with(marker))
-        .map(|v| v as _)
+/// How a test file is named, relative to the thing it tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Marker {
+    /// `charge_card_spec.rb`, `chargeCard.test.ts`.
+    Suffix(&'static str),
+    /// `test_charge_card.py`. Python's dominant convention, and invisible to a
+    /// suffix-only match: `pytest` collects `test_*.py` by default, so a
+    /// Python repository derived no test-naming rule at all.
+    Prefix(&'static str),
+}
+
+impl Marker {
+    /// The rule as a glob, for the statement a reader sees.
+    fn glob(self, ext: &str) -> String {
+        match self {
+            Self::Suffix(m) => format!("*{m}.{ext}"),
+            Self::Prefix(m) => format!("{m}*.{ext}"),
+        }
+    }
+}
+
+/// The marker a test file uses, when it uses one.
+///
+/// The prefix form is Python's and only Python's. `pytest` collects `test_*.py`
+/// by default, so without it a Python repository derives no test-naming rule at
+/// all. Applied everywhere it misfires: Go's `test_helpers.go` is a helper —
+/// a Go test has to end in `_test.go` — and a Rake task called
+/// `spec_runner.rake` is a task.
+fn test_marker(stem: &str, ext: &str) -> Option<Marker> {
+    const SUFFIXES: &[&str] = &["_spec", "_test", ".spec", ".test", "Test", "_tests"];
+    if let Some(m) = SUFFIXES.iter().copied().find(|m| stem.ends_with(m)) {
+        return Some(Marker::Suffix(m));
+    }
+    // A bare `test.py` is the test, not a test of something called `""`.
+    (matches!(ext, "py" | "pyi") && stem.starts_with("test_") && stem.len() > "test_".len())
+        .then_some(Marker::Prefix("test_"))
+}
+
+/// Qualifiers between dots that mean "this file is a test".
+///
+/// `componentInstance.test-d.tsx` is a type test and carries no marker the
+/// suffix match recognises, because the qualifier is not last. Five of them
+/// were the only `.tsx` files in a Vue repository, and derived an enforced
+/// repository-wide rule that every `.tsx` is camelCase — which would have
+/// refused an ordinary `MyComponent.tsx`.
+const TEST_QUALIFIERS: &[&str] = &["test", "tests", "spec", "test-d", "e2e", "cy", "stories"];
+
+/// The name of the thing a test file tests, stripped of its marker and of any
+/// qualifier after the first dot.
+fn subject_of_test<'s>(stem: &'s str, ext: &str) -> &'s str {
+    let base = match test_marker(stem, ext) {
+        Some(Marker::Suffix(m)) => stem.strip_suffix(m).unwrap_or(stem),
+        Some(Marker::Prefix(m)) => stem.strip_prefix(m).unwrap_or(stem),
+        None => stem,
+    };
+    naming::name_root(base)
 }
 
 fn is_test(f: &FileEntry) -> bool {
-    test_marker(&f.stem).is_some()
-        || f.dir.split('/').any(|s| matches!(s, "spec" | "test" | "tests" | "__tests__"))
+    is_test_path(&f.rel)
+}
+
+/// Whether a repository-relative path is a test file.
+///
+/// The same judgement the derivation makes, reachable from a path alone so
+/// selection can ask it about a file that is about to be written and is not in
+/// the index yet.
+pub(crate) fn is_test_path(rel: &str) -> bool {
+    let name = rel.rsplit_once('/').map_or(rel, |(_, n)| n);
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+    test_marker(stem, &ext.to_ascii_lowercase()).is_some()
+        || stem.split('.').skip(1).any(|q| TEST_QUALIFIERS.contains(&q))
+        || dir.split('/').any(|s| matches!(s, "spec" | "test" | "tests" | "__tests__"))
 }
 
 /// The most recently modified agreeing file.
@@ -471,6 +643,140 @@ mod tests {
         let first = exemplar_of(&refs);
         let reversed: Vec<&FileEntry> = files.iter().rev().collect();
         assert_eq!(first, exemplar_of(&reversed));
+    }
+
+    #[test]
+    fn one_name_repeated_across_directories_is_not_a_naming_convention() {
+        // Every crate has a `Cargo.toml`. Five of them derived "files here are
+        // named in PascalCase" at total agreement, enforced, and that refused
+        // an ordinary `deny.toml`. Reproduced in canon's own repository and in
+        // ripgrep.
+        let convs = derive_from(
+            "t0-repeated",
+            &[
+                ("crates/a/Cargo.toml", "x"),
+                ("crates/b/Cargo.toml", "x"),
+                ("crates/c/Cargo.toml", "x"),
+                ("crates/d/Cargo.toml", "x"),
+                ("crates/e/Cargo.toml", "x"),
+            ],
+        );
+        assert!(!statements(&convs).contains("PascalCase"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_qualifier_before_the_extension_is_not_part_of_the_name() {
+        // Every Rails view is `*.html.erb` and every Angular service is
+        // `*.service.ts`. Read to the last dot, the stem holds a `.`, which no
+        // style accepts, so the whole directory produced nothing.
+        let convs = derive_from(
+            "t0-qualifier",
+            &[
+                ("app/views/charge_card.html.erb", "x"),
+                ("app/views/refund_payment.html.erb", "x"),
+                ("app/views/settle_batch.html.erb", "x"),
+                ("app/views/send_receipt.html.erb", "x"),
+                ("app/views/void_invoice.html.erb", "x"),
+            ],
+        );
+        assert!(statements(&convs).contains("snake_case"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn one_type_declaration_file_does_not_silence_the_directory() {
+        let convs = derive_from(
+            "t0-dts",
+            &[
+                ("src/models/charge_card.ts", "x"),
+                ("src/models/refund_payment.ts", "x"),
+                ("src/models/settle_batch.ts", "x"),
+                ("src/models/send_receipt.ts", "x"),
+                ("src/models/void_invoice.ts", "x"),
+                ("src/models/globals.d.ts", "x"),
+            ],
+        );
+        assert!(statements(&convs).contains("snake_case"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_dunder_name_does_not_decide_a_python_package() {
+        // `__init__.py` is in every package and matches no style, so counting
+        // it meant no Python directory could produce a naming rule at all.
+        let convs = derive_from(
+            "t0-dunder",
+            &[
+                ("src/pkg/__init__.py", "x"),
+                ("src/pkg/charge_card.py", "x"),
+                ("src/pkg/refund_payment.py", "x"),
+                ("src/pkg/settle_batch.py", "x"),
+                ("src/pkg/send_receipt.py", "x"),
+                ("src/pkg/void_invoice.py", "x"),
+            ],
+        );
+        assert!(statements(&convs).contains("snake_case"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_data_file_is_never_asked_whether_it_has_a_test() {
+        // `src/**/composer.json` came out at "every file here has a test of
+        // the same name (37/37)" because a fixture under `tests/` shared the
+        // name, and `.gitattributes` at 37/37 because empty matched empty.
+        let convs = derive_from(
+            "t0-colocation-data",
+            &[
+                ("src/a/composer.json", "{}"),
+                ("src/b/composer.json", "{}"),
+                ("src/c/composer.json", "{}"),
+                ("src/d/composer.json", "{}"),
+                ("src/e/composer.json", "{}"),
+                ("tests/fixtures/app/composer.json", "{}"),
+                ("tests/fixtures/.env", ""),
+                ("src/a/.gitattributes", ""),
+                ("src/b/.gitattributes", ""),
+                ("src/c/.gitattributes", ""),
+                ("src/d/.gitattributes", ""),
+                ("src/e/.gitattributes", ""),
+            ],
+        );
+        assert!(!statements(&convs).contains("has a test"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn python_names_its_tests_with_a_prefix_and_go_does_not() {
+        let py = derive_from(
+            "t0-py-tests",
+            &[
+                ("app/charge_card.py", "x"),
+                ("app/refund_payment.py", "x"),
+                ("tests/test_charge_card.py", "x"),
+                ("tests/test_refund_payment.py", "x"),
+                ("tests/test_settle_batch.py", "x"),
+                ("tests/test_send_receipt.py", "x"),
+                ("tests/test_void_invoice.py", "x"),
+            ],
+        );
+        assert!(statements(&py).contains("test_*.py"), "got {}", statements(&py));
+
+        // A Go test must end in `_test.go`; `test_helpers.go` is a helper.
+        assert!(test_marker("test_helpers", "go").is_none());
+        assert!(test_marker("test_charge_card", "py").is_some());
+    }
+
+    #[test]
+    fn a_type_test_qualifier_marks_the_file_as_a_test() {
+        // Five `*.test-d.tsx` were the only `.tsx` in Vue's repository and
+        // derived an enforced rule that every `.tsx` is camelCase.
+        for rel in [
+            "packages/dts-test/appDirective.test-d.tsx",
+            "src/Button.stories.tsx",
+            "e2e/checkout.cy.ts",
+            "spec/models/user_spec.rb",
+            "src/utils/__tests__/base64-test.ts",
+        ] {
+            assert!(is_test_path(rel), "{rel} is a test");
+        }
+        assert!(!is_test_path("app/services/charge_card.rb"));
+        assert!(!is_test_path("src/latest.ts"), "`latest` merely contains `test`");
     }
 
     #[test]

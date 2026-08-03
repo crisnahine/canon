@@ -19,11 +19,36 @@ pub(crate) fn data_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
+    if let Some(installed) = installed_plugin_data() {
+        return installed;
+    }
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(xdg).join("canon");
     }
     home().map_or_else(|| std::env::temp_dir().join("canon"), |h| h.join(".local/share/canon"))
 }
+
+/// Where an installed plugin's hooks keep their state.
+///
+/// The host passes `CLAUDE_PLUGIN_DATA` to a hook and nothing at all to a
+/// person running the binary in a terminal, so the two resolved different
+/// directories. `canon check` reported "no snapshot yet" for a repository the
+/// session had already indexed, and `canon explain` — the surface a refusal
+/// tells you to run — could not see the rule that refused you.
+///
+/// Only used when the directory already exists, so a standalone install with
+/// no plugin still gets the XDG path.
+fn installed_plugin_data() -> Option<PathBuf> {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().map(|h| h.join(".claude")))?;
+    let dir = config.join("plugins/data").join(PLUGIN_DATA_DIR);
+    dir.is_dir().then_some(dir)
+}
+
+/// `<marketplace>-<plugin>`, as the host names it for this plugin.
+const PLUGIN_DATA_DIR: &str = "canon-canon";
 
 /// The snapshot for one repository.
 ///

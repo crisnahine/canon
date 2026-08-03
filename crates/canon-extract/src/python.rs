@@ -5,12 +5,25 @@
 //! not a hidden helper either, so counting it in either list distorts arity.
 //! They are excluded from both.
 
-use crate::util::{child_of_kind, children_of, field_text, line_of, text};
+use crate::util::{child_of_any, child_of_kind, children_of, field_text, line_of, text};
 use crate::{FileFacts, TypeFacts};
 
 pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
     let mut facts = FileFacts::default();
     for child in children_of(tree.root_node()) {
+        // A decorated definition wraps the class or function it decorates.
+        // Matching only the bare kinds made `@dataclass`, `@register`,
+        // `@app.route` and `@pytest.fixture` invisible, which is most of the
+        // interesting surface in a real Python codebase: identical repositories
+        // derived five conventions plain and two decorated.
+        let child = if child.kind() == "decorated_definition" {
+            match child_of_any(child, &["class_definition", "function_definition"]) {
+                Some(inner) => inner,
+                None => continue,
+            }
+        } else {
+            child
+        };
         match child.kind() {
             "class_definition" => {
                 if let Some(t) = type_facts(child, source) {
@@ -120,6 +133,21 @@ mod tests {
     fn the_first_base_class_is_captured() {
         let f = f("class Create(ApplicationService):\n    pass\n");
         assert_eq!(f.types[0].superclass.as_deref(), Some("ApplicationService"));
+    }
+
+    #[test]
+    fn a_decorated_class_is_still_the_subject_of_the_file() {
+        let f = f("@dataclass\nclass Create(BaseService):\n    def execute(self): pass\n");
+        assert_eq!(f.types.len(), 1);
+        assert_eq!(f.types[0].name, "Create");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("BaseService"));
+        assert_eq!(f.types[0].public_methods, vec!["execute"]);
+    }
+
+    #[test]
+    fn a_decorated_module_function_is_public_surface() {
+        let f = f("@app.route('/x')\ndef handler(): pass\n");
+        assert_eq!(f.free_functions, vec!["handler"]);
     }
 
     #[test]

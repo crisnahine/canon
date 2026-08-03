@@ -18,8 +18,15 @@ pub fn for_path<'a>(
     rel: &str,
     budget: usize,
 ) -> Vec<&'a Convention> {
-    let mut matching: Vec<&Convention> =
-        conventions.iter().filter(|c| c.scope.matches(rel)).collect();
+    // How tests are named is only about the file being written when that file
+    // is a test. Otherwise it is a true sentence about somewhere else, spending
+    // budget and diluting the rules that do describe this path.
+    let writing_a_test = crate::tier0::is_test_path(rel);
+    let mut matching: Vec<&Convention> = conventions
+        .iter()
+        .filter(|c| c.scope.matches(rel))
+        .filter(|c| writing_a_test || !c.id.starts_with("tests.suffix"))
+        .collect();
     matching.sort_by(|a, b| b.rank().cmp(&a.rank()).then(a.id.cmp(&b.id)));
 
     let mut chosen: Vec<&Convention> = Vec::new();

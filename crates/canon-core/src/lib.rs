@@ -29,7 +29,7 @@ mod convention;
 mod settings;
 
 pub use confidence::Confidence;
-pub use convention::{Convention, Enforcement, Evidence, Scope};
+pub use convention::{Convention, Enforcement, Evidence, ROLLUP_SUFFIX, Scope, enforcement_for};
 pub use settings::{Settings, SettingsError};
 
 /// Bytes of convention text injected per write.

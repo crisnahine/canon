@@ -16,7 +16,14 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 4;
+pub const SNAPSHOT_VERSION: u32 = 5;
+// 5: naming rules are gated on distinct names and read the root of a
+//    multi-part file name, colocation no longer pairs data files, and the
+//    Python, Go and Rust extractors see decorated, generic and module-nested
+//    declarations. A snapshot from before this holds naming rules derived from
+//    one repeated name — `Cargo.toml` ten times over — and those are enforced,
+//    so keeping one would go on refusing ordinary writes until the commit
+//    changed.
 // 4: import and colocation conventions exist, and ERB and Vue contribute facts,
 //    so a snapshot from before them is missing whole families of rule.
 // 3: conventions carry an enforcement decision, rules are rolled up from

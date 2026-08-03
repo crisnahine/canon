@@ -83,8 +83,9 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
         }
         return HookOutput::silent();
     };
-    let Some(rel) = relative_to(&root, target) else { return HookOutput::silent() };
+    let Some(rel) = relative_to(&root, target, &cwd) else { return HookOutput::silent() };
     let (settings, _) = config::load_or_default(&root);
+    let conventions = live_conventions(&snapshot, &settings);
 
     // Refusing the write is the only channel the model cannot decline. Every
     // other one was measured: context before the write steers it, a
@@ -93,14 +94,14 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
     // compel the edit. So a rule the repository holds without exception is
     // enforced here, before anything is written, and everything else advises.
     if let Some(content) = input.tool_input.content.as_deref() {
-        let violations = blocking_violations(&rel, content, &snapshot.conventions);
+        let violations = blocking_violations(&rel, content, &conventions, &settings);
         if !violations.is_empty() {
             logging::info(&format!("refused a write to {rel}: {} violations", violations.len()));
             return HookOutput::deny(refusal(&rel, &violations));
         }
     }
 
-    let selected = for_path(&snapshot.conventions, &rel, settings.injection_budget);
+    let selected = for_path(&conventions, &rel, settings.injection_budget);
     let Some(block) = render_block(&rel, &selected) else { return HookOutput::silent() };
     logging::debug(&format!("injected {} conventions for {rel}", selected.len()));
     HookOutput::context(Event::PreToolUse, block)
@@ -111,15 +112,27 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
 /// The counts are load-bearing. A refusal without them reads as an arbitrary
 /// gate; with them it reads as a fact about the repository the author can
 /// check, and disagree with, in one command.
+///
+/// So are the ids. The refusal points at `.canon.toml` as the way out, and
+/// `suppress` is keyed by id, so a refusal that names the rule only in prose
+/// leaves the reader guessing at the key. Measured against the running host:
+/// asked for a file that broke three rules, the model was refused, inferred
+/// three plausible ids, wrote them into `.canon.toml`, and was refused again,
+/// because the real ids carried the directory the rules were derived at.
+/// The suppression block is therefore written out, ready to paste.
 fn refusal(rel: &str, violations: &[canon_derive::Violation]) -> String {
     let mut text = format!(
         "canon refused this write to {rel}. It breaks a rule every file in this directory follows, without exception:\n\n"
     );
-    for v in violations.iter().take(3) {
-        text.push_str(&format!("- {}\n", v.message));
+    let shown: Vec<&canon_derive::Violation> = violations.iter().take(3).collect();
+    for v in &shown {
+        text.push_str(&format!("- {} [{}]\n", v.message, v.convention_id));
     }
+    text.push_str("\nRewrite the file to match, or, if the rule is wrong, put this in .canon.toml at the repository root:\n\n");
+    let ids: Vec<String> = shown.iter().map(|v| format!("\"{}\"", v.convention_id)).collect();
+    text.push_str(&format!("    suppress = [{}]\n", ids.join(", ")));
     text.push_str(
-        "\nRewrite the file to match, or run `canon explain` to see the files this was derived from and suppress it in .canon.toml if it is wrong.\n",
+        "\n`canon explain <path>` shows the files each rule was counted from. Suppression takes effect on the next write, not the next session.\n",
     );
     text
 }
@@ -135,7 +148,7 @@ pub(crate) fn verify(input: &HookInput) -> HookOutput {
     // Resolved before the ledger is written. Recording first left ledgers
     // accumulating for roots that have no snapshot and nothing ever reads.
     let Some((root, snapshot)) = snapshot_root(&cwd) else { return HookOutput::silent() };
-    let Some(rel) = relative_to(&root, target) else { return HookOutput::silent() };
+    let Some(rel) = relative_to(&root, target, &cwd) else { return HookOutput::silent() };
 
     record_touch(&root, &input.session_id, &rel);
 
@@ -143,7 +156,8 @@ pub(crate) fn verify(input: &HookInput) -> HookOutput {
         return HookOutput::silent();
     };
 
-    let violations = verify_source(&rel, &source, &snapshot.conventions);
+    let (settings, _) = config::load_or_default(&root);
+    let violations = verify_source(&rel, &source, &live_conventions(&snapshot, &settings));
     if violations.is_empty() {
         return HookOutput::silent();
     }
@@ -278,6 +292,10 @@ pub(crate) fn check(root: &Path) -> String {
         None => out.push_str("  no snapshot yet; run `canon index`\n"),
     }
     out.push_str(&format!("  path                     {}\n", path.display()));
+    // Printed because the hooks and a terminal used to resolve different
+    // directories, and there was no way to tell from the output which one you
+    // were looking at.
+    out.push_str(&format!("  data directory           {}\n", paths::data_dir().display()));
     out
 }
 
@@ -315,17 +333,31 @@ pub(crate) fn explain(root: &Path, path: Option<&str>, id: Option<&str>) -> Stri
         return "no conventions match\n".to_string();
     }
 
+    // Enforcement as it would be applied to the next write, not as it was
+    // recorded when the snapshot was built. The two differ the moment someone
+    // edits `.canon.toml`, and this is the surface a refusal sends them to.
+    let (settings, _) = config::load_or_default(root);
+
     let mut out = String::new();
     for c in matching {
         out.push_str(&format!("{}\n", c.id));
         out.push_str(&format!("  {}\n", c.statement));
+        // "Suppressed" rather than "Advisory". A suppressed rule is not
+        // downgraded, it is gone: neither injected nor checked. This is the
+        // surface a refusal sends someone to in order to confirm the
+        // suppression they just wrote took effect, and `Advisory` reads as
+        // though it were still being stated.
+        let enforcement = if settings.is_suppressed(&c.id) {
+            "Suppressed".to_string()
+        } else {
+            format!("{:?}", c.enforcement_now(&settings))
+        };
         out.push_str(&format!(
-            "  scope       {}\n  agreement   {}/{} ({})\n  enforcement {:?}\n",
+            "  scope       {}\n  agreement   {}/{} ({})\n  enforcement {enforcement}\n",
             c.scope.render(),
             c.agreeing,
             c.total,
             c.confidence.render(),
-            c.enforcement
         ));
         if let Some(exemplar) = &c.exemplar {
             out.push_str(&format!("  example     {exemplar}\n"));
@@ -512,16 +544,31 @@ fn manifest(snapshot: &Snapshot) -> String {
     out
 }
 
-/// A host-supplied absolute path, as a repository-relative one.
+/// The repository-relative path a tool call targets.
 ///
 /// Returns `None` for anything outside the repository, which is how a write to
 /// `/etc/hosts` or to a sibling checkout is declined rather than matched
 /// against the wrong repository's conventions.
-fn relative_to(root: &Path, target: &str) -> Option<String> {
+///
+/// Two things this has to do beyond stripping a prefix.
+///
+/// A relative `file_path` is resolved against the invocation's working
+/// directory. The host normally sends an absolute path; when it does not,
+/// returning nothing meant the write got no conventions and no enforcement,
+/// silently.
+///
+/// And `..` is resolved before matching. Left in, `app/services/../../vendor/x.rb`
+/// still starts with `app/`, so it matched `app/**/*.rb` and would have had a
+/// service object's rules applied to a vendored file.
+fn relative_to(root: &Path, target: &str, cwd: &Path) -> Option<String> {
     let target = Path::new(target);
-    let rel = target.strip_prefix(root).ok().or_else(|| {
+    let absolute = if target.is_absolute() { target.to_path_buf() } else { cwd.join(target) };
+    let absolute = lexically_normal(&absolute);
+
+    let rel = absolute.strip_prefix(root).ok().map(Path::to_path_buf).or_else(|| {
         // Fall through canonicalised, for a root reached by a symlink.
-        target.strip_prefix(root.canonicalize().ok()?).ok()
+        let real = root.canonicalize().ok()?;
+        absolute.strip_prefix(real).ok().map(Path::to_path_buf)
     })?;
     let text = rel.to_str()?;
     if text.is_empty() {
@@ -532,6 +579,55 @@ fn relative_to(root: &Path, target: &str) -> Option<String> {
     } else {
         text.replace(std::path::MAIN_SEPARATOR, "/")
     })
+}
+
+/// Resolve `.` and `..` without touching the filesystem.
+///
+/// Lexical rather than `canonicalize`, because the target of a write does not
+/// exist yet and `canonicalize` fails on a path that is not there.
+fn lexically_normal(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(Component::ParentDir);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The conventions in force for this invocation.
+///
+/// A snapshot records the enforcement decision made when it was built, and
+/// suppression is applied at derivation. Both meant a `.canon.toml` written in
+/// response to a refusal did nothing until the next session rebuilt the
+/// snapshot, which is the one moment it has to work. Suppressed rules are
+/// dropped here so they are neither injected nor enforced; `blocking_violations`
+/// recomputes enforcement from the same settings.
+///
+/// Borrowed when nothing is suppressed, which is almost always, so the hot
+/// path still does not copy a few hundred conventions.
+fn live_conventions<'s>(
+    snapshot: &'s Snapshot,
+    settings: &Settings,
+) -> std::borrow::Cow<'s, [canon_core::Convention]> {
+    if settings.suppress.is_empty() {
+        return std::borrow::Cow::Borrowed(&snapshot.conventions);
+    }
+    std::borrow::Cow::Owned(
+        snapshot
+            .conventions
+            .iter()
+            .filter(|c| !settings.is_suppressed(&c.id))
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn record_touch(root: &Path, session_id: &str, rel: &str) {
@@ -575,7 +671,7 @@ mod tests {
     #[test]
     fn a_path_inside_the_repository_becomes_relative() {
         let root = Path::new("/work/repo");
-        assert_eq!(relative_to(root, "/work/repo/app/a.rb").as_deref(), Some("app/a.rb"));
+        assert_eq!(relative_to(root, "/work/repo/app/a.rb", root).as_deref(), Some("app/a.rb"));
     }
 
     #[test]
@@ -583,9 +679,31 @@ mod tests {
         // Otherwise a write to a sibling checkout is matched against the wrong
         // repository's conventions.
         let root = Path::new("/work/repo");
-        assert_eq!(relative_to(root, "/etc/hosts"), None);
-        assert_eq!(relative_to(root, "/work/other/app/a.rb"), None);
-        assert_eq!(relative_to(root, "/work/repo"), None);
+        assert_eq!(relative_to(root, "/etc/hosts", root), None);
+        assert_eq!(relative_to(root, "/work/other/app/a.rb", root), None);
+        assert_eq!(relative_to(root, "/work/repo", root), None);
+    }
+
+    #[test]
+    fn a_relative_path_is_resolved_against_the_working_directory() {
+        // The host normally sends an absolute path. When it does not, silence
+        // cost the write both its conventions and its enforcement.
+        let root = Path::new("/work/repo");
+        let cwd = Path::new("/work/repo/app");
+        assert_eq!(relative_to(root, "services/a.rb", cwd).as_deref(), Some("app/services/a.rb"));
+        assert_eq!(relative_to(root, "./a.rb", cwd).as_deref(), Some("app/a.rb"));
+    }
+
+    #[test]
+    fn a_parent_traversal_is_resolved_before_the_scope_is_matched() {
+        // `app/services/../../vendor/x.rb` still starts with `app/`, so it
+        // matched `app/**/*.rb` and would have been judged as a service.
+        let root = Path::new("/work/repo");
+        assert_eq!(
+            relative_to(root, "/work/repo/app/services/../../vendor/x.rb", root).as_deref(),
+            Some("vendor/x.rb")
+        );
+        assert_eq!(relative_to(root, "/work/repo/../other/x.rb", root), None);
     }
 
     #[test]

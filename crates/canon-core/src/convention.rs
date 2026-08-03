@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Confidence;
+use crate::{Confidence, Settings};
 
 /// Which files a convention speaks for.
 ///
@@ -139,7 +139,73 @@ pub struct Convention {
     pub enforcement: Enforcement,
 }
 
+/// How far a rule of this kind may go when the code disagrees.
+///
+/// Advisory is the default and stays the default. Refusing a write on a
+/// heuristic is worse than not having the heuristic, because the developer
+/// cannot tell a real rule from a bad inference at the moment they are
+/// interrupted.
+///
+/// Two conditions have to hold together before a rule may refuse anything.
+///
+/// The repository has to agree *totally*. Not 51 of 52: every single file. One
+/// counterexample already in the tree means the rule has an exception nobody
+/// wrote down, and blocking a write that matches an existing file is the
+/// fastest way to get a tool uninstalled.
+///
+/// And the check has to be one that cannot be wrong about a legitimate file.
+/// Counting a type's public methods, reading its base, and reading the name of
+/// its single public method are all exact. "Files here call `X`" is not: a new
+/// file may legitimately not need that collaborator yet.
+///
+/// Decided from the convention itself rather than read off the snapshot, so a
+/// `.canon.toml` written in response to a refusal takes effect on the next
+/// write rather than on the next session.
+#[must_use]
+pub fn enforcement_for(id: &str, confidence: Confidence, settings: &Settings) -> Enforcement {
+    /// Checks that cannot be wrong about a legitimate file.
+    ///
+    /// `naming` is a string comparison on the path, with no parsing and no
+    /// question about which type in the file is the subject. It only qualifies
+    /// because a naming rule is withheld unless the sample contains enough
+    /// distinct names to have witnessed the style; see `canon-derive::naming`.
+    /// The shape checks read one resolved subject, which is only true since
+    /// they stopped judging every declared type.
+    const EXACT: &[&str] = &["naming", "shape.public-arity", "shape.entrypoint", "shape.base"];
+    // A rule assembled from other rules is never enforced. Its evidence is
+    // real, but it generalises to sibling directories that never voted, and a
+    // directory with no files yet is exactly where a refusal would be wrong.
+    if id.ends_with(ROLLUP_SUFFIX) {
+        return Enforcement::Advisory;
+    }
+    if settings.enforce
+        && confidence.is_blocking_grade()
+        && EXACT.iter().any(|kind| id.starts_with(kind))
+    {
+        Enforcement::Blocking
+    } else {
+        Enforcement::Advisory
+    }
+}
+
+/// Marks an id as having been assembled from the rules of child directories.
+pub const ROLLUP_SUFFIX: &str = ".rollup";
+
 impl Convention {
+    /// Whether this convention may refuse a write *under these settings*.
+    ///
+    /// The stored [`Convention::enforcement`] records the answer at the moment
+    /// the snapshot was built. This recomputes it, which is what makes
+    /// `enforce = false` and a fresh `suppress` entry work inside the session
+    /// that hit the refusal instead of only after the next rebuild.
+    #[must_use]
+    pub fn enforcement_now(&self, settings: &Settings) -> Enforcement {
+        if settings.is_suppressed(&self.id) {
+            return Enforcement::Advisory;
+        }
+        enforcement_for(&self.id, self.confidence, settings)
+    }
+
     /// Render as one line of an injected block: the statement, the count, and
     /// the confidence.
     #[must_use]

@@ -156,18 +156,36 @@ tree means the rule has an exception nobody wrote down, and refusing a write
 that matches an existing file is the fastest way to get a tool uninstalled.
 
 **A check that cannot be wrong.** Counting a type's public methods, reading its
-base type, reading the name of its single public method. Not naming style,
-where a single-word name is compatible with three styles at once. Not "files
-here call `X`", where a new file may legitimately not need that collaborator.
+base type, reading the name of its single public method, comparing a file name
+against a style. Not "files here call `X`", where a new file may legitimately
+not need that collaborator. Not a rule assembled from the rules of child
+directories, which generalises to siblings that never voted.
 
-A refusal states the counts and points at `canon explain`, so you can see the
-files it was derived from and suppress it in `.canon.toml` if it is wrong.
-Everything else in this document is advisory and always will be.
+Naming qualifies only because a style rule is withheld unless the sample has
+actually witnessed the style: one name repeated is one observation, however
+many files carry it. Ten files called `Cargo.toml` used to derive "files here
+are named in `PascalCase`" at total agreement, and refuse an ordinary
+`deny.toml`.
+
+A refusal states the counts, names each rule by id, and prints the `suppress`
+line ready to paste, because `.canon.toml` is keyed by id and a refusal that
+names the rule only in prose leaves you guessing at the key. Suppressing takes
+effect on the next write, not the next session. Everything else in this
+document is advisory and always will be.
 
 Because a rule may only refuse when *every* file already agrees, no file that
 exists in the repository can violate one. That is checkable rather than
-reassuring: run against 400 tracked Ruby files in a production repository,
-enforcement refused none of them.
+reassuring: 15,265 tracked files from fourteen production repositories —
+Mastodon, Laravel, RuboCop, Nuxt, Vue, Redux Toolkit, ripgrep, Flask, requests,
+gin, cobra, Slim, Sinatra, axios — replayed through the write path, refused
+none of them.
+
+That is the weaker half of the check, because a file already in the index has
+already voted. The half that finds things writes 5,700 *new* files into those
+same directories — the content of one file at the name of its neighbour, and a
+test in each naming idiom into every directory holding an enforceable rule.
+None of those are refused either, and three false positives were found that
+way and no other.
 
 ```toml
 # .canon.toml — if you would rather never be interrupted
@@ -299,10 +317,18 @@ Optional, and most repositories should never need it. Layered: defaults, then
 `canon check` prints all of these as they are actually resolved, so what is in
 effect is never inferred from a document.
 
+Every one of these is read per invocation. Turning `enforce` off, or adding an
+id to `suppress`, changes the next write — not the next session. It used to
+change the next session, which made the escape hatch a refusal points at
+useless at the moment you reach for it.
+
 Two paths come from the environment only, because they are about where canon
 keeps its own state rather than about how it derives: `CANON_DATA_DIR`
 overrides everything, and `CLAUDE_PLUGIN_DATA` is what the host supplies to a
-plugin hook.
+plugin hook. When neither is set — you, in a terminal — canon looks for the
+installed plugin's data directory before falling back to the XDG one, so
+`canon explain` audits the same snapshot the hook that refused you was reading.
+`canon check` prints which directory it resolved.
 
 The `confidence_floor` is a floor, not the bar. The bar rises with the size of
 the sample: a rule over thirty files may hold four times in five, but the same

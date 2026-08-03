@@ -3,6 +3,136 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-08-03
+
+Everything here was found by running the release binary against fourteen real
+repositories — Mastodon, Laravel, RuboCop, Nuxt, Vue, Redux Toolkit, ripgrep,
+Flask, requests, gin, cobra, Slim, Sinatra, axios — and twenty-four
+purpose-shaped ones covering the idioms each supported language actually uses.
+
+### Fixed
+
+- **`.canon.toml` did nothing until the next session.** `enforce`, `suppress`
+  and `CANON_ENFORCE` were baked into the snapshot at derivation, and the hot
+  path read the stored decision. So the escape hatch a refusal points at was
+  inert at the one moment it was needed: you were blocked, you turned
+  enforcement off, and you were blocked again. Enforcement and suppression are
+  now resolved per write.
+- **A refusal named the rule in prose but not by id**, and `suppress` is keyed
+  by id. Against the running host the model inferred three plausible ids, wrote
+  them into `.canon.toml`, and was refused again. The refusal now prints the
+  ids and the `suppress` line ready to paste.
+- **A naming rule could come from one name repeated.** Ten files called
+  `Cargo.toml` derived "files here are named in `PascalCase`" at total
+  agreement, enforced — which refused an ordinary `crates/x/deny.toml`. In
+  canon's own repository and in ripgrep. The sample is now counted in distinct
+  names, not files.
+- **A multi-part file name was compatible with no style at all**, because a `.`
+  is not a word character. One `globals.d.ts` took a directory of six
+  `snake_case` files from four conventions to none; every Rails `*.html.erb`
+  and every Angular or NestJS `*.service.ts` was silently excluded. Style is
+  now read from the name root, the part before the first dot.
+- **`__init__.py` made a naming rule impossible for any Python package.** A
+  leading underscore matches no style, so one dunder file broke the directory.
+  Dunder names describe a role the language assigns, and are excluded like
+  `README` already was.
+- **Non-ASCII file names were compatible with no style**, so a blocking rule
+  refused `café_service.py` in a repository whose other names happened to be
+  ASCII. Style classification is Unicode-aware.
+- **Colocation counted unrelated files as tests.** `src/**/.gitattributes` in
+  Laravel came out at "every file here has a test of the same name (37/37)",
+  because a dotfile has an empty name and empty matched empty; `composer.json`
+  came out at 37/39 because one fixture under `tests/` shared the name. Pairing
+  is now keyed by name *and* extension, empty names are excluded, and data
+  files are not asked whether they have a test.
+- **Python could not see a decorated class or function.** `@dataclass`,
+  `@app.route`, `@pytest.fixture`, `@admin.register` — the wrapper node was
+  skipped. Identical repositories derived five conventions plain and two
+  decorated.
+- **Go lost every method of a generic type.** The receiver of
+  `func (c *Cache[T]) Get()` never matched the declared `Cache`.
+- **Rust lost every method of a generic type**, for the same reason: `impl<W>
+  Printer<W>` names `Printer<W>`. Eighty-one of ripgrep's two hundred and sixty
+  top-level impls are generic. Rust also could not see anything inside an
+  inline `mod`, and now skips `#[cfg(test)] mod tests` rather than counting
+  fixtures as the file's shape.
+- **A `..` in the target path was matched literally**, so
+  `app/services/../../vendor/x.rb` still started with `app/` and had a service
+  object's rules applied to a vendored file. Paths are normalised lexically,
+  and a relative `file_path` is resolved against the working directory instead
+  of being ignored.
+- **A rolled-up rule could refuse a write.** It is assembled from the rules of
+  child directories and generalises to siblings that never voted, which is
+  exactly where a refusal is wrong. A rolled-up ancestor also no longer absorbs
+  the child it was built from, which had quietly moved directories from
+  enforced to advisory.
+- **`canon check` and `canon explain` read a different directory from the
+  hooks.** The host passes `CLAUDE_PLUGIN_DATA` to a hook and nothing to a
+  terminal, so the audit surface a refusal sends you to reported "no snapshot
+  yet" for a repository the session had already indexed.
+
+### Changed
+
+- `inject` costs 2.6 ms again on a 9,870-file repository, down from 27.3 ms.
+  Compiling a tree-sitter query happens once per process and a hook is one
+  process per write, so the whole 25 ms landed on every Ruby write — for call
+  and raise facts that the check then discarded. The write path extracts
+  structure only.
+- Python's `test_*.py` is recognised as a test. `pytest` collects it by
+  default, so a Python repository derived no test-naming rule at all. Prefix
+  matching is Python-only: applied everywhere it read Go's `test_helpers.go`
+  and a `spec_runner.rake` task as tests.
+- `*.test-d.tsx`, `*.cy.ts`, `*.e2e.ts` and `*.stories.tsx` are tests. Five
+  `*.test-d.tsx` files were the only `.tsx` in Vue's repository and derived an
+  enforced rule that every `.tsx` is camelCase.
+- A repository-wide naming rule is worth stating on its own. Withholding it
+  left a Go repository whose only rule was unanimous across all 58 files saying
+  nothing before a write. How tests are named is now withheld instead, unless
+  the file being written is one.
+- `canon explain` and `canon check` report enforcement as it would be applied
+  now, not as it was recorded, and `canon check` prints the data directory in
+  use.
+- `SNAPSHOT_VERSION` is 5. A snapshot from before this holds naming rules
+  derived from one repeated name, and those are enforced.
+
+- **A test file was refused for not being shaped like the code it tests.** A
+  colocated `test_void_invoice.py` written into a directory of service objects
+  was told it must inherit `BaseService` and expose one public method, because
+  the rule was still at total agreement — the counterexample was the file being
+  written. Shape rules no longer refuse a test.
+- **Two Rust files were refused by an arity rule they satisfy.** Making inline
+  `mod` bodies visible attached every `impl` to whichever type was declared
+  first, so two modules declaring the same name, and a type implemented from
+  two `#[cfg]`-gated modules, both came out as one type with two methods. An
+  `impl` now resolves to the nearest declaration it can see, and a repeated
+  method name counts once — a type cannot expose two methods under one name in
+  any build, so a repeat is a conditional alternative or an overload signature.
+- **A `.canon.toml` that would not parse silently turned enforcement back on.**
+  The two likeliest ways to get that file wrong are a typo in a key and a
+  second `suppress =` line appended to a file that already has one; both are
+  parse errors, both happen while trying to turn a refusal off, and both were
+  answered by refusing again with nothing printed. An unloadable config now
+  degrades to `enforce = false`.
+- `canon explain` reports a suppressed rule as `Suppressed` rather than
+  `Advisory`. It is the surface a refusal sends you to in order to confirm the
+  suppression took, and a suppressed rule is not downgraded, it is gone.
+
+### Verified
+
+- 15,265 tracked files from the fourteen repositories replayed through the
+  write path: 11,299 given conventions, none refused, none errored.
+- 5,700 *new* files written into those same directories — one file's content at
+  its neighbour's name, and a test in each naming idiom into every directory
+  with an enforceable rule — none refused. This is the harness that matters:
+  every file already in the index has voted, so the first replay confirms the
+  invariant but cannot find a false positive. All three above were found here
+  and nowhere else.
+- Against the running host, with the plugin installed: asked for a service and
+  told nothing about house style, the first write matched all five derived
+  conventions. Asked for one that broke three rules, the write did not happen,
+  and the model used the `suppress` line the refusal printed and succeeded on
+  the retry — in the same session.
+
 ## [0.4.0] — 2026-08-03
 
 ### Added
