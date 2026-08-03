@@ -25,6 +25,16 @@ jobs:
           }
 
   build:
+    # Every triple `bin/canon` can compute, built natively.
+    #
+    # Natively, not cross-compiled: the tree-sitter grammars are C, so a cross
+    # build needs a C toolchain per target and silently produces nothing
+    # runnable when one is missing. A native runner also lets the smoke test
+    # below actually execute what was built.
+    #
+    # musl matters because the shim detects it. A glibc binary does not run on
+    # Alpine, and "the plugin does nothing" is the only symptom the fail-open
+    # contract can produce.
     needs: guard
     strategy:
       fail-fast: false
@@ -32,15 +42,22 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
+            musl: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            musl: true
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -49,20 +66,26 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
-      - name: install the cross linker
-        if: matrix.cross
+      - name: musl toolchain
+        if: matrix.musl
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          sudo apt-get install -y musl-tools
 
       - run: cargo build --release --target ${{ matrix.target }} --bin canon
+
+      - name: it runs on the machine that built it
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/canon"
+          [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
+          "$bin" version
 
       - name: name the artifact after its target
         shell: bash
         run: |
           mkdir -p dist
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/canon.exe" "dist/canon-${{ matrix.target }}.exe"
           else
             cp "target/${{ matrix.target }}/release/canon" "dist/canon-${{ matrix.target }}"
@@ -87,13 +110,66 @@ jobs:
         working-directory: staging
         run: sha256sum canon-* > SHA256SUMS
 
-      - name: the install shim refuses anything not listed here
+      - name: every triple the shim can ask for has an asset
+        # The gap this closes: the shim computed a name the release never
+        # published, the download 404'd, and the plugin failed open into doing
+        # nothing at all.
         working-directory: staging
         run: |
-          test -s SHA256SUMS || { echo "no checksums produced"; exit 1; }
+          missing=0
+          for triple in \
+            x86_64-unknown-linux-gnu x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-gnu aarch64-unknown-linux-musl \
+            x86_64-apple-darwin aarch64-apple-darwin; do
+            test -f "canon-$triple" || { echo "missing canon-$triple"; missing=1; }
+          done
+          for triple in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            test -f "canon-$triple.exe" || { echo "missing canon-$triple.exe"; missing=1; }
+          done
+          test "$missing" = "0" || exit 1
           cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:
           files: staging/*
           generate_release_notes: true
+
+  smoke:
+    # Download the published asset the way a user's shim will, verify its
+    # checksum, and run it. Building an artifact and publishing an artifact are
+    # different things, and only this proves the second one.
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: canon-x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            asset: canon-aarch64-unknown-linux-gnu
+          - os: macos-latest
+            asset: canon-aarch64-apple-darwin
+          - os: macos-15-intel
+            asset: canon-x86_64-apple-darwin
+          - os: windows-latest
+            asset: canon-x86_64-pc-windows-msvc.exe
+          - os: windows-11-arm
+            asset: canon-aarch64-pc-windows-msvc.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: download, verify and run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${{ matrix.asset }}" --pattern SHA256SUMS --dir .
+          if command -v sha256sum >/dev/null 2>&1; then
+            grep " ${{ matrix.asset }}\$" SHA256SUMS | sha256sum -c -
+          else
+            grep " ${{ matrix.asset }}\$" SHA256SUMS | shasum -a 256 -c -
+          fi
+          chmod +x "${{ matrix.asset }}"
+          "./${{ matrix.asset }}" version

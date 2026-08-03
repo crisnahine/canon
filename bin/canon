@@ -42,7 +42,16 @@ target_triple() {
     _arch="$(uname -m 2>/dev/null || echo unknown)"
     case "${_os}" in
         Darwin) _os_part="apple-darwin" ;;
-        Linux) _os_part="unknown-linux-gnu" ;;
+        Linux)
+            # A glibc binary does not run on Alpine, and the only symptom would
+            # be the fail-open path: a plugin that silently does nothing. Ask
+            # the loader which C library this actually is.
+            if (ldd --version 2>&1 || true) | grep -qi musl; then
+                _os_part="unknown-linux-musl"
+            else
+                _os_part="unknown-linux-gnu"
+            fi
+            ;;
         MINGW* | MSYS* | CYGWIN*) _os_part="pc-windows-msvc" ;;
         *) return 1 ;;
     esac
