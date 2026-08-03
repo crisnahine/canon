@@ -49,6 +49,51 @@ jobs:
       - run: cargo build --release
       - run: ./tests/fail-open.sh ./target/release/canon
 
+  shim:
+    # The resolution shim is shell, so nothing above tests it. It is also where
+    # the platform differences live: Windows will not execute a file without an
+    # executable extension, and the release assets are named accordingly. Run
+    # it under bash on every platform and require it to find the local build.
+    #
+    # Before this existed, the shim asked the release for an asset name that
+    # does not exist on Windows and then saved it under a name Windows refuses
+    # to run. It failed open, so the only symptom was a plugin that silently
+    # did nothing.
+    name: shim (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin canon
+      - name: the shim resolves the local build
+        env:
+          CLAUDE_PLUGIN_ROOT: ${{ github.workspace }}
+        run: |
+          got="$(./bin/canon version)"
+          echo "shim said: $got"
+          case "$got" in
+            canon\ *) ;;
+            *) echo "the shim did not resolve a binary"; exit 1 ;;
+          esac
+      - name: install-local places exactly one binary the wrapper can find
+        env:
+          CLAUDE_PLUGIN_DATA: ${{ runner.temp }}/canon-data
+        run: |
+          mkdir -p "$CLAUDE_PLUGIN_DATA/bin"
+          touch "$CLAUDE_PLUGIN_DATA/bin/canon-0.0.9" "$CLAUDE_PLUGIN_DATA/bin/canon-0.0.8.exe"
+          ./bin/install-local
+          count=$(ls "$CLAUDE_PLUGIN_DATA/bin" | wc -l | tr -d ' ')
+          ls "$CLAUDE_PLUGIN_DATA/bin"
+          test "$count" = "1" || { echo "expected one binary, found $count"; exit 1; }
+
   minimum-supported-rust:
     # A twenty-year project should not need this month's compiler.
     runs-on: ubuntu-latest
@@ -77,6 +122,17 @@ jobs:
             echo "Cargo.toml says $crate, plugin.json says $plugin"
             exit 1
           }
+      - name: the shim asks for the asset name the release actually publishes
+        # The bug this guards: the release published
+        # `canon-x86_64-pc-windows-msvc.exe` while the shim requested the same
+        # name without the suffix. A 404, a silent fail-open, and a plugin that
+        # did nothing on Windows.
+        run: |
+          release_has_exe=$(grep -c 'canon-\${{ matrix.target }}.exe' .github/workflows/release.yml || true)
+          shim_adds_exe=$(grep -c 'EXE=".exe"' bin/canon || true)
+          test "$release_has_exe" -ge 1 || { echo "release.yml no longer names a .exe artifact"; exit 1; }
+          test "$shim_adds_exe" -ge 1 || { echo "bin/canon no longer appends .exe on Windows"; exit 1; }
+
       - name: every hook command points at a file that exists
         run: |
           python3 - <<'PY'

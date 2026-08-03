@@ -3,6 +3,29 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-08-03
+
+### Fixed
+
+- Windows never got a binary. The release publishes
+  `canon-x86_64-pc-windows-msvc.exe`, and the resolution shim asked for the
+  same name without the suffix, so the download 404'd. Had it succeeded it
+  would have saved the file under a name Windows refuses to execute. The
+  Windows wrapper had the mirror-image fault: it looked for `canon.exe` while
+  the shim installs a versioned `canon-<version>.exe`, so the two never met.
+  Every path failed open, which is why the only symptom was a plugin that
+  silently did nothing.
+- Installing a binary now removes the one it replaces, so the Windows wrapper's
+  `canon-*` match is unambiguous.
+
+### Added
+
+- A `shim` CI job that runs the resolution shell under bash on Linux, macOS and
+  Windows and requires it to find a binary. Nothing tested the shim before, and
+  it is where every platform difference lives.
+- A check that the asset name the shim requests matches the one the release
+  workflow publishes, so the two cannot drift apart again.
+
 ## [0.1.0] — 2026-08-03
 
 First release. A Claude Code plugin that derives a repository's conventions

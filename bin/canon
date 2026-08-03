@@ -15,11 +15,21 @@ set -eu
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}"
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "${PLUGIN_ROOT}/Cargo.toml" 2>/dev/null | head -1)"
-: "${VERSION:=0.1.0}"
+: "${VERSION:=0.1.1}"
 REPO="crisnahine/canon"
 
 DATA_DIR="${CANON_DATA_DIR:-${CLAUDE_PLUGIN_DATA:-${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/canon}}"
 INSTALL_DIR="${DATA_DIR}/bin"
+
+# Windows will not execute a file without an executable extension, and the
+# release assets are named accordingly. Both the download and the installed
+# copy need the suffix, or the shim asks for an asset that does not exist and
+# then saves it under a name Windows refuses to run.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW* | MSYS* | CYGWIN*) EXE=".exe" ;;
+    *) EXE="" ;;
+esac
+INSTALLED="${INSTALL_DIR}/canon-${VERSION}${EXE}"
 
 # Say nothing, successfully. The only correct failure for a hook.
 give_up() {
@@ -49,7 +59,7 @@ target_triple() {
 install_binary() {
     _triple="$(target_triple)" || return 1
     _base="https://github.com/${REPO}/releases/download/v${VERSION}"
-    _asset="canon-${_triple}"
+    _asset="canon-${_triple}${EXE}"
     _tmp="${INSTALL_DIR}/.download.$$"
 
     command -v curl >/dev/null 2>&1 || return 1
@@ -91,10 +101,16 @@ install_binary() {
         rm -f "${_tmp}"
         return 1
     }
-    mv -f "${_tmp}" "${INSTALL_DIR}/canon-${VERSION}" 2>/dev/null || {
+    mv -f "${_tmp}" "${INSTALLED}" 2>/dev/null || {
         rm -f "${_tmp}"
         return 1
     }
+    # Leave exactly one binary behind. The Windows wrapper cannot read the
+    # version out of Cargo.toml, so it runs whichever `canon-*` it finds, and
+    # that is only correct if an upgrade removes the one it replaces.
+    for _old in "${INSTALL_DIR}"/canon-*; do
+        [ "${_old}" = "${INSTALLED}" ] || rm -f "${_old}" 2>/dev/null || true
+    done
     return 0
 }
 
@@ -104,16 +120,16 @@ resolve() {
         return 0
     fi
     for candidate in \
-        "${PLUGIN_ROOT}/target/release/canon" \
-        "${PLUGIN_ROOT}/target/debug/canon" \
-        "${INSTALL_DIR}/canon-${VERSION}"; do
+        "${PLUGIN_ROOT}/target/release/canon${EXE}" \
+        "${PLUGIN_ROOT}/target/debug/canon${EXE}" \
+        "${INSTALLED}"; do
         if [ -x "${candidate}" ]; then
             printf '%s' "${candidate}"
             return 0
         fi
     done
-    if install_binary && [ -x "${INSTALL_DIR}/canon-${VERSION}" ]; then
-        printf '%s' "${INSTALL_DIR}/canon-${VERSION}"
+    if install_binary && [ -x "${INSTALLED}" ]; then
+        printf '%s' "${INSTALLED}"
         return 0
     fi
     return 1

@@ -8,7 +8,7 @@
     {
       "name": "canon",
       "source": "./",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Derives your repository's conventions from its AST and states them before each file is written."
     }
   ]

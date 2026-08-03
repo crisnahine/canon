@@ -24,6 +24,18 @@ if exist "%CLAUDE_PLUGIN_ROOT%\target\debug\canon.exe" (
 
 set "CANON_HOME=%CLAUDE_PLUGIN_DATA%"
 if "%CANON_HOME%"=="" set "CANON_HOME=%LOCALAPPDATA%\canon"
+
+REM The installed binary carries its version in the name, so that a plugin
+REM update cannot leave an older binary answering for a newer plugin. Batch
+REM cannot read that version out of Cargo.toml, so it runs whichever one is
+REM there; the Unix half deletes the binary it replaces, so there is only ever
+REM one.
+for %%f in ("%CANON_HOME%\bin\canon-*.exe") do (
+    "%%~ff" %*
+    exit /b 0
+)
+
+REM An unversioned name, for someone who placed a build here by hand.
 if exist "%CANON_HOME%\bin\canon.exe" (
     "%CANON_HOME%\bin\canon.exe" %*
     exit /b 0

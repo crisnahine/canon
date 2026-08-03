@@ -19,8 +19,16 @@ set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "${ROOT}/Cargo.toml" | head -1)"
-BINARY="${ROOT}/target/release/canon"
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-${HOME}/.claude/plugins/data/canon-canon}"
+
+# Same suffix rule as the resolution shim: Windows will not execute a file
+# without an executable extension.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW* | MSYS* | CYGWIN*) EXE=".exe" ;;
+    *) EXE="" ;;
+esac
+BINARY="${ROOT}/target/release/canon${EXE}"
+INSTALLED="${DATA_DIR}/bin/canon-${VERSION}${EXE}"
 
 if [ ! -x "${BINARY}" ]; then
     echo "no release build at ${BINARY}" >&2
@@ -29,8 +37,12 @@ if [ ! -x "${BINARY}" ]; then
 fi
 
 mkdir -p "${DATA_DIR}/bin"
-cp "${BINARY}" "${DATA_DIR}/bin/canon-${VERSION}"
-chmod +x "${DATA_DIR}/bin/canon-${VERSION}"
+cp "${BINARY}" "${INSTALLED}"
+chmod +x "${INSTALLED}"
+# Exactly one binary, so the Windows wrapper's `canon-*` match is unambiguous.
+for old in "${DATA_DIR}/bin"/canon-*; do
+    [ "${old}" = "${INSTALLED}" ] || rm -f "${old}" 2>/dev/null || true
+done
 
-echo "installed canon ${VERSION} -> ${DATA_DIR}/bin/canon-${VERSION}"
-"${DATA_DIR}/bin/canon-${VERSION}" version
+echo "installed canon ${VERSION} -> ${INSTALLED}"
+"${INSTALLED}" version
