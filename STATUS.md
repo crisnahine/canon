@@ -100,6 +100,34 @@ file, aborting the process with SIGABRT. That is the one failure an in-process
 fail-open harness cannot disguise, because the process dies before it can print
 anything. The walk is now iterative, with a regression test at 5,000 levels.
 
+## A folder of repositories
+
+Measured on a workspace root holding four separate checkouts, itself not a
+repository:
+
+| | before | after |
+|---|---|---|
+| index | did not finish in 60 s | 3.4 s |
+| files | walking a 24 GB tool cache | 13,456 tracked |
+| languages | — | JSX, JavaScript, PHP, Python, Ruby, TSX, TypeScript |
+
+Conventions come out scoped per checkout, so nothing leaks sideways:
+
+```
+api/app/services/**/*.rb   that public method is named `execute`  (1241/1248, 0.99)
+api/app/workers/**/*.rb    that public method is named `perform`
+client/src/hooks/**/*.ts   files here export exactly 1 function   (18/21, 0.86)
+```
+
+The PHP checkout is silent, correctly. It is a WordPress theme: 133 tracked
+PHP files and no classes at all, so there is no structural shape to state.
+
+Two guards were added alongside it, because asking git is not always possible.
+The fallback walk now abandons a tree past 150,000 files rather than returning
+an arbitrary prefix, and the default exclusions cover agent and build caches.
+Neither is sufficient alone: no hand-maintained list stays ahead of whatever
+tool a team installs next, which is why the cap exists as well.
+
 ## What is not built
 
 - **Vue SFC.** `<template>` and `<script lang="ts">` are separate grammars, so

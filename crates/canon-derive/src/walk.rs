@@ -14,6 +14,17 @@ const MAX_FILE_BYTES: u64 = 512 * 1024;
 /// symlink loop the walker did not catch cannot run forever inside a hook.
 const MAX_DEPTH: usize = 32;
 
+/// File count past which this is not a repository, it is a disk.
+///
+/// Past the cap the walk gives up entirely rather than returning what it has.
+/// A truncated index is worse than none: it would derive confident conventions
+/// from whichever arbitrary prefix of the tree happened to be enumerated first.
+///
+/// Measured need: a directory holding several checkouts, one of which had a
+/// 24 GB tool cache, did not finish indexing inside a minute. `SessionStart`
+/// would have been killed by its own timeout with nothing to show.
+const MAX_WALKED_FILES: usize = 150_000;
+
 /// One file in the index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -103,6 +114,10 @@ pub fn walk(root: &Path, settings: &Settings) -> Vec<FileEntry> {
             }
             let Some(rel) = relative(root, &path) else { continue };
             out.push(entry_from(&rel, &meta, now, settings));
+
+            if out.len() > MAX_WALKED_FILES {
+                return Vec::new();
+            }
         }
     }
 
@@ -224,6 +239,28 @@ mod tests {
         assert_eq!(first, vec!["a.rb", "b.rb", "c/a.rb", "c/d.rb"]);
         let second: Vec<String> = walk(&root, &s).into_iter().map(|f| f.rel).collect();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn agent_and_build_caches_are_excluded_by_default() {
+        // Not a tuning preference: one of these reached 24 GB in a real
+        // checkout and made the walk unusable.
+        let settings = Settings::default();
+        for cache in [".claude", ".chameleon", "node_modules", "target", ".turbo", "Pods"] {
+            assert!(settings.excludes_segment(cache), "{cache} must be excluded");
+        }
+    }
+
+    #[test]
+    fn a_walk_past_the_cap_returns_nothing_rather_than_an_arbitrary_prefix() {
+        // A truncated index would derive confident conventions from whichever
+        // part of the tree happened to be enumerated first.
+        let files: Vec<(String, String)> = (0..(MAX_WALKED_FILES + 10))
+            .map(|i| (format!("d{}/f{i}.rb", i % 50), String::from("x")))
+            .collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let root = fixture::build("walk-cap", &refs);
+        assert!(walk(&root, &Settings::default()).is_empty());
     }
 
     #[test]

@@ -96,6 +96,33 @@ Three reasons, in increasing order of importance:
 - **It derives shape, never correctness.** It can tell you code resembles your
   other code. It cannot tell you the code is right.
 
+## A folder of repositories
+
+A workspace root is often not a repository itself:
+
+```
+empire-flippers/          <- you open the editor here; not a git repo
+├── api/                  <- its own checkout, Rails
+├── client/               <- its own checkout, TypeScript/React
+└── wordpress/            <- its own checkout, PHP
+```
+
+canon asks the children instead, and prefixes their files with their directory
+name. Rules come out scoped per checkout, so Ruby conventions never reach the
+frontend:
+
+```
+api/app/services/**/*.rb      that public method is named `execute`
+client/src/hooks/**/*.ts      files here export exactly 1 function
+```
+
+One level down, up to 32 children. The combined commit string is every child's
+HEAD, so a commit in any one of them refreshes the snapshot.
+
+This is not a nicety. On the layout above, walking the filesystem instead did
+not finish indexing inside a minute, because one child held a 24 GB tool cache.
+Asking git takes 3.4 seconds for 13,456 files.
+
 ## Supported languages
 
 Two tiers, and the difference matters.

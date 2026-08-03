@@ -40,6 +40,26 @@ impl Default for Settings {
             recency_half_life_days: 365.0,
             exclude_dirs: [
                 ".git",
+                // Agent and editor caches. These are why the fallback walk
+                // needs a cap as well as a list: one of them reached 24 GB in a
+                // real checkout, and no hand-maintained list stays ahead of
+                // whatever tool a team installs next.
+                ".claude",
+                ".chameleon",
+                ".cache",
+                ".turbo",
+                ".bundle",
+                ".mypy_cache",
+                ".ruff_cache",
+                ".pytest_cache",
+                ".tox",
+                ".svelte-kit",
+                ".nuxt",
+                ".output",
+                ".vercel",
+                ".serverless",
+                "Pods",
+                "DerivedData",
                 "node_modules",
                 "target",
                 "vendor",
