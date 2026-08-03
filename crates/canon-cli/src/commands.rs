@@ -93,18 +93,67 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
     // `Stop` block genuinely prevents the turn ending and still does not
     // compel the edit. So a rule the repository holds without exception is
     // enforced here, before anything is written, and everything else advises.
-    if let Some(content) = input.tool_input.content.as_deref() {
-        let violations = blocking_violations(&rel, content, &conventions, &settings);
-        if !violations.is_empty() {
-            logging::info(&format!("refused a write to {rel}: {} violations", violations.len()));
-            return HookOutput::deny(refusal(&rel, &violations));
-        }
+    let violations =
+        blocking_violations(&rel, resulting_file(&root, &rel, input), &conventions, &settings);
+    if !violations.is_empty() {
+        logging::info(&format!("refused a write to {rel}: {} violations", violations.len()));
+        return HookOutput::deny(refusal(&rel, &violations));
     }
 
-    let selected = for_path(&conventions, &rel, settings.injection_budget);
+    // Anything able to refuse a write is stated, whatever the budget says. The
+    // budget drops the least specific rules first and no real path has ever
+    // come close to it, but the two are decided independently, so a rule could
+    // in principle refuse a write it was silently dropped from warning about.
+    // That is the worst available shape for a refusal, and it costs one line to
+    // make impossible rather than merely unlikely.
+    let mut selected = for_path(&conventions, &rel, settings.injection_budget);
+    for c in conventions.iter().filter(|c| {
+        c.scope.matches(&rel) && c.enforcement_now(&settings) == canon_core::Enforcement::Blocking
+    }) {
+        if !selected.iter().any(|s| s.statement == c.statement) {
+            selected.push(c);
+        }
+    }
     let Some(block) = render_block(&rel, &selected) else { return HookOutput::silent() };
     logging::debug(&format!("injected {} conventions for {rel}", selected.len()));
     HookOutput::context(Event::PreToolUse, block)
+}
+
+/// The file as it will exist once this tool call runs, when that is knowable.
+///
+/// `Write` carries the whole file, so it is the whole file. `Edit` carries a
+/// fragment, and checking a whole-file rule against a fragment reports that a
+/// class has no base type because the fragment does not contain the class — the
+/// same reason `verify` re-reads from disk instead of trusting the payload. So
+/// the result is reconstructed: read what is there and apply the replacement.
+///
+/// Without this, enforcement depended on which tool the model reached for
+/// rather than on what landed on disk. Measured on a directory with a rule at
+/// total agreement: `Write` of the file was refused, and an `Edit` producing
+/// byte-identical content was accepted. `Edit` is also the tool a model uses
+/// most once a file exists, so the guarded path was the rarer one.
+///
+/// `None` when the result cannot be known — a `NotebookEdit`, or an `Edit`
+/// against a file that is not on disk. Naming rules still apply then, because
+/// they read the path and never the content.
+fn resulting_file(root: &Path, rel: &str, input: &HookInput) -> Option<String> {
+    if let Some(content) = input.tool_input.content.clone() {
+        return Some(content);
+    }
+    let (old, new) =
+        (input.tool_input.old_string.as_deref()?, input.tool_input.new_string.as_deref()?);
+    let current = std::fs::read_to_string(root.join(rel)).ok()?;
+    // An `old_string` that is not there means the edit will not apply, and
+    // guessing at the result would refuse a write that was never going to
+    // happen in the shape we imagined.
+    if !current.contains(old) {
+        return None;
+    }
+    Some(if input.tool_input.replace_all {
+        current.replace(old, new)
+    } else {
+        current.replacen(old, new, 1)
+    })
 }
 
 /// Why the write was refused, and what would satisfy the rule.
@@ -121,8 +170,13 @@ pub(crate) fn inject(input: &HookInput) -> HookOutput {
 /// because the real ids carried the directory the rules were derived at.
 /// The suppression block is therefore written out, ready to paste.
 fn refusal(rel: &str, violations: &[canon_derive::Violation]) -> String {
+    // "every file in this directory" was a claim the counts often contradicted:
+    // a repository-wide `.txt` rule reported 8/8 while refusing a write into a
+    // directory holding two files, neither of which followed it. Each line now
+    // renders the scope it was counted over, so the sentence and the number
+    // describe the same set.
     let mut text = format!(
-        "canon refused this write to {rel}. It breaks a rule every file in this directory follows, without exception:\n\n"
+        "canon refused this write to {rel}. Each of these is a rule that every file it was counted over follows, without exception:\n\n"
     );
     let shown: Vec<&canon_derive::Violation> = violations.iter().take(3).collect();
     for v in &shown {
@@ -157,7 +211,11 @@ pub(crate) fn verify(input: &HookInput) -> HookOutput {
     };
 
     let (settings, _) = config::load_or_default(&root);
-    let violations = verify_source(&rel, &source, &live_conventions(&snapshot, &settings));
+    let conventions = live_conventions(&snapshot, &settings);
+    let mut violations = verify_source(&rel, &source, &conventions);
+    // Asked last and separately, because it is the one check that looks for a
+    // file rather than at one, and the file it looks for does not exist yet.
+    violations.extend(canon_derive::missing_test(&root, &rel, &conventions));
     if violations.is_empty() {
         return HookOutput::silent();
     }
@@ -258,8 +316,12 @@ pub(crate) fn check(root: &Path) -> String {
             }
         }
         Err(e) => {
+            // Not "the defaults": the default is `enforce = true`, and a
+            // config that will not parse deliberately runs with enforcement
+            // off. Saying "defaults" here would tell someone their write can
+            // still be refused when it cannot.
             out.push_str(&format!(
-                "Configuration\n  INVALID: {e}\n  hooks are running on defaults\n"
+                "Configuration\n  INVALID: {e}\n  hooks are running on defaults, with enforce = false until this parses\n"
             ));
         }
     }
@@ -319,12 +381,12 @@ pub(crate) fn explain(root: &Path, path: Option<&str>, id: Option<&str>) -> Stri
         return "no snapshot yet; run `canon index`\n".to_string();
     };
 
-    let matching: Vec<&canon_core::Convention> = snapshot
+    let mut matching: Vec<&canon_core::Convention> = snapshot
         .conventions
         .iter()
         .filter(|c| match (path, id) {
             (_, Some(wanted)) => c.id == wanted,
-            (Some(p), None) => relevant_to(&c.scope, p),
+            (Some(p), None) => relevant_to(&c.scope, p, &c.evidence),
             (None, None) => true,
         })
         .collect();
@@ -337,6 +399,14 @@ pub(crate) fn explain(root: &Path, path: Option<&str>, id: Option<&str>) -> Stri
     // recorded when the snapshot was built. The two differ the moment someone
     // edits `.canon.toml`, and this is the surface a refusal sends them to.
     let (settings, _) = config::load_or_default(root);
+
+    // Anything that can refuse a write comes first. Someone reading this was
+    // sent here by a refusal and has one question: which of these stopped me.
+    matching.sort_by_key(|c| {
+        let blocking = c.enforcement_now(&settings) == canon_core::Enforcement::Blocking
+            && !settings.is_suppressed(&c.id);
+        (!blocking, std::cmp::Reverse(c.scope.specificity()), c.id.clone())
+    });
 
     let mut out = String::new();
     for c in matching {
@@ -380,18 +450,42 @@ pub(crate) fn explain(root: &Path, path: Option<&str>, id: Option<&str>) -> Stri
 /// both directions are interesting: rules for `app/` apply inside
 /// `app/services/`, and rules for `app/services/enrolments/` are what someone
 /// asking about `app/services/` wants to see.
-fn relevant_to(scope: &canon_core::Scope, query: &str) -> bool {
+fn relevant_to(scope: &canon_core::Scope, query: &str, evidence: &[canon_core::Evidence]) -> bool {
     let query = query.trim_end_matches('/');
+    if query.is_empty() {
+        return true;
+    }
+    // A path with a dot in its last segment is a file, and a file has exactly
+    // one right answer: the same filter injection uses. Asking about a `.rake`
+    // file and being shown the rule for `**/*.csv` is the whole of issue #15,
+    // and it lands on someone who was just refused and told to run this.
+    if names_a_file(query) {
+        return scope.matches(query);
+    }
     match scope {
-        canon_core::Scope::Repo | canon_core::Scope::Ext(_) => true,
+        canon_core::Scope::Repo => true,
+        // A repository-wide extension rule is about this directory only if it
+        // was counted over something in it. The evidence is a sample rather
+        // than the whole set, so this can understate — which is the right way
+        // for an audit surface to be wrong.
+        canon_core::Scope::Ext(ext) => evidence
+            .iter()
+            .any(|e| e.rel.starts_with(&format!("{query}/")) && has_extension(&e.rel, ext)),
         canon_core::Scope::Dir(d) | canon_core::Scope::DirExt(d, _) => {
             d.is_empty()
-                || query.is_empty()
                 || d == query
                 || d.starts_with(&format!("{query}/"))
                 || query.starts_with(&format!("{d}/"))
         }
     }
+}
+
+fn names_a_file(query: &str) -> bool {
+    query.rsplit_once('/').map_or(query, |(_, name)| name).contains('.')
+}
+
+fn has_extension(rel: &str, ext: &str) -> bool {
+    rel.rsplit_once('.').is_some_and(|(_, e)| e.eq_ignore_ascii_case(ext))
 }
 
 /// Derive and persist, reusing a fresh snapshot unless told not to.
@@ -409,7 +503,7 @@ fn refresh(root: &Path, settings: &Settings, force: bool) -> Snapshot {
 
     let files = index_files(root, settings);
     let conventions = canon_derive::derive_from(root, settings, &files);
-    let languages = languages_in(&files);
+    let languages = languages_in(&conventions);
     let snapshot = Snapshot::new(sha, settings, files.len(), languages, conventions);
     // A snapshot that cannot be persisted is still usable for this call. The
     // next session pays to derive again, which is the right trade against
@@ -481,10 +575,21 @@ fn index_files(root: &Path, settings: &Settings) -> Vec<FileEntry> {
     canon_derive::walk(root, settings)
 }
 
-fn languages_in(files: &[FileEntry]) -> Vec<String> {
-    let mut seen: Vec<String> = files
+/// The languages the conventions in hand actually came from.
+///
+/// Read off the scopes rather than off the files walked. Counting every wired
+/// language with a file in the tree credited ERB, PHP and Python on a workspace
+/// where all three derived nothing: the header said conventions were "derived
+/// from" languages that had contributed none, which is the one claim a header
+/// like that is making.
+fn languages_in(conventions: &[canon_core::Convention]) -> Vec<String> {
+    let mut seen: Vec<String> = conventions
         .iter()
-        .filter_map(|f| canon_extract::lang::from_extension(&f.ext))
+        .filter_map(|c| match &c.scope {
+            canon_core::Scope::Ext(ext) | canon_core::Scope::DirExt(_, ext) => Some(ext),
+            canon_core::Scope::Repo | canon_core::Scope::Dir(_) => None,
+        })
+        .filter_map(|ext| canon_extract::lang::from_extension(ext))
         .filter(|l| canon_extract::lang::provider(*l).grammar_ready)
         .map(|l| l.name().to_string())
         .collect();
@@ -813,24 +918,51 @@ mod tests {
         let other = Scope::DirExt("app/models".into(), "rb".into());
 
         // Asking about a directory shows the rules above and below it.
-        assert!(relevant_to(&mid, "app/services"));
-        assert!(relevant_to(&deep, "app/services"), "descendants are interesting");
-        assert!(relevant_to(&mid, "app/services/enrolments"), "ancestors govern it");
-        assert!(!relevant_to(&other, "app/services"), "siblings are not");
+        assert!(relevant_to(&mid, "app/services", &[]));
+        assert!(relevant_to(&deep, "app/services", &[]), "descendants are interesting");
+        assert!(relevant_to(&mid, "app/services/enrolments", &[]), "ancestors govern it");
+        assert!(!relevant_to(&other, "app/services", &[]), "siblings are not");
 
         // A trailing slash is how people type directories.
-        assert!(relevant_to(&mid, "app/services/"));
+        assert!(relevant_to(&mid, "app/services/", &[]));
 
-        // Repository-wide rules are always relevant.
-        assert!(relevant_to(&Scope::Repo, "app/services"));
-        assert!(relevant_to(&Scope::Ext("rb".into()), "app/services"));
+        // The repository-wide rule governs every directory.
+        assert!(relevant_to(&Scope::Repo, "app/services", &[]));
+
+        // An extension rule governs a directory only if it was counted over
+        // something in it. Answering "yes, always" is how asking about a
+        // `.rake` file listed the rule for `**/*.csv`.
+        let ext = Scope::Ext("rb".into());
+        let here = [ev("app/services/charge_card.rb")];
+        let elsewhere = [ev("lib/tasks/backfill.rb")];
+        assert!(relevant_to(&ext, "app/services", &here));
+        assert!(!relevant_to(&ext, "app/services", &elsewhere));
+        assert!(!relevant_to(&ext, "app/services", &[]));
+    }
+
+    fn ev(rel: &str) -> canon_core::Evidence {
+        canon_core::Evidence { rel: rel.to_string(), line: 0 }
+    }
+
+    #[test]
+    fn an_explain_query_naming_a_file_answers_only_for_that_file() {
+        use canon_core::Scope;
+        // The same predicate injection uses. Someone stopped by a refusal runs
+        // this to find the rule that stopped them, and the whole snapshot is
+        // not an answer.
+        let rake = "lib/tasks/backfill.rake";
+        assert!(relevant_to(&Scope::Ext("rake".into()), rake, &[]));
+        assert!(!relevant_to(&Scope::Ext("csv".into()), rake, &[ev("data/a.csv")]));
+        assert!(!relevant_to(&Scope::DirExt("app".into(), "rb".into()), rake, &[]));
+        assert!(relevant_to(&Scope::DirExt("lib/tasks".into(), "rake".into()), rake, &[]));
+        assert!(relevant_to(&Scope::Repo, rake, &[]));
     }
 
     #[test]
     fn a_prefix_that_is_not_a_path_boundary_does_not_match() {
         use canon_core::Scope;
         let scope = Scope::DirExt("app/service".into(), "rb".into());
-        assert!(!relevant_to(&scope, "app/services"), "`service` must not capture `services`");
+        assert!(!relevant_to(&scope, "app/services", &[]), "`service` must not capture `services`");
     }
 
     // The end-to-end cycle lives in `tests/cli.rs`, which runs the real

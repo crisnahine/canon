@@ -72,14 +72,35 @@ fn verify_with(
             }
         }
     }
+    for convention in &applicable {
+        if let Some(v) = check_test_suffix(rel, convention) {
+            out.push(v);
+        }
+    }
 
-    // Structure only. Every check below reads declarations; none reads a call
-    // site, and compiling the query for facts nobody looks at is most of what
-    // a write costs.
-    let facts = extension_of(rel)
-        .and_then(canon_extract::lang::from_extension)
-        .and_then(|l| canon_extract::extract_structure(l, source, rel).ok());
+    // Structure is enough for every check that reads declarations, and skipping
+    // the query pass is most of what makes a write cheap. An import rule is the
+    // exception: it was derived from the query's import list where the language
+    // has one, so checking it against the structural list would compare two
+    // different readings of the same file. Enforcement never needs this — no
+    // import rule is ever Blocking — so the hot path keeps the cheap pass and
+    // only `PostToolUse`, after the write has already landed, pays for it.
+    let wants_imports =
+        applicable.iter().any(|c| c.id.starts_with("shape.import") && has_import_statement(c));
+    let facts = extension_of(rel).and_then(canon_extract::lang::from_extension).and_then(|l| {
+        if wants_imports {
+            canon_extract::extract(l, source, rel).ok()
+        } else {
+            canon_extract::extract_structure(l, source, rel).ok()
+        }
+    });
     let Some(facts) = facts else { return out };
+
+    for convention in &applicable {
+        if let Some(v) = check_import(&facts, convention) {
+            out.push(v);
+        }
+    }
 
     // A test is a different kind of file from the code beside it, and a shape
     // rule derived from a directory is a rule about that code. The first test
@@ -121,10 +142,72 @@ fn check_naming(rel: &str, convention: &Convention) -> Option<Violation> {
     Some(Violation {
         convention_id: convention.id.clone(),
         message: format!(
-            "file name `{stem}` is not {} ({}/{} files here are)",
+            "file name `{stem}` is not {} ({}/{} files matching {} are)",
             expected.label(),
             convention.agreeing,
-            convention.total
+            convention.total,
+            convention.scope.render()
+        ),
+    })
+}
+
+const IMPORT_PREFIX: &str = "Files here import from ";
+const SUFFIX_PREFIX: &str = "Test files are named ";
+
+fn has_import_statement(convention: &Convention) -> bool {
+    backticked(&convention.statement, IMPORT_PREFIX).is_some()
+}
+
+/// "Files here import from `rails_helper`."
+///
+/// The highest-value family canon derives and, until now, the only one with no
+/// check at all. A wrong import is the way generated code drifts hardest,
+/// because it compiles and type-checks whenever a plausible alternative exists;
+/// a spec that requires `spec_helper` in a directory where 1,027 of 1,027 files
+/// require `rails_helper` was stated at and then never checked.
+///
+/// Matched against the file's imports as written, which is how the rule was
+/// counted. A file that imports nothing at all is not reported: a module with
+/// no dependencies is a different kind of file, not a broken one.
+fn check_import(facts: &FileFacts, convention: &Convention) -> Option<Violation> {
+    let expected = backticked(&convention.statement, IMPORT_PREFIX)?;
+    if facts.imports.is_empty() || facts.imports.contains(&expected) {
+        return None;
+    }
+    Some(Violation {
+        convention_id: convention.id.clone(),
+        message: format!(
+            "this file does not import `{expected}`; files here do ({}/{} matching {}): it imports {}",
+            convention.agreeing,
+            convention.total,
+            convention.scope.render(),
+            facts.imports.join(", ")
+        ),
+    })
+}
+
+/// "Test files are named `*_spec.rb`."
+///
+/// Path-only, and only about a file that is a test. Deriving it and never
+/// checking it meant a `thing_test.rb` written into a repository that names
+/// every test `*_spec.rb` was told the rule in the same block and then not
+/// told it had broken it.
+fn check_test_suffix(rel: &str, convention: &Convention) -> Option<Violation> {
+    let expected = backticked(&convention.statement, SUFFIX_PREFIX)?;
+    if !crate::tier0::is_test_path(rel) {
+        return None;
+    }
+    let name = rel.rsplit_once('/').map_or(rel, |(_, n)| n);
+    if crate::tier0::matches_test_glob(name, &expected) {
+        return None;
+    }
+    Some(Violation {
+        convention_id: convention.id.clone(),
+        message: format!(
+            "test file `{name}` is not named `{expected}` ({}/{} matching {} are)",
+            convention.agreeing,
+            convention.total,
+            convention.scope.render()
         ),
     })
 }
@@ -135,7 +218,15 @@ fn check_shape(
     convention: &Convention,
     strictness: Strictness,
 ) -> Vec<Violation> {
-    let evidence = format!("{}/{}", convention.agreeing, convention.total);
+    // The scope travels with the counts. A bare "47/52" beside a sentence about
+    // "this directory" invites the reader to check the directory and find a
+    // different number, because the rule may have been counted repository-wide.
+    let evidence = format!(
+        "{}/{} matching {}",
+        convention.agreeing,
+        convention.total,
+        convention.scope.render()
+    );
     let mut out = Vec::new();
 
     if let Some(expected) = trailing_count(&convention.statement, "export exactly ") {
@@ -240,6 +331,43 @@ fn backticked(statement: &str, prefix: &str) -> Option<String> {
     inner.split_once('`').map(|(name, _)| name.to_string())
 }
 
+/// "Every file here has a test of the same name."
+///
+/// Separate from [`verify_source`] because it is the one check that cannot be
+/// answered from the file alone: it has to look for a sibling that does not
+/// exist yet. The caller supplies the repository root, the same way
+/// [`crate::duplicates_against_siblings`] already does.
+///
+/// Reported only when the rule is strong and the file is not itself a test.
+/// Advisory always: a file may legitimately be the one thing in a directory
+/// that needs no test, which is why the rule was never enforceable.
+#[must_use]
+pub fn missing_test(
+    root: &std::path::Path,
+    rel: &str,
+    conventions: &[Convention],
+) -> Option<Violation> {
+    if crate::tier0::is_test_path(rel) {
+        return None;
+    }
+    let convention = conventions
+        .iter()
+        .filter(|c| c.id.starts_with("tests.colocation") && c.scope.matches(rel))
+        .max_by_key(|c| c.scope.specificity())?;
+    if crate::tier0::has_test_for(root, rel) {
+        return None;
+    }
+    Some(Violation {
+        convention_id: convention.id.clone(),
+        message: format!(
+            "no test found for this file; {}/{} files matching {} have one",
+            convention.agreeing,
+            convention.total,
+            convention.scope.render()
+        ),
+    })
+}
+
 /// The violations that justify refusing a write.
 ///
 /// Only rules the repository agrees on totally and whose check cannot be wrong
@@ -250,10 +378,15 @@ fn backticked(statement: &str, prefix: &str) -> Option<String> {
 /// reading the stored decision meant doing so had no effect until the next
 /// session rebuilt the snapshot — the escape hatch was inert at exactly the
 /// moment it was needed.
+/// `source` is the file as it will exist after the write, when the caller can
+/// know it. `None` means it cannot — a notebook cell, or an edit to a file that
+/// is not on disk — and only the path-only rules are checked, because a naming
+/// rule reads the path and never the content. Withholding those too would make
+/// enforcement depend on which tool was reached for rather than on what lands.
 #[must_use]
 pub fn blocking_violations(
     rel: &str,
-    source: &str,
+    source: Option<String>,
     conventions: &[Convention],
     settings: &canon_core::Settings,
 ) -> Vec<Violation> {
@@ -268,7 +401,22 @@ pub fn blocking_violations(
     if enforceable.is_empty() {
         return Vec::new();
     }
-    verify_with(rel, source, &enforceable, Strictness::OnlyWhatWasCounted)
+    let Some(source) = source else {
+        return path_violations(rel, &enforceable);
+    };
+    verify_with(rel, &source, &enforceable, Strictness::OnlyWhatWasCounted)
+}
+
+/// The subset of checks that need no content at all.
+fn path_violations(rel: &str, conventions: &[Convention]) -> Vec<Violation> {
+    if !crate::tier0::counts_toward_naming(rel) {
+        return Vec::new();
+    }
+    conventions
+        .iter()
+        .filter(|c| c.scope.matches(rel))
+        .filter_map(|c| check_naming(rel, c))
+        .collect()
 }
 
 #[cfg(test)]
@@ -312,7 +460,13 @@ mod tests {
         let violations = verify_source("app/services/create.rb", source, &convs);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("exposes 2 public method"));
-        assert!(violations[0].message.contains("(47/52)"), "got {}", violations[0].message);
+        // The counts travel with the scope they were counted over, so a reader
+        // checking the number knows which files to count.
+        assert!(
+            violations[0].message.contains("47/52 matching app/services/**/*.rb"),
+            "got {}",
+            violations[0].message
+        );
     }
 
     #[test]
@@ -464,7 +618,7 @@ mod tests {
             assert!(
                 blocking_violations(
                     excluded,
-                    "class A; end\n",
+                    Some("class A; end\n".to_string()),
                     std::slice::from_ref(&rule),
                     &settings
                 )
@@ -479,8 +633,13 @@ mod tests {
             Scope::Ext("py".into()),
         );
         assert!(
-            blocking_violations("src/flask/json/__init__.py", "x = 1\n", &[py], &settings)
-                .is_empty(),
+            blocking_violations(
+                "src/flask/json/__init__.py",
+                Some("x = 1\n".to_string()),
+                &[py],
+                &settings
+            )
+            .is_empty(),
             "a dunder name is excluded when deriving and must be when checking"
         );
 
@@ -490,14 +649,20 @@ mod tests {
             Scope::Ext("rst".into()),
         );
         assert!(
-            blocking_violations("AUTHORS.rst", "x\n", &[rst], &settings).is_empty(),
+            blocking_violations("AUTHORS.rst", Some("x\n".to_string()), &[rst], &settings)
+                .is_empty(),
             "a conventional name is excluded when deriving and must be when checking"
         );
 
         // A file the rule does speak for is still refused.
         assert_eq!(
-            blocking_violations("app/services/NotSnake.rb", "class A; end\n", &[rule], &settings)
-                .len(),
+            blocking_violations(
+                "app/services/NotSnake.rb",
+                Some("class A; end\n".to_string()),
+                &[rule],
+                &settings
+            )
+            .len(),
             1
         );
     }
@@ -527,15 +692,20 @@ mod tests {
             "app/services/void_invoice_test.py",
         ] {
             assert!(
-                blocking_violations(rel, test_file, &rules, &settings).is_empty(),
+                blocking_violations(rel, Some(test_file.to_string()), &rules, &settings).is_empty(),
                 "{rel} was refused for not being shaped like the code it tests"
             );
         }
 
         // The code beside it is still held to the rules.
         assert!(
-            !blocking_violations("app/services/void_invoice.py", test_file, &rules, &settings)
-                .is_empty()
+            !blocking_violations(
+                "app/services/void_invoice.py",
+                Some(test_file.to_string()),
+                &rules,
+                &settings
+            )
+            .is_empty()
         );
     }
 
@@ -557,13 +727,21 @@ mod tests {
         assert!(advice.iter().any(|v| v.message.contains("`run`")), "advice was withheld");
 
         assert!(
-            blocking_violations("lib/core.rb", two, std::slice::from_ref(&rule), &settings)
-                .is_empty(),
+            blocking_violations(
+                "lib/core.rb",
+                Some(two.to_string()),
+                std::slice::from_ref(&rule),
+                &settings
+            )
+            .is_empty(),
             "a two-method type was refused by a rule counted over one-method files"
         );
 
         let one = "class Core\n  def token; end\nend\n";
-        assert_eq!(blocking_violations("lib/core.rb", one, &[rule], &settings).len(), 1);
+        assert_eq!(
+            blocking_violations("lib/core.rb", Some(one.to_string()), &[rule], &settings).len(),
+            1
+        );
     }
 
     #[test]
@@ -579,23 +757,36 @@ mod tests {
         let source = "class A; end\n";
 
         let on = canon_core::Settings::default();
-        assert_eq!(blocking_violations(rel, source, std::slice::from_ref(&rule), &on).len(), 1);
+        assert_eq!(
+            blocking_violations(rel, Some(source.to_string()), std::slice::from_ref(&rule), &on)
+                .len(),
+            1
+        );
 
         let off = canon_core::Settings { enforce: false, ..canon_core::Settings::default() };
-        assert!(blocking_violations(rel, source, std::slice::from_ref(&rule), &off).is_empty());
+        assert!(
+            blocking_violations(rel, Some(source.to_string()), std::slice::from_ref(&rule), &off)
+                .is_empty()
+        );
 
         let suppressed = canon_core::Settings {
             suppress: vec!["naming.repo.rb".to_string()],
             ..canon_core::Settings::default()
         };
         assert!(
-            blocking_violations(rel, source, std::slice::from_ref(&rule), &suppressed).is_empty()
+            blocking_violations(
+                rel,
+                Some(source.to_string()),
+                std::slice::from_ref(&rule),
+                &suppressed
+            )
+            .is_empty()
         );
 
         let mut rollup = rule;
         rollup.id = "naming.repo.rb.rollup".to_string();
         assert!(
-            blocking_violations(rel, source, &[rollup], &on).is_empty(),
+            blocking_violations(rel, Some(source.to_string()), &[rollup], &on).is_empty(),
             "a rule assembled from other rules generalises to directories that never voted"
         );
     }

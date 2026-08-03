@@ -33,6 +33,15 @@ pub(crate) enum ConfigError {
         /// What the parser said.
         detail: String,
     },
+    /// The file exists and could not be read at all: wrong encoding, or no
+    /// permission. Distinct from absent, because absent means the defaults and
+    /// this means a setting the author wrote never took effect.
+    Unreadable {
+        /// Where the file was.
+        path: String,
+        /// What the filesystem said.
+        detail: String,
+    },
     /// The file parsed but a value is out of range.
     Invalid(canon_core::SettingsError),
     /// An environment variable could not be interpreted as its field's type.
@@ -48,6 +57,9 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parse { path, detail } => write!(f, "{path}: {detail}"),
+            Self::Unreadable { path, detail } => {
+                write!(f, "{path}: cannot be read ({detail}); is it saved as UTF-8?")
+            }
             Self::Invalid(e) => write!(f, "{e}"),
             Self::Env { key, value } => write!(f, "{key}=`{value}` is not a valid value"),
         }
@@ -91,8 +103,24 @@ pub(crate) fn load_or_default(root: &Path) -> (Settings, Option<ConfigError>) {
 
 fn load_file(root: &Path) -> Result<Settings, ConfigError> {
     let path = root.join(CONFIG_FILE);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(Settings::default());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        // No config is the ordinary case and means the defaults.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Settings::default()),
+        // A config that exists and cannot be read is not the same thing, and
+        // treating them alike was the worse half of the bug this file is about.
+        // A `.canon.toml` saved as UTF-16 — what PowerShell's `>` writes, on a
+        // platform canon supports — or one with a stray latin-1 byte, or one
+        // the process cannot open, never reached the parser. It took the
+        // absent-file path, got the enforcing defaults, and refused the write
+        // with nothing on `canon check` to say why. Every other broken config
+        // at least reports itself.
+        Err(e) => {
+            return Err(ConfigError::Unreadable {
+                path: path.display().to_string(),
+                detail: e.to_string(),
+            });
+        }
     };
     toml::from_str(&text).map_err(|e| ConfigError::Parse {
         path: path.display().to_string(),
@@ -281,6 +309,40 @@ mod tests {
             assert!(err.is_some(), "{broken:?} should not have parsed");
             assert!(!settings.enforce, "a config that will not parse must not block a write");
         }
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_the_same_as_no_config() {
+        // Conflating the two sent an unreadable file down the absent-file path,
+        // which returns the enforcing defaults. A `.canon.toml` saved as UTF-16
+        // — what PowerShell's `>` writes — carried `enforce = false`, refused
+        // the write anyway, and reported nothing at all on `canon check`.
+        let root = dir("unreadable", None);
+        let path = root.join(CONFIG_FILE);
+
+        // UTF-16 as PowerShell writes it: a byte-order mark, which is not
+        // valid UTF-8 and so never reaches the parser at all.
+        let mut utf16: Vec<u8> = vec![0xFF, 0xFE];
+        utf16.extend("enforce = false\n".encode_utf16().flat_map(u16::to_le_bytes));
+        // And a single latin-1 byte in a comment, which is the same problem
+        // arriving through an editor rather than a shell.
+        let latin1: Vec<u8> = b"# caf\xE9\nenforce = false\n".to_vec();
+
+        for bytes in [utf16, latin1] {
+            std::fs::write(&path, &bytes).expect("write");
+            let (settings, err) = load_or_default(&root);
+            assert!(matches!(err, Some(ConfigError::Unreadable { .. })), "got {err:?}");
+            assert!(!settings.enforce, "an unreadable config must not block a write");
+            assert!(load(&root).is_err(), "`canon check` has to be able to report it");
+        }
+    }
+
+    #[test]
+    fn no_config_at_all_is_the_ordinary_case_and_keeps_the_defaults() {
+        let root = dir("absent", None);
+        let (settings, err) = load_or_default(&root);
+        assert!(err.is_none());
+        assert!(settings.enforce);
     }
 
     #[test]

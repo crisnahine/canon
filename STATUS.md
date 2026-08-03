@@ -6,7 +6,7 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release              0 errors
-cargo test --workspace             342 passing
+cargo test --workspace             349 passing
 cargo clippy --workspace           0 warnings
 cargo fmt --all --check            clean
 ./tests/fail-open.sh               75/75
@@ -14,8 +14,26 @@ cargo fmt --all --check            clean
 ./tests/injection-reaches-the-model.sh   PASS
 ```
 
-10,516 lines of Rust across five crates, of which roughly half are tests,
+11,061 lines of Rust across five crates, of which roughly half are tests,
 plus 195 lines of tree-sitter query across seven languages.
+
+## Every open issue, reproduced rather than read
+
+Eight issues were open against this repository. Each was triaged by running the
+build, not by reading it: two had already been closed by the work above, six
+had not, and adversarial re-checking of the two "fixed" verdicts found a hole
+in one of them that the issue had not reported — an unreadable `.canon.toml`
+took the absent-file path and silently kept enforcement on.
+
+All eight are now covered by a harness of 23 assertions that runs against any
+build. Every one of them fails on the build before this and passes on it.
+
+The most valuable was #9. Enforcement read the `Write`-only content field, so
+`Edit` reached the same file states `Write` refused — the same path, the same
+resulting bytes, opposite outcomes. Verified end to end against the running
+host: asked to rename a method in a way that breaks a rule holding in 6 of 6
+files, the `Edit` was refused, and the model then took the suppression path the
+refusal printed and said what it cost.
 
 ## Fourteen public repositories, and what they found
 
@@ -25,16 +43,20 @@ Laravel, RuboCop, Nuxt, Vue, Redux Toolkit, ripgrep, Flask, requests, gin,
 cobra, Slim, Sinatra and axios, plus twenty-four purpose-shaped repositories
 covering the idioms each supported language actually uses.
 
+Languages are the ones the conventions actually came from, which is why the
+column is shorter than the list of languages present: Laravel tracks
+JavaScript and RuboCop tracks ERB, and neither contributed a rule.
+
 | | files | languages | conventions | index |
 |---|---|---|---|---|
-| Mastodon | 9,870 | ERB, JSX, JS, Ruby, TSX, TS | 106 | 1.6 s |
-| Laravel | 3,338 | JS, PHP | 127 | 2.4 s |
-| RuboCop | 2,205 | ERB, Ruby | 41 | 1.2 s |
-| Nuxt | 1,873 | JS, TSX, TS, Vue | 30 | 0.5 s |
-| Redux Toolkit | 1,149 | JSX, JS, TSX, TS | 19 | 0.4 s |
-| Vue | 704 | JS, TSX, TS, Vue | 26 | 0.6 s |
+| Mastodon | 9,870 | ERB, JSX, JS, Ruby, TS | 104 | 1.6 s |
+| Laravel | 3,338 | PHP | 127 | 2.4 s |
+| RuboCop | 2,205 | Ruby | 39 | 1.2 s |
+| Nuxt | 1,873 | TS, Vue | 32 | 0.5 s |
+| Redux Toolkit | 1,149 | JS, TSX, TS | 19 | 0.4 s |
+| Vue | 704 | JS, TSX, TS, Vue | 29 | 0.6 s |
 | axios | 460 | JS, TS | 11 | 0.2 s |
-| ripgrep | 236 | Ruby, Rust | 5 | 0.2 s |
+| ripgrep | 236 | Rust | 5 | 0.2 s |
 
 Three classes of defect came out that a fixture cannot produce. A naming rule
 derived from one name repeated ten times, enforced, refusing an ordinary file.

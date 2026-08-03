@@ -117,8 +117,63 @@ purpose-shaped ones covering the idioms each supported language actually uses.
   `Advisory`. It is the surface a refusal sends you to in order to confirm the
   suppression took, and a suppressed rule is not downgraded, it is gone.
 
+### Fixed — the open issues
+
+Triaged by reproducing each against the build rather than reading it. Two were
+already closed by the work above (#10, #13); the rest were not.
+
+- **`Edit` reached file states `Write` refused** (#9). The deny check read the
+  `Write`-only `content` field, so `Edit` and `NotebookEdit` never reached it:
+  the same path, the same resulting bytes, opposite outcomes, and `Edit` is the
+  tool a model reaches for once a file exists. The result is now reconstructed
+  from disk plus `old_string` → `new_string`, so the check sees the file that
+  will land. When the result cannot be known, the path-only rules still apply,
+  because a naming rule never reads the content.
+- **`canon explain` ignored its path argument** (#15). Asking about a `.rake`
+  file listed the rule for `**/*.csv`. A query naming a file now uses the same
+  predicate injection does; a query naming a directory admits a
+  repository-wide extension rule only where the evidence puts one. Anything
+  able to refuse a write sorts first, because a refusal is what sends people
+  here.
+- **Suppressing a rule re-derived it under a new id** (#14). Suppression ran
+  before the pass that removes a narrower copy of a rule its ancestor already
+  states, so suppressing `naming.repo.txt` produced `naming.api.txt` and the
+  same refusal. It now runs last.
+- **Three derived statement forms had no check** (#12): imports, test naming,
+  and colocation were stated before a write and never checked after one.
+  Imports are the highest-value family canon derives and were the least
+  checked. The import check uses the query-derived list the rule was counted
+  from; `inject` still does not, because no import rule can refuse a write.
+- **A refusal claimed "every file in this directory" while counting the whole
+  repository** (#11). Every count now renders the scope it was counted over,
+  so the sentence and the number describe the same set.
+- **The header credited languages that derived nothing** (#16). `languages` is
+  read off the conventions rather than off the files walked, so a Rails
+  repository no longer reports ERB when both its conventions are Ruby's.
+- **ERB derived nothing at all on idiomatic Rails code** (#16). A leading
+  underscore is compatible with no style and `shared_styles` is all-or-nothing,
+  so one `_form.html.erb` silenced an entire view tree — and every Rails view
+  tree has partials. The same fault took the naming rule off `requests`' own
+  package directory, over `_internal_utils.py`. A leading underscore is a role
+  marker every framework spends on the same idea, and never a style.
+- **An unreadable `.canon.toml` silently re-enabled enforcement.** Found by
+  adversarial review of the fix above, not by the issue. `read_to_string`
+  failing was treated as "no config file", which means the enforcing defaults,
+  so a config saved as UTF-16 — what PowerShell's `>` writes, on a platform
+  canon supports — carried `enforce = false` and refused the write anyway, with
+  no `INVALID` line on `canon check` and no rebuild that would help. Absent and
+  unreadable are now different answers.
+- **`bin/install-local` deleted the binary the installed plugin asks for.** It
+  named the copy after the source version, so bumping ahead of the last release
+  left the cached plugin looking for a version that was no longer there,
+  downloading the released binary, and running that. An hour of fixes measured
+  as having no effect. A copy now goes in for every version an installed plugin
+  might ask for.
+
 ### Verified
 
+- Every one of the eight open issues has a check in a harness that runs against
+  any build: 23 assertions, all passing, each failing on the build before this.
 - 15,265 tracked files from the fourteen repositories replayed through the
   write path: 11,299 given conventions, none refused, none errored.
 - 5,700 *new* files written into those same directories — one file's content at

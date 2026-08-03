@@ -15,11 +15,23 @@
 #
 # Run this after `claude plugin install`, not before: uninstalling a plugin
 # clears its data directory, so a binary placed first is deleted.
+#
+# The installed binary carries its version in its name, and the version the
+# *installed plugin* asks for is the one in the plugin cache's `Cargo.toml`,
+# not the one in the source tree. Those differ the moment the source version is
+# bumped ahead of the last release, and the difference is silent and expensive:
+# a local build lands as `canon-0.4.1`, the cached 0.4.0 plugin looks for
+# `canon-0.4.0`, does not find it, downloads 0.4.0 from GitHub, and runs the
+# released binary. Every subsequent test of the local build measures the
+# release instead — measured, after an hour of fixes appeared to have no
+# effect. So a copy goes in for every version any installed plugin might ask
+# for.
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "${ROOT}/Cargo.toml" | head -1)"
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-${HOME}/.claude/plugins/data/canon-canon}"
+CACHE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/plugins/cache"
 
 # Same suffix rule as the resolution shim: Windows will not execute a file
 # without an executable extension.
@@ -28,7 +40,6 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
     *) EXE="" ;;
 esac
 BINARY="${ROOT}/target/release/canon${EXE}"
-INSTALLED="${DATA_DIR}/bin/canon-${VERSION}${EXE}"
 
 if [ ! -x "${BINARY}" ]; then
     echo "no release build at ${BINARY}" >&2
@@ -36,13 +47,36 @@ if [ ! -x "${BINARY}" ]; then
     exit 1
 fi
 
-mkdir -p "${DATA_DIR}/bin"
-cp "${BINARY}" "${INSTALLED}"
-chmod +x "${INSTALLED}"
-# Exactly one binary, so the Windows wrapper's `canon-*` match is unambiguous.
-for old in "${DATA_DIR}/bin"/canon-*; do
-    [ "${old}" = "${INSTALLED}" ] || rm -f "${old}" 2>/dev/null || true
+# The source version, plus whatever version each installed copy of the plugin
+# declares. Usually one and the same; different exactly when it matters.
+WANTED="${VERSION}"
+for manifest in "${CACHE_DIR}"/*/canon/*/Cargo.toml; do
+    [ -f "${manifest}" ] || continue
+    cached="$(sed -n 's/^version = "\(.*\)"$/\1/p' "${manifest}" | head -1)"
+    [ -n "${cached}" ] || continue
+    case " ${WANTED} " in
+        *" ${cached} "*) ;;
+        *) WANTED="${WANTED} ${cached}" ;;
+    esac
 done
 
-echo "installed canon ${VERSION} -> ${INSTALLED}"
-"${INSTALLED}" version
+mkdir -p "${DATA_DIR}/bin"
+for want in ${WANTED}; do
+    cp "${BINARY}" "${DATA_DIR}/bin/canon-${want}${EXE}"
+    chmod +x "${DATA_DIR}/bin/canon-${want}${EXE}"
+done
+
+# Anything not asked for goes, so the Windows wrapper's `canon-*` match stays
+# unambiguous and a stale build cannot answer for a newer plugin.
+for old in "${DATA_DIR}/bin"/canon-*; do
+    [ -f "${old}" ] || continue
+    name="$(basename "${old}")"
+    keep=no
+    for want in ${WANTED}; do
+        [ "${name}" = "canon-${want}${EXE}" ] && keep=yes
+    done
+    [ "${keep}" = yes ] || rm -f "${old}" 2>/dev/null || true
+done
+
+echo "installed canon ${VERSION} as: ${WANTED}"
+"${DATA_DIR}/bin/canon-${VERSION}${EXE}" version

@@ -26,6 +26,9 @@ pub struct ToolInput {
     pub new_string: Option<String>,
     /// Replaced text, for `Edit`.
     pub old_string: Option<String>,
+    /// Whether an `Edit` replaces every occurrence rather than the first.
+    /// Read so the resulting file can be reconstructed exactly.
+    pub replace_all: bool,
     /// Replacement cell source, for `NotebookEdit`.
     pub new_source: Option<String>,
 }

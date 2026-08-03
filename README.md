@@ -167,11 +167,17 @@ many files carry it. Ten files called `Cargo.toml` used to derive "files here
 are named in `PascalCase`" at total agreement, and refuse an ordinary
 `deny.toml`.
 
-A refusal states the counts, names each rule by id, and prints the `suppress`
-line ready to paste, because `.canon.toml` is keyed by id and a refusal that
-names the rule only in prose leaves you guessing at the key. Suppressing takes
-effect on the next write, not the next session. Everything else in this
-document is advisory and always will be.
+A refusal states the counts against the scope they were counted over, names
+each rule by id, and prints the `suppress` line ready to paste, because
+`.canon.toml` is keyed by id and a refusal that names the rule only in prose
+leaves you guessing at the key. Suppressing takes effect on the next write, not
+the next session. Everything else in this document is advisory and always will
+be.
+
+Which tool you reach for does not change the answer. `Edit` used to reach file
+states `Write` refused, because the check read the field only `Write` carries;
+the resulting file is now reconstructed from what is on disk, so the same bytes
+get the same verdict either way.
 
 Because a rule may only refuse when *every* file already agrees, no file that
 exists in the repository can violate one. That is checkable rather than

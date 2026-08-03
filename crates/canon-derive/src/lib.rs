@@ -47,7 +47,7 @@ pub use naming::Style;
 pub use render::render_block;
 pub use select::for_path;
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot};
-pub use verify::{Violation, blocking_violations, verify_source};
+pub use verify::{Violation, blocking_violations, missing_test, verify_source};
 pub use walk::{FileEntry, entries_for, walk};
 
 use canon_core::{Confidence, Convention, Settings};
@@ -80,9 +80,15 @@ pub fn derive_from(
     let mut conventions = tier0::derive(files, settings);
     let facts = semantic::gather(files, root);
     conventions.extend(semantic::derive(&facts, settings));
-    conventions.retain(|c| !settings.is_suppressed(&c.id));
     roll_up_agreeing_siblings(&mut conventions, settings);
     collapse_redundant(&mut conventions);
+    // Last, not first. A rule is derived at several scopes and the narrower
+    // copies are removed by `collapse_redundant` because a wider one already
+    // says it. Removing the wider one first left the narrower ones standing,
+    // so suppressing `naming.repo.txt` produced `naming.api.txt` — the same
+    // statement, the same refusal, a new id, and a user with no reason to
+    // believe the next suppression would end any differently.
+    conventions.retain(|c| !settings.is_suppressed(&c.id));
     // Deterministic order, so an unchanged tree produces a byte-identical
     // snapshot and cache staleness stays observable.
     conventions.sort_by(|a, b| a.id.cmp(&b.id));

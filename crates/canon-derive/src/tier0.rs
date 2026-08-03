@@ -193,24 +193,29 @@ const DATA_EXTENSIONS: &[&str] = &[
 
 /// Whether a file may contribute to a naming rule.
 ///
-/// A dotfile has an empty name root and nothing to classify. A dunder name
-/// describes a role the language assigns rather than a name anyone chose:
-/// `__init__.py` and `__main__.py` are in every Python package, and a leading
-/// underscore is compatible with no style at all, so counting them meant no
-/// Python directory could ever produce a naming rule.
+/// A dotfile has an empty name root and nothing to classify.
 fn nameable(entry: &FileEntry) -> bool {
     let root = naming::name_root(&entry.stem);
     !root.is_empty()
-        && !is_dunder(root)
+        && !is_role_marked(root)
         && !ASSET_EXTENSIONS.contains(&entry.ext.as_str())
         && !CONVENTIONAL_NAMES.contains(&entry.stem.to_ascii_lowercase().as_str())
 }
 
-fn is_dunder(root: &str) -> bool {
-    root.starts_with("__")
-        && root.ends_with("__")
-        && root.len() > 4
-        && !root.trim_matches('_').is_empty()
+/// Whether a leading underscore is doing the naming rather than the author.
+///
+/// It is a marker every framework spends on the same idea — something not
+/// meant to be addressed directly — and never a style. `_form.html.erb` is a
+/// Rails partial, `_variables.scss` is a Sass partial, `__init__.py` is in
+/// every Python package, `_internal_utils.py` is private by convention.
+///
+/// None of them is compatible with any style, because no style begins with a
+/// separator, and [`naming::shared_styles`] is all-or-nothing. So one partial
+/// in a directory silenced every naming rule for it: a Rails view tree always
+/// has partials, which is why 85 idiomatic `.erb` views derived nothing at
+/// all, and why `requests` produced no rule for its own package directory.
+fn is_role_marked(root: &str) -> bool {
+    root.starts_with('_')
 }
 
 /// Whether a file is the kind of thing that has a test.
@@ -236,7 +241,7 @@ pub(crate) fn counts_toward_naming(rel: &str) -> bool {
     let ext = ext.to_ascii_lowercase();
     let root = naming::name_root(stem);
     !root.is_empty()
-        && !is_dunder(root)
+        && !is_role_marked(root)
         && !ASSET_EXTENSIONS.contains(&ext.as_str())
         && !CONVENTIONAL_NAMES.contains(&stem.to_ascii_lowercase().as_str())
         && !is_test_path(rel)
@@ -421,6 +426,89 @@ fn subject_of_test<'s>(stem: &'s str, ext: &str) -> &'s str {
 
 fn is_test(f: &FileEntry) -> bool {
     is_test_path(&f.rel)
+}
+
+/// Whether the repository holds a test for `rel`.
+///
+/// Matched the same way the rule is derived: by name root and extension,
+/// wherever the test lives. `spec/` mirrors `app/` in some repositories and
+/// `__tests__/` sits beside the file in others, so the search is over the
+/// tracked tree rather than over a guessed path.
+///
+/// Walks only the directories a test plausibly lives in, because this runs
+/// after a write rather than before one and still must not cost a tree walk on
+/// a large repository.
+#[must_use]
+pub(crate) fn has_test_for(root: &std::path::Path, rel: &str) -> bool {
+    let name = rel.rsplit_once('/').map_or(rel, |(_, n)| n);
+    let Some((stem, ext)) = name.rsplit_once('.') else { return false };
+    let wanted = naming::name_root(stem).to_lowercase();
+    if wanted.is_empty() {
+        return false;
+    }
+    let ext = ext.to_ascii_lowercase();
+
+    // Beside the file, in a sibling `__tests__`, and in the mirrored trees a
+    // test suite conventionally lives in.
+    let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut roots: Vec<std::path::PathBuf> = vec![root.join(dir), root.join(dir).join("__tests__")];
+    for suite in ["spec", "test", "tests"] {
+        roots.push(root.join(suite));
+        if let Some((_, below)) = dir.split_once('/') {
+            roots.push(root.join(suite).join(below));
+        }
+    }
+
+    let mut seen = 0usize;
+    for start in roots {
+        let mut stack = vec![start];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else { continue };
+            for entry in entries.flatten() {
+                seen += 1;
+                if seen > 20_000 {
+                    return false;
+                }
+                let path = entry.path();
+                let Ok(kind) = entry.file_type() else { continue };
+                if kind.is_dir() {
+                    if !kind.is_symlink() {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                let Some(found) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                let Some((found_stem, found_ext)) = found.rsplit_once('.') else { continue };
+                if !found_ext.eq_ignore_ascii_case(&ext) {
+                    continue;
+                }
+                if test_marker(found_stem, &ext).is_some()
+                    && subject_of_test(found_stem, &ext).to_lowercase() == wanted
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether a file name satisfies a rendered test-naming glob.
+///
+/// The globs this has to answer are the ones [`Marker::glob`] produces and
+/// nothing else: `*_spec.rb` and `test_*.py`, one wildcard, at one end.
+pub(crate) fn matches_test_glob(name: &str, glob: &str) -> bool {
+    match glob.split_once('*') {
+        Some(("", suffix)) => name.ends_with(suffix),
+        // Strictly longer: the wildcard has to stand for something, the same
+        // way `test_marker` refuses a bare `test_`.
+        Some((prefix, suffix)) => {
+            name.len() > prefix.len() + suffix.len()
+                && name.starts_with(prefix)
+                && name.ends_with(suffix)
+        }
+        None => name == glob,
+    }
 }
 
 /// Whether a repository-relative path is a test file.
@@ -777,6 +865,65 @@ mod tests {
         }
         assert!(!is_test_path("app/services/charge_card.rb"));
         assert!(!is_test_path("src/latest.ts"), "`latest` merely contains `test`");
+    }
+
+    #[test]
+    fn one_partial_does_not_silence_a_rails_view_tree() {
+        // A leading underscore is compatible with no style, and `shared_styles`
+        // is all-or-nothing, so a single `_form.html.erb` took a whole view
+        // directory to zero conventions. Every Rails view tree has partials.
+        let convs = derive_from(
+            "t0-partials",
+            &[
+                ("app/views/invoices/index.html.erb", "x"),
+                ("app/views/invoices/show.html.erb", "x"),
+                ("app/views/invoices/edit.html.erb", "x"),
+                ("app/views/invoices/confirm_delete.html.erb", "x"),
+                ("app/views/invoices/send_reminder.html.erb", "x"),
+                ("app/views/invoices/_form.html.erb", "x"),
+                ("app/views/invoices/_row.html.erb", "x"),
+            ],
+        );
+        assert!(statements(&convs).contains("snake_case"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_private_module_does_not_silence_a_python_package() {
+        // `requests` has `_internal_utils.py` and `_types.py` beside nineteen
+        // ordinary modules, and derived no naming rule for its own package.
+        let convs = derive_from(
+            "t0-private-module",
+            &[
+                ("src/pkg/status_codes.py", "x"),
+                ("src/pkg/charge_card.py", "x"),
+                ("src/pkg/refund_payment.py", "x"),
+                ("src/pkg/settle_batch.py", "x"),
+                ("src/pkg/send_receipt.py", "x"),
+                ("src/pkg/_internal_utils.py", "x"),
+                ("src/pkg/__init__.py", "x"),
+            ],
+        );
+        assert!(statements(&convs).contains("snake_case"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_role_marked_name_is_never_judged_by_the_rule_it_was_left_out_of() {
+        // Deriving and checking have to agree, or the partial that was excluded
+        // from the sample is refused by the rule the others produced.
+        assert!(!counts_toward_naming("app/views/invoices/_form.html.erb"));
+        assert!(!counts_toward_naming("src/pkg/_internal_utils.py"));
+        assert!(!counts_toward_naming("src/pkg/__init__.py"));
+        assert!(counts_toward_naming("app/views/invoices/index.html.erb"));
+    }
+
+    #[test]
+    fn a_test_naming_glob_is_matched_at_the_end_it_was_rendered_at() {
+        assert!(matches_test_glob("charge_card_spec.rb", "*_spec.rb"));
+        assert!(!matches_test_glob("charge_card_test.rb", "*_spec.rb"));
+        assert!(matches_test_glob("test_charge_card.py", "test_*.py"));
+        assert!(!matches_test_glob("charge_card_test.py", "test_*.py"));
+        // The wildcard has to stand for something.
+        assert!(!matches_test_glob("test_.py", "test_*.py"));
     }
 
     #[test]
