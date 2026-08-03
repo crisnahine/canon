@@ -70,7 +70,7 @@ impl Fixture {
     }
 
     /// A payload for an event that names no tool.
-    fn session_payload(&self, session: &str, event: &str, extra: Value) -> String {
+    fn session_payload(&self, session: &str, event: &str, extra: &Value) -> String {
         let mut payload = json!({
             "session_id": session,
             "cwd": self.root,
@@ -191,7 +191,7 @@ fn verifying_a_divergent_file_reports_the_difference_with_its_evidence() {
 #[test]
 fn session_start_states_what_the_repository_looks_like() {
     let f = Fixture::service_repo("session");
-    let payload = f.session_payload("s1", "SessionStart", json!({ "source": "startup" }));
+    let payload = f.session_payload("s1", "SessionStart", &json!({ "source": "startup" }));
     let parsed = f.json(&["session-start"], &payload);
 
     assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "SessionStart");
@@ -208,7 +208,7 @@ fn a_subagent_receives_the_same_manifest() {
     let payload = f.session_payload(
         "s1",
         "SubagentStart",
-        json!({ "agent_id": "ag1", "agent_type": "general-purpose" }),
+        &json!({ "agent_id": "ag1", "agent_type": "general-purpose" }),
     );
     let parsed = f.json(&["subagent-start"], &payload);
 
@@ -246,7 +246,7 @@ fn reconcile_reports_a_file_copied_from_its_sibling() {
     );
 
     f.run(&["verify"], &f.tool_payload("s9", "PostToolUse", "app/services/item_copy.rb", None));
-    let parsed = f.json(&["reconcile"], &f.session_payload("s9", "Stop", json!({})));
+    let parsed = f.json(&["reconcile"], &f.session_payload("s9", "Stop", &json!({})));
 
     let text = context(&parsed).expect("a report");
     assert!(text.contains("already exists in"), "got {text}");
