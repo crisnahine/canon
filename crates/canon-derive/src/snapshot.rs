@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 2;
+pub const SNAPSHOT_VERSION: u32 = 3;
+// 3: conventions carry an enforcement decision, rules are rolled up from
+//    agreeing siblings, and the agreement a wide scope must clear went up. A
+//    snapshot from before all three holds different rules and marks every one
+//    of them advisory, so an upgraded install would keep refusing nothing and
+//    keep the over-broad rules until the commit changed.
 // 2: the query layer added call and raise facts, so snapshots built before it
 //    contain no layering rules. Discarding is right: re-deriving costs seconds
 //    and keeping one would leave an upgraded install running on the old

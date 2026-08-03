@@ -55,6 +55,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The report after a write asks for the change rather than restating the
   policy. (#5)
+- `SNAPSHOT_VERSION` is 3. A snapshot from before this release holds the
+  over-broad rules, none of the rolled-up ones, and marks every convention
+  advisory, so an upgraded install would refuse nothing until its commit
+  changed.
 - `injection_budget` is 3,000, up from 1,500. Headroom rather than a fix:
   measured on a 13,456-file workspace, real paths spend 262 to 486 bytes and
   raising the ceiling to 4,000 produced byte-identical output. What bounds the
