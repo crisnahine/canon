@@ -4,14 +4,22 @@
 //! pipe. Everything below the binary is unit-tested in its own crate; what is
 //! left to check is the part no library test can see: that the shipped
 //! artifact reads stdin, writes one JSON document, and exits zero.
+//!
+//! Payloads are built with `serde_json`, never by interpolating strings. A
+//! Windows path is `C:\Users\...`, and `\U` is not a valid JSON escape, so a
+//! hand-rolled payload is malformed on one platform and fine on the other two.
+//! canon then fails open exactly as designed and every assertion here reads as
+//! a product bug. It cost a red Windows job to learn.
 
 // `indexing_slicing` is denied in shipped code, where a panic inside a hook is
 // the one failure the fail-open harness cannot hide. In a test a panic is the
 // reporting mechanism, and `parsed["a"]["b"]` is how serde_json is read.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+use serde_json::{Value, json};
 
 /// The binary under test, as cargo built it for this run.
 fn binary() -> PathBuf {
@@ -45,8 +53,35 @@ impl Fixture {
         self
     }
 
-    fn abs(&self, rel: &str) -> String {
-        self.root.join(rel).display().to_string()
+    /// A tool payload targeting `rel`, with the host's own field names.
+    fn tool_payload(&self, session: &str, event: &str, rel: &str, content: Option<&str>) -> String {
+        let mut tool_input = json!({ "file_path": self.root.join(rel) });
+        if let Some(text) = content {
+            tool_input["content"] = json!(text);
+        }
+        json!({
+            "session_id": session,
+            "cwd": self.root,
+            "hook_event_name": event,
+            "tool_name": "Write",
+            "tool_input": tool_input,
+        })
+        .to_string()
+    }
+
+    /// A payload for an event that names no tool.
+    fn session_payload(&self, session: &str, event: &str, extra: Value) -> String {
+        let mut payload = json!({
+            "session_id": session,
+            "cwd": self.root,
+            "hook_event_name": event,
+        });
+        if let Some(fields) = extra.as_object() {
+            for (key, value) in fields {
+                payload[key] = value.clone();
+            }
+        }
+        payload.to_string()
     }
 
     /// Run a subcommand with a payload on stdin. Returns `(stdout, stderr, code)`.
@@ -70,6 +105,15 @@ impl Fixture {
         )
     }
 
+    /// Parse a hook's answer, failing loudly if it is not JSON.
+    fn json(&self, args: &[&str], stdin: &str) -> Value {
+        let (stdout, stderr, code) = self.run(args, stdin);
+        assert_eq!(code, 0, "{args:?} exited {code}");
+        assert!(stderr.is_empty(), "{args:?} wrote to stderr: {stderr}");
+        serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("{args:?} produced invalid JSON ({e}): {stdout}"))
+    }
+
     fn service_repo(name: &str) -> Self {
         let f = Self::new(name);
         for i in 0..6 {
@@ -83,35 +127,24 @@ impl Fixture {
     }
 }
 
-fn pretooluse(path: &str) -> String {
-    format!(
-        r#"{{"session_id":"s1","cwd":"{}","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{{"file_path":"{}","content":"class X\n  def call; end\nend\n"}}}}"#,
-        Path::new(path)
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .unwrap()
-            .display(),
-        path
-    )
+/// The injected text, or `None` when the hook chose silence.
+fn context(parsed: &Value) -> Option<&str> {
+    parsed["hookSpecificOutput"]["additionalContext"].as_str()
 }
 
 #[test]
 fn indexing_then_injecting_produces_the_conventions_for_the_target() {
     let f = Fixture::service_repo("inject");
-    let payload = format!(
-        r#"{{"session_id":"s1","cwd":"{}","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{{"file_path":"{}","content":"class New\n  def call; end\nend\n"}}}}"#,
-        f.root.display(),
-        f.abs("app/services/item_new.rb")
+    let payload = f.tool_payload(
+        "s1",
+        "PreToolUse",
+        "app/services/item_new.rb",
+        Some("class New\n  def call; end\nend\n"),
     );
-    let (stdout, stderr, code) = f.run(&["inject"], &payload);
+    let parsed = f.json(&["inject"], &payload);
 
-    assert_eq!(code, 0);
-    assert!(stderr.is_empty(), "a hook must never write to stderr: {stderr}");
-
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
-    let block = parsed["hookSpecificOutput"]["additionalContext"].as_str().expect("a block");
     assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    let block = context(&parsed).expect("a block");
     assert!(block.contains("exactly 1 public method"), "got {block}");
     assert!(block.contains("named `call`"), "got {block}");
     assert!(block.contains("ApplicationService"), "got {block}");
@@ -120,11 +153,7 @@ fn indexing_then_injecting_produces_the_conventions_for_the_target() {
 #[test]
 fn injecting_for_an_unrelated_path_says_nothing() {
     let f = Fixture::service_repo("inject-miss");
-    let payload = format!(
-        r#"{{"cwd":"{}","hook_event_name":"PreToolUse","tool_input":{{"file_path":"{}"}}}}"#,
-        f.root.display(),
-        f.abs("docs/readme.md")
-    );
+    let payload = f.tool_payload("s1", "PreToolUse", "docs/readme.md", None);
     let (stdout, _, code) = f.run(&["inject"], &payload);
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "{}");
@@ -137,11 +166,7 @@ fn verifying_a_conforming_file_says_nothing() {
         "app/services/item_new.rb",
         "class ItemNew < ApplicationService\n  def call; end\nend\n",
     );
-    let payload = format!(
-        r#"{{"session_id":"s1","cwd":"{}","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{{"file_path":"{}"}}}}"#,
-        f.root.display(),
-        f.abs("app/services/item_new.rb")
-    );
+    let payload = f.tool_payload("s1", "PostToolUse", "app/services/item_new.rb", None);
     let (stdout, _, code) = f.run(&["verify"], &payload);
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "{}");
@@ -154,18 +179,11 @@ fn verifying_a_divergent_file_reports_the_difference_with_its_evidence() {
         "app/services/item_new.rb",
         "class ItemNew\n  def perform; end\n  def also; end\nend\n",
     );
-    let payload = format!(
-        r#"{{"session_id":"s1","cwd":"{}","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{{"file_path":"{}"}}}}"#,
-        f.root.display(),
-        f.abs("app/services/item_new.rb")
-    );
-    let (stdout, stderr, code) = f.run(&["verify"], &payload);
+    let payload = f.tool_payload("s1", "PostToolUse", "app/services/item_new.rb", None);
+    let parsed = f.json(&["verify"], &payload);
 
-    assert_eq!(code, 0, "a divergent file must not block the write");
-    assert!(stderr.is_empty(), "PostToolUse stderr reaches the model: {stderr}");
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(parsed["decision"].is_null(), "nothing derived by counting may block");
-    let text = parsed["hookSpecificOutput"]["additionalContext"].as_str().expect("a report");
+    let text = context(&parsed).expect("a report");
     assert!(text.contains("exposes 2 public method"), "got {text}");
     assert!(text.contains("/6"), "the evidence count must be present: {text}");
 }
@@ -173,15 +191,11 @@ fn verifying_a_divergent_file_reports_the_difference_with_its_evidence() {
 #[test]
 fn session_start_states_what_the_repository_looks_like() {
     let f = Fixture::service_repo("session");
-    let payload = format!(
-        r#"{{"session_id":"s1","cwd":"{}","hook_event_name":"SessionStart","source":"startup"}}"#,
-        f.root.display()
-    );
-    let (stdout, _, code) = f.run(&["session-start"], &payload);
-    assert_eq!(code, 0);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let payload = f.session_payload("s1", "SessionStart", json!({ "source": "startup" }));
+    let parsed = f.json(&["session-start"], &payload);
+
     assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "SessionStart");
-    let text = parsed["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    let text = context(&parsed).expect("a manifest");
     assert!(text.contains("canon:"), "got {text}");
     assert!(text.contains("Ruby"), "got {text}");
 }
@@ -191,15 +205,15 @@ fn a_subagent_receives_the_same_manifest() {
     // The reason canon is a hook: a subagent starts with an empty context
     // window, so nothing in the conversation reaches it.
     let f = Fixture::service_repo("subagent");
-    let payload = format!(
-        r#"{{"session_id":"s1","cwd":"{}","hook_event_name":"SubagentStart","agent_id":"ag1","agent_type":"general-purpose"}}"#,
-        f.root.display()
+    let payload = f.session_payload(
+        "s1",
+        "SubagentStart",
+        json!({ "agent_id": "ag1", "agent_type": "general-purpose" }),
     );
-    let (stdout, _, code) = f.run(&["subagent-start"], &payload);
-    assert_eq!(code, 0);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let parsed = f.json(&["subagent-start"], &payload);
+
     assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "SubagentStart");
-    assert!(parsed["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("canon:"));
+    assert!(context(&parsed).expect("a manifest").contains("canon:"));
 }
 
 /// Long enough to clear the duplication floor.
@@ -231,19 +245,10 @@ fn reconcile_reports_a_file_copied_from_its_sibling() {
         &LONG_SERVICE.replace("PayoutProcessor", "RefundProcessor"),
     );
 
-    let post = format!(
-        r#"{{"session_id":"s9","cwd":"{}","hook_event_name":"PostToolUse","tool_input":{{"file_path":"{}"}}}}"#,
-        f.root.display(),
-        f.abs("app/services/item_copy.rb")
-    );
-    f.run(&["verify"], &post);
+    f.run(&["verify"], &f.tool_payload("s9", "PostToolUse", "app/services/item_copy.rb", None));
+    let parsed = f.json(&["reconcile"], &f.session_payload("s9", "Stop", json!({})));
 
-    let stop =
-        format!(r#"{{"session_id":"s9","cwd":"{}","hook_event_name":"Stop"}}"#, f.root.display());
-    let (stdout, _, code) = f.run(&["reconcile"], &stop);
-    assert_eq!(code, 0);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let text = parsed["hookSpecificOutput"]["additionalContext"].as_str().expect("a report");
+    let text = context(&parsed).expect("a report");
     assert!(text.contains("already exists in"), "got {text}");
 }
 
@@ -281,13 +286,26 @@ fn an_unknown_subcommand_fails_loudly_for_a_human() {
 fn a_broken_config_does_not_take_the_hooks_offline() {
     let f = Fixture::service_repo("badconfig");
     f.write(".canon.toml", "min_fils = 3\n");
-    let payload = pretooluse(&f.abs("app/services/item_new.rb"));
+    let payload =
+        f.tool_payload("s1", "PreToolUse", "app/services/item_new.rb", Some("class X; end"));
     let (stdout, stderr, code) = f.run(&["inject"], &payload);
     assert_eq!(code, 0, "a config typo must not break the editor");
     assert!(stderr.is_empty());
-    serde_json::from_str::<serde_json::Value>(&stdout).expect("still valid JSON");
+    serde_json::from_str::<Value>(&stdout).expect("still valid JSON");
 
     // ...but a human asking directly is told the truth.
     let (check_out, _, _) = f.run(&["check"], "");
     assert!(check_out.contains("INVALID"), "got {check_out}");
+}
+
+#[test]
+fn a_payload_carrying_a_windows_style_path_is_still_valid_json() {
+    // The bug this file's header describes: a hand-built payload embedding
+    // `C:\Users\...` is malformed, canon fails open, and every assertion above
+    // reads as a product bug rather than a test bug.
+    let f = Fixture::new("json-escaping");
+    let payload = f.tool_payload("s1", "PreToolUse", "app/a.rb", None);
+    let parsed: Value = serde_json::from_str(&payload).expect("payloads must be valid JSON");
+    assert_eq!(parsed["hook_event_name"], "PreToolUse");
+    assert!(parsed["tool_input"]["file_path"].is_string());
 }
