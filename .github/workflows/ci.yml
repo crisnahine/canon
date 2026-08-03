@@ -178,7 +178,7 @@ jobs:
     #
     # Checked on every platform: the C grammars are built by a different
     # toolchain on each, and a given rustc pairs differently with each of them.
-    name: rust 1.97.1 (${{ matrix.os }})
+    name: rust 1.97 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -186,7 +186,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.97
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo build --workspace
 

@@ -11,7 +11,10 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.97.1"
+# Major.minor, not patch. A patch release adds no language feature, so
+# demanding one refuses a toolchain that can build this perfectly well:
+# CI installed 1.97.0 on Windows and cargo declined the whole workspace.
+rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/crisnahine/canon"
 authors = ["Cris Nahine"]
