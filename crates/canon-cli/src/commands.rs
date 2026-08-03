@@ -572,10 +572,10 @@ fn normalise_query(root: &Path, query: &str) -> String {
     });
     // A path outside the repository is left as typed rather than mangled into
     // something that would match the wrong rules.
-    relative
-        .as_deref()
-        .and_then(Path::to_str)
-        .map_or_else(|| trimmed.trim_start_matches("./").to_string(), str::to_string)
+    relative.as_deref().and_then(Path::to_str).map_or_else(
+        || with_forward_slashes(trimmed.trim_start_matches("./")),
+        with_forward_slashes,
+    )
 }
 
 fn has_extension(rel: &str, ext: &str) -> bool {
@@ -773,11 +773,24 @@ fn relative_to(root: &Path, target: &str, cwd: &Path) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    Some(if std::path::MAIN_SEPARATOR == '/' {
+    Some(with_forward_slashes(text))
+}
+
+/// A path as the snapshot spells one: forward slashes on every platform.
+///
+/// Scopes, evidence and `sample_roots` are all stored with forward slashes,
+/// because that is what `git ls-files` reports. A path that came back through
+/// `Path` carries the platform separator, and on Windows comparing
+/// `app\services` against the stored `app/services` matches nothing —
+/// `canon explain app/services` answered "no conventions match", which is the
+/// audit surface a refusal sends people to. Both callers go through here now,
+/// so the next one cannot forget it.
+fn with_forward_slashes(text: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
         text.to_string()
     } else {
         text.replace(std::path::MAIN_SEPARATOR, "/")
-    })
+    }
 }
 
 /// Resolve `.` and `..` without touching the filesystem.
@@ -1038,6 +1051,38 @@ mod tests {
 
     fn ev(rel: &str) -> canon_core::Evidence {
         canon_core::Evidence { rel: rel.to_string(), line: 0 }
+    }
+
+    #[test]
+    fn a_normalised_query_is_spelled_the_way_the_snapshot_spells_paths() {
+        // Windows-only in effect, and invisible on a Unix runner unless the
+        // assertion is about the separator rather than about the literal. The
+        // separator step was written into `relative_to` and left out of
+        // `normalise_query`, so `canon explain app/services` matched nothing on
+        // Windows — the audit surface a refusal points at.
+        let root = Path::new("/work/repo");
+        for query in ["app/services", "./app/services", "app/services/", "/work/repo/app/services"]
+        {
+            let got = normalise_query(root, query);
+            assert!(
+                !got.contains(std::path::MAIN_SEPARATOR) || std::path::MAIN_SEPARATOR == '/',
+                "{query} kept a platform separator: {got}"
+            );
+        }
+        assert_eq!(normalise_query(root, "./app/services"), "app/services");
+        assert_eq!(normalise_query(root, "app/services/"), "app/services");
+        // A path outside the repository is left as typed, and still normalised.
+        assert!(!normalise_query(root, "/elsewhere/x").is_empty());
+    }
+
+    #[test]
+    fn a_relative_path_and_a_query_agree_on_how_a_path_is_spelled() {
+        // The two used to normalise separately and one of them forgot a step.
+        let root = Path::new("/work/repo");
+        assert_eq!(
+            relative_to(root, "/work/repo/app/services/a.rb", root).as_deref(),
+            Some(normalise_query(root, "app/services/a.rb").as_str())
+        );
     }
 
     #[test]

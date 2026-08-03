@@ -1,4 +1,4 @@
-# Measured status — v0.4.1
+# Measured status — v0.4.2
 
 Every number below was executed. Reproduce with the commands shown.
 
@@ -6,7 +6,7 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release                      0 errors
-cargo test --workspace                     356 passing
+cargo test --workspace                     358 passing
 cargo clippy --workspace                   0 warnings
 cargo fmt --all --check                    clean
 ./tests/fail-open.sh                       75/75

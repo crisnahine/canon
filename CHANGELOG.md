@@ -3,6 +3,25 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-08-03
+
+### Fixed
+
+- **`canon explain <path>` matched nothing on Windows.** `normalise_query`,
+  added in 0.4.1, resolved the argument through `Path` and returned it with the
+  platform separator, while scopes and evidence are stored with forward slashes
+  because that is what `git ls-files` reports. So `app\services` was compared
+  against `app/services` and `canon explain app/services` answered "no
+  conventions match" — the audit surface every refusal points at, on a
+  supported platform.
+
+  `relative_to` has always converted separators; the new function was written
+  beside it and left the step out. Both go through one helper now, and the
+  regression test asserts the absence of a platform separator rather than a
+  literal string, so it fails on Windows instead of passing everywhere.
+
+  Caught by CI on the 0.4.1 tag, which is what the Windows job is for.
+
 ## [0.4.1] — 2026-08-03
 
 Everything here was found by running the release binary against fourteen real

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 # Major.minor, not patch. A patch release adds no language feature, so
 # demanding one refuses a toolchain that can build this perfectly well:
