@@ -714,6 +714,41 @@ fn annotation(
     })
 }
 
+/// The name the most members declare, weighted the way [`majority`] weighs a
+/// vote and with ties broken toward the lowest name, so a rebuild is
+/// byte-identical.
+///
+/// Shared by [`mixin`] and [`contract`], neither of whose facts records how
+/// many times a type repeated a name — a type essentially never includes the
+/// same module twice or implements the same interface twice. A per-file pick
+/// keyed on that repetition therefore ties every name in a file's list at
+/// one, and `max_by_key` resolves every tie by returning the name that sorts
+/// last: four files pairing an interface every file in the directory shares
+/// with one only they declare would bury the shared, unanimous one behind
+/// whichever of the two happened to sort later — a defect in the tie-break,
+/// not in the data. Counting a name once per file that declares it at all,
+/// regardless of how many others that file names beside it, is the fact a
+/// directory's agreement is actually about.
+fn presence_winner<'a>(lists: impl Iterator<Item = (&'a [String], f32)>) -> Option<String> {
+    let mut tally: HashMap<&str, f32> = HashMap::new();
+    for (names, weight) in lists {
+        let mut seen: Vec<&str> = names.iter().map(String::as_str).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        for name in seen {
+            *tally.entry(name).or_default() += weight;
+        }
+    }
+    let mut candidates: Vec<(&str, f32)> = tally.into_iter().collect();
+    // Highest weight first, then lowest name, so two names tied on weight
+    // resolve the same way on every rebuild rather than however the
+    // `HashMap` above happened to iterate.
+    candidates.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(b.0))
+    });
+    candidates.into_iter().next().map(|(name, _)| name.to_string())
+}
+
 /// "Types here include `Sidekiq::Worker`."
 ///
 /// A Sidekiq worker declares no superclass at all and composes its behaviour
@@ -725,34 +760,31 @@ fn annotation(
 ///
 /// Counted only over files with a resolvable subject, the same restriction
 /// [`base_class`] applies: a namespace module or an unrelated nested type
-/// composes nothing and must not vote about what one does.
+/// composes nothing and must not vote about what one does. The name stated is
+/// the one [`presence_winner`] finds: the module the most files in the
+/// directory include, not whichever a within-file tie-break prefers.
 fn mixin(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
-    let observations: Vec<(Option<String>, f32, &FactSet)> = members
-        .iter()
-        .filter_map(|s| {
-            let t = s.subject()?;
-            let mut names: Vec<&String> = t.mixins.iter().collect();
-            names.sort_unstable();
-            names.dedup();
-            let dominant = names
-                .into_iter()
-                .max_by_key(|n| t.mixins.iter().filter(|m| m == n).count())
-                .cloned();
-            Some((dominant, s.weight, *s))
-        })
-        .collect();
+    let subjects: Vec<(&FactSet, &canon_extract::TypeFacts)> =
+        members.iter().filter_map(|s| Some((*s, s.subject()?))).collect();
+    let winner = presence_winner(subjects.iter().map(|(s, t)| (t.mixins.as_slice(), s.weight)))?;
 
-    let (winner, confidence, agreeing) = majority(&observations, settings)?;
-    let name = winner.clone()?;
+    let observations: Vec<(bool, f32, &FactSet)> = subjects
+        .iter()
+        .map(|(s, t)| (t.mixins.iter().any(|m| m == &winner), s.weight, *s))
+        .collect();
+    let (agrees, confidence, agreeing) = majority(&observations, settings)?;
+    if !agrees {
+        return None;
+    }
     Some(Convention {
         id: format!("shape.mixin.{}.{ext}", id_fragment(dir)),
-        statement: format!("Types here include `{name}`"),
+        statement: format!("Types here include `{winner}`"),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
         total: observations.len(),
-        exemplar: exemplar(&observations, &winner),
-        evidence: evidence(&observations, &winner),
+        exemplar: exemplar(&observations, &true),
+        evidence: evidence(&observations, &true),
         sample_roots: Vec::new(),
         // Advisory. A directory that mostly composes one module can still
         // legitimately hold the one type that opts into another, or into
@@ -780,9 +812,9 @@ fn mixin(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Opt
 /// "implement" statement.
 ///
 /// Counted only over files with a resolvable subject, the same restriction
-/// [`mixin`] applies, and by presence per file: a type declaring several
-/// interfaces is one vote for whichever one recurs most within it, not one
-/// vote per interface it names.
+/// [`mixin`] applies. The name stated is the one [`presence_winner`] finds:
+/// the interface the most files in the directory implement, not whichever a
+/// within-file tie-break prefers when one type declares several.
 fn contract(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
     if !matches!(
         canon_extract::lang::from_extension(ext),
@@ -795,32 +827,28 @@ fn contract(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> 
     ) {
         return None;
     }
-    let observations: Vec<(Option<String>, f32, &FactSet)> = members
-        .iter()
-        .filter_map(|s| {
-            let t = s.subject()?;
-            let mut names: Vec<&String> = t.interfaces.iter().collect();
-            names.sort_unstable();
-            names.dedup();
-            let dominant = names
-                .into_iter()
-                .max_by_key(|n| t.interfaces.iter().filter(|i| i == n).count())
-                .cloned();
-            Some((dominant, s.weight, *s))
-        })
-        .collect();
+    let subjects: Vec<(&FactSet, &canon_extract::TypeFacts)> =
+        members.iter().filter_map(|s| Some((*s, s.subject()?))).collect();
+    let winner =
+        presence_winner(subjects.iter().map(|(s, t)| (t.interfaces.as_slice(), s.weight)))?;
 
-    let (winner, confidence, agreeing) = majority(&observations, settings)?;
-    let name = winner.clone()?;
+    let observations: Vec<(bool, f32, &FactSet)> = subjects
+        .iter()
+        .map(|(s, t)| (t.interfaces.iter().any(|i| i == &winner), s.weight, *s))
+        .collect();
+    let (agrees, confidence, agreeing) = majority(&observations, settings)?;
+    if !agrees {
+        return None;
+    }
     Some(Convention {
         id: format!("shape.contract.{}.{ext}", id_fragment(dir)),
-        statement: format!("Types here implement `{name}`"),
+        statement: format!("Types here implement `{winner}`"),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
         total: observations.len(),
-        exemplar: exemplar(&observations, &winner),
-        evidence: evidence(&observations, &winner),
+        exemplar: exemplar(&observations, &true),
+        evidence: evidence(&observations, &true),
         sample_roots: Vec::new(),
         // Advisory. A directory that agrees on one interface can still
         // legitimately hold the one type that implements another, or none
@@ -1383,6 +1411,36 @@ mod tests {
     }
 
     #[test]
+    fn a_unanimous_mixin_is_not_buried_by_one_only_some_types_also_include() {
+        // The same defect the contract rule's equivalent test pins, for the
+        // sibling rule that shares its dominant-pick logic: every one of six
+        // files includes `Sidekiq::Worker`; four of them also include
+        // `Zeitwerk::Loader`, which sorts after it. A per-file pick keyed on
+        // in-file repetition ties both names at one occurrence and resolves
+        // the tie to whichever sorts last, so those four files would vote
+        // `Zeitwerk::Loader` and the true 6/6 consensus on `Sidekiq::Worker`
+        // would never be counted.
+        let mut files: Vec<(String, String)> = (0..4)
+            .map(|i| {
+                (
+                    format!("app/workers/multi{i}.rb"),
+                    format!(
+                        "class Multi{i}\n  include Sidekiq::Worker\n  include Zeitwerk::Loader\n\n  def perform; end\nend\n"
+                    ),
+                )
+            })
+            .collect();
+        files.extend((0..2).map(|i| {
+            (
+                format!("app/workers/plain{i}.rb"),
+                format!("class Plain{i}\n  include Sidekiq::Worker\n\n  def perform; end\nend\n"),
+            )
+        }));
+        let convs = derive_from("sem-mixin-unanimous", &files);
+        assert!(joined(&convs).contains("include `Sidekiq::Worker`"), "got {}", joined(&convs));
+    }
+
+    #[test]
     fn a_type_with_no_mixins_derives_no_mixin_rule() {
         let files =
             fixture::agreeing("app/models", "rb", 6, "class Item$N < ApplicationRecord\nend\n");
@@ -1484,20 +1542,21 @@ mod tests {
     }
 
     #[test]
-    fn a_type_implementing_two_interfaces_votes_for_the_one_the_directory_agrees_on() {
-        // Four of six files list a second interface ahead of the one the
-        // whole directory agrees on. A dominant pick that took the first
-        // name in source order, the way `superclass` does, would vote for
-        // that other interface on those four files and lose the majority
-        // the two plain files already hold — 4/6 falls under the confidence
-        // floor, so the rule would derive nothing at all instead of naming
-        // `ShouldQueue`.
+    fn a_unanimous_interface_is_not_buried_by_one_only_some_types_also_declare() {
+        // Every one of six files implements `Loggable`; four of them also
+        // implement `ZExtra`, which sorts after it. A per-file pick keyed on
+        // in-file repetition ties both names at one occurrence and resolves
+        // the tie to whichever sorts last, so those four files would vote
+        // `ZExtra` and the true 6/6 consensus on `Loggable` would never be
+        // counted at all — `ZExtra`'s 4/6 falls under the confidence floor,
+        // so the directory would derive nothing rather than name the
+        // interface every file in it actually shares.
         let mut files: Vec<(String, String)> = (0..4)
             .map(|i| {
                 (
                     format!("app/Jobs/Multi{i}.php"),
                     format!(
-                        "<?php\nclass Multi{i} implements Loggable, ShouldQueue\n{{\n    public function handle() {{}}\n}}\n"
+                        "<?php\nclass Multi{i} implements Loggable, ZExtra\n{{\n    public function handle() {{}}\n}}\n"
                     ),
                 )
             })
@@ -1506,12 +1565,36 @@ mod tests {
             (
                 format!("app/Jobs/Plain{i}.php"),
                 format!(
-                    "<?php\nclass Plain{i} implements ShouldQueue\n{{\n    public function handle() {{}}\n}}\n"
+                    "<?php\nclass Plain{i} implements Loggable\n{{\n    public function handle() {{}}\n}}\n"
                 ),
             )
         }));
-        let convs = derive_from("sem-contract-two-interfaces", &files);
-        assert!(joined(&convs).contains("implement `ShouldQueue`"), "got {}", joined(&convs));
+        let convs = derive_from("sem-contract-unanimous", &files);
+        assert!(joined(&convs).contains("implement `Loggable`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_typescript_class_directory_derives_the_interface_it_implements() {
+        let files = fixture::agreeing(
+            "src/handlers",
+            "ts",
+            6,
+            "export class Handler$N implements RequestHandler {\n  handle(): void {}\n}\n",
+        );
+        let convs = derive_from("sem-contract-ts", &files);
+        assert!(joined(&convs).contains("implement `RequestHandler`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_rust_directory_derives_the_trait_it_implements() {
+        let files = fixture::agreeing(
+            "src/models",
+            "rs",
+            6,
+            "pub struct Item$N;\n\nimpl Loggable for Item$N {\n    fn log(&self) {}\n}\n",
+        );
+        let convs = derive_from("sem-contract-rs", &files);
+        assert!(joined(&convs).contains("implement `Loggable`"), "got {}", joined(&convs));
     }
 
     #[test]
