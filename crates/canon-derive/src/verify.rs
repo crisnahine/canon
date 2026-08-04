@@ -364,7 +364,7 @@ const FORMAT_PREFIX: &str = "Files here are named ";
 // leading backtick from what remains; a prefix that already ends in one
 // leaves nothing left to strip and returns `None` for every file, deriving
 // the rule and never checking it — the same defect `check_annotation`'s doc
-// comment describes, on the arm derived for this task.
+// comment describes.
 const FAMILY_PREFIX: &str = "Types here inherit from a ";
 
 /// "Views here are named `*.html.erb`."
@@ -787,9 +787,10 @@ fn check_shape(
 
 /// "Types here inherit from a `*BaseController`."
 ///
-/// Split out of [`check_shape`] rather than inlined beside the `shape.base`
-/// arm it sits next to in the derivation, because the two together pushed
-/// that function past the length `clippy::pedantic` allows.
+/// A dedicated function rather than another arm of [`check_shape`]: that
+/// function already carries the `shape.base` arm this sits beside in the
+/// derivation, and folding both into one body reads past the length
+/// `clippy::pedantic` allows.
 ///
 /// A type may declare several contracts, or embed several types, and which
 /// one landed in `superclass` is decided by source order for an interface and
