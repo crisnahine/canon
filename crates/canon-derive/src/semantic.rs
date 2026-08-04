@@ -96,6 +96,7 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(base_class(&dir, &ext, &members, settings));
         out.extend(module_arity(&dir, &ext, &members, settings));
         out.extend(collaborator(&dir, &ext, &members, settings));
+        out.extend(macros(&dir, &ext, &members, settings));
         out.extend(import_source(&dir, &ext, &members, settings));
         out.extend(export_style(&dir, &ext, &members, settings));
         out.extend(annotation(&dir, &ext, &members, settings));
@@ -470,6 +471,76 @@ fn collaborator(
         sample_roots: Vec::new(),
         enforcement: Enforcement::Advisory,
     })
+}
+
+/// "Files here use `defineProps`."
+///
+/// A call with no receiver is a macro in every framework that has one: Rails'
+/// `has_many`, Django's field constructors, Vue's `defineProps`, React's
+/// hooks, Sidekiq's `sidekiq_options`. The queries have captured these all
+/// along and [`collaborator`] discarded every one of them, because it reads
+/// the receiver and a macro has none: eight identical `<script setup>` Vue
+/// components — a shape 672 of nuxt-ui's 720 `.vue` files use — derived two
+/// rules between them, and neither was about the component.
+///
+/// Counted by presence per file. One file calling `useState` nine times is
+/// one vote, or a single large component would decide the rule for its
+/// directory.
+fn macros(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
+    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+        .iter()
+        .map(|s| {
+            let mut names: Vec<&String> = s
+                .facts
+                .calls
+                .iter()
+                .filter(|c| c.receiver.is_none() && is_macro(&c.name))
+                .map(|c| &c.name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            // The macro this file leans on most, once per file, counted the
+            // same way the names above were selected: only among the
+            // receiverless calls a receiver would otherwise have excluded.
+            let dominant = names
+                .into_iter()
+                .max_by_key(|n| {
+                    s.facts.calls.iter().filter(|c| c.receiver.is_none() && &c.name == *n).count()
+                })
+                .cloned();
+            (dominant, s.weight, *s)
+        })
+        .collect();
+
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let name = winner.clone()?;
+    Some(Convention {
+        id: format!("shape.macros.{}.{ext}", id_fragment(dir)),
+        statement: format!("Files here use `{name}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
+        enforcement: Enforcement::Advisory,
+    })
+}
+
+/// Whether a receiverless call is a framework macro rather than plumbing.
+///
+/// Import keywords are already an import fact: `require "json"` parses as a
+/// call with an argument list in the same query pass that also records it as
+/// an import, and counting it again would find every Ruby directory agreeing
+/// that it uses `require`. Everything else is left in — a helper a directory
+/// calls unanimously is as much a convention as a framework macro, and the
+/// agreement bar decides which one survives.
+fn is_macro(name: &str) -> bool {
+    !matches!(
+        name,
+        "require" | "require_relative" | "load" | "import" | "include_once" | "require_once"
+    )
 }
 
 /// "Files here import from `src/config`."
@@ -954,6 +1025,74 @@ mod tests {
         let convs = derive_from("sem-nest", &files);
         let text = joined(&convs);
         assert!(text.contains("carry `@Injectable`"), "got {text}");
+    }
+
+    #[test]
+    fn a_vue_component_directory_derives_its_compiler_macros() {
+        // `<script setup>` declares no class, no export and no free function, so
+        // every other rule in the vocabulary is silent about it.
+        let files = fixture::agreeing(
+            "src/components",
+            "vue",
+            6,
+            "<template><div/></template>\n<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst props = defineProps<{ title: string }>()\nconst open = ref(false)\n</script>\n",
+        );
+        let convs = derive_from("sem-vue-macros", &files);
+        let text = joined(&convs);
+        assert!(text.contains("use `defineProps`") || text.contains("use `ref`"), "got {text}");
+    }
+
+    #[test]
+    fn an_import_keyword_is_not_a_macro() {
+        // Ruby's `require "json"` parses as a call with an argument list, and it
+        // is already an import fact. Counting it again would make every Ruby
+        // directory agree that it "uses `require`".
+        let files = fixture::agreeing(
+            "app/x",
+            "rb",
+            6,
+            "require 'json'\nclass A$N\n  def call; end\nend\n",
+        );
+        let convs = derive_from("sem-require", &files);
+        assert!(!joined(&convs).contains("use `require`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_shared_macro_is_counted_by_presence_not_occurrence() {
+        // One component calling `useState` nine times must be one vote, or a
+        // single large file decides its directory's rule.
+        let mut files = fixture::agreeing(
+            "src/hooks",
+            "tsx",
+            5,
+            "export const Item$N = () => {\n  useState(0);\n  return null;\n};\n",
+        );
+        let mut spam = String::new();
+        for i in 0..50 {
+            spam.push_str(&format!("  useMemo({i});\n"));
+        }
+        files.push((
+            "src/hooks/noisy.tsx".to_string(),
+            format!("export const Noisy = () => {{\n{spam}  return null;\n}};\n"),
+        ));
+        let convs = derive_from("sem-macro-chatty", &files);
+        let text = joined(&convs);
+        assert!(!text.contains("use `useMemo`"), "one file dominated the count: {text}");
+    }
+
+    #[test]
+    fn a_directory_with_no_receiverless_calls_derives_no_macro_rule() {
+        // A struct with no calls at all has made no choice, and stating
+        // agreement about that absence would be inventing a convention nobody
+        // holds — the same defect raising's removal fixed for `collaborator`.
+        let files = fixture::agreeing(
+            "internal/model",
+            "rs",
+            6,
+            "pub struct Item$N {\n    pub id: u64,\n}\n",
+        );
+        let convs = derive_from("sem-no-macro", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.macros")), "got {}", joined(&convs));
     }
 
     #[test]

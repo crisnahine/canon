@@ -95,12 +95,13 @@ fn verify_with(
     }
 
     // Structure is enough for every check that reads declarations, and skipping
-    // the query pass is most of what makes a write cheap. Import and annotation
-    // rules are the exception: both are derived from the query pass, so
-    // checking them against the structural facts would compare two different
-    // readings of the same file. Enforcement never needs this — neither family
-    // is ever Blocking — so the hot path keeps the cheap pass and only
-    // `PostToolUse`, after the write has already landed, pays for it.
+    // the query pass is most of what makes a write cheap. Import, annotation
+    // and macro rules are the exception: all three are derived from the query
+    // pass, so checking them against the structural facts would compare two
+    // different readings of the same file. Enforcement never needs this —
+    // none of the three families is ever Blocking — so the hot path keeps the
+    // cheap pass and only `PostToolUse`, after the write has already landed,
+    // pays for it.
     //
     // Annotations and calls come from the query pass, which `extract_structure`
     // skips because compiling a query dominates the cost of a single write.
@@ -109,6 +110,7 @@ fn verify_with(
     let wants_query_pass = applicable.iter().any(|c| {
         (c.id.starts_with("shape.import") && has_import_statement(c))
             || c.id.starts_with("shape.annotation")
+            || c.id.starts_with("shape.macros")
     });
     let facts = extension_of(rel).and_then(canon_extract::lang::from_extension).and_then(|l| {
         if wants_query_pass {
@@ -130,6 +132,9 @@ fn verify_with(
             out.push((claim, convention, v));
         }
         if let Some((claim, v)) = check_annotation(&facts, convention) {
+            out.push((claim, convention, v));
+        }
+        if let Some((claim, v)) = check_macro(&facts, convention) {
             out.push((claim, convention, v));
         }
     }
@@ -473,10 +478,48 @@ fn check_annotation(facts: &FileFacts, convention: &Convention) -> Option<(Claim
     ))
 }
 
+/// A file that calls none of the macros its directory agrees on.
+///
+/// Reported only when the file makes some call. Gated on `facts.calls` rather
+/// than [`declares_nothing`], unlike its neighbours: that check reads
+/// `types`, `free_functions` and `namespace`, none of which a Vue
+/// `<script setup>` block ever populates, and gating on it here would exempt
+/// exactly the files this family exists to speak about. A file that calls
+/// nothing at all — blank, markup-only, or pure type declarations — has made
+/// no choice, and saying so spends a line describing an absence nobody
+/// decided.
+///
+/// Parsed with the shared [`backticked`], unlike [`check_annotation`]:
+/// `MACRO_PREFIX` stops short of the opening backtick, so splitting on it and
+/// then stripping the leading backtick from the remainder finds the name
+/// exactly the way every other backticked family does. Carrying the backtick
+/// in the prefix the way `ANNOTATION_PREFIX` does would consume it before
+/// `backticked` ever sees it, leaving no leading backtick to strip — the rule
+/// would derive and never be checked, with nothing to say so.
+fn check_macro(facts: &FileFacts, convention: &Convention) -> Option<(Claim, Violation)> {
+    let expected = backticked(&convention.statement, MACRO_PREFIX)?;
+    if facts.calls.is_empty()
+        || facts.calls.iter().any(|c| c.receiver.is_none() && c.name == expected)
+    {
+        return None;
+    }
+    Some((
+        ("shape.macros", expected.clone()),
+        Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "this file does not use `{expected}`; files here do ({}/{})",
+                convention.agreeing, convention.total
+            ),
+        },
+    ))
+}
+
 const DEFAULT_EXPORT: &str = "Files here export a default";
 const NAMED_EXPORTS: &str = "Files here use named exports";
 const NAMESPACE_PREFIX: &str = "Files here declare namespace ";
 const ANNOTATION_PREFIX: &str = "Files here carry `@";
+const MACRO_PREFIX: &str = "Files here use ";
 
 /// "Files here export a default."
 ///
@@ -1169,20 +1212,39 @@ mod tests {
         export_rule.scope = Scope::DirExt("src".into(), "tsx".into());
         let mut ns_rule = conv("shape.namespace.src.php", "Files here declare namespace `App`");
         ns_rule.scope = Scope::DirExt("src".into(), "php".into());
+        let mut macro_rule = conv("shape.macros.src.vue", "Files here use `defineProps`");
+        macro_rule.scope = Scope::DirExt("src".into(), "vue".into());
 
         for (rel, source) in [
             ("src/Empty.tsx", ""),
             ("src/Broken.tsx", "\u{0}\u{1} not code at all"),
             ("src/Empty.php", "<?php"),
             ("src/Broken.php", "<?php class {{{"),
+            ("src/Empty.vue", ""),
+            ("src/Markup.vue", "<template><div/></template>"),
         ] {
-            let _ = verify_source(rel, source, &[export_rule.clone(), ns_rule.clone()]);
+            let _ = verify_source(
+                rel,
+                source,
+                &[export_rule.clone(), ns_rule.clone(), macro_rule.clone()],
+            );
         }
 
         // A namespace and nothing else is still a fact, and still checkable.
         let bare = verify_source("src/Bare.php", "<?php\nnamespace Other;\n", &[ns_rule]);
         assert_eq!(bare.len(), 1, "got {bare:#?}");
         assert!(bare[0].message.contains("`Other`"), "got {}", bare[0].message);
+
+        // A component that makes some call, even one no rule names, is still
+        // a fact worth checking against the macro the rest of the directory
+        // agrees on.
+        let called = verify_source(
+            "src/Called.vue",
+            "<script setup lang=\"ts\">\nconst x = otherHelper()\n</script>\n",
+            &[macro_rule],
+        );
+        assert_eq!(called.len(), 1, "got {called:#?}");
+        assert!(called[0].message.contains("does not use `defineProps`"), "got {called:#?}");
     }
 
     #[test]
@@ -1260,7 +1322,7 @@ mod tests {
 
     #[test]
     fn the_families_added_for_templates_and_modules_can_never_refuse_a_write() {
-        // All three are advisory by construction: none of their id prefixes is
+        // All four are advisory by construction: none of their id prefixes is
         // in the enforceable set, and `blocking_violations` recomputes the
         // grade from the id rather than trusting the stored decision. Pinned
         // here because renaming one under `naming.` would silently promote it.
@@ -1280,6 +1342,11 @@ mod tests {
                 "shape.namespace.src.php",
                 "Files here declare namespace `App`",
                 Scope::DirExt("src".into(), "php".into()),
+            ),
+            (
+                "shape.macros.src.vue",
+                "Files here use `defineProps`",
+                Scope::DirExt("src".into(), "vue".into()),
             ),
         ] {
             let rule = blocking(id, statement, scope);
@@ -1330,21 +1397,25 @@ mod tests {
     #[test]
     fn whether_a_file_is_judged_does_not_depend_on_which_other_rules_apply() {
         // `verify_with` reads a file two ways: the cheap structural pass, and
-        // the full one when an import or annotation rule is in scope. Only the
-        // second records calls, so a predicate that consults them answers
-        // differently depending on a rule that has nothing to do with the
-        // question.
+        // the full one when an import, annotation or macro rule is in scope.
+        // Only the second records calls, so a predicate that consults them
+        // answers differently depending on a rule that has nothing to do with
+        // the question.
         let mut ns = conv("shape.namespace.src.php", "Files here declare namespace `App`");
         ns.scope = Scope::DirExt("src".into(), "php".into());
         let mut import = conv("shape.import.src.php", "Files here import from `App\\Kernel`");
         import.scope = Scope::DirExt("src".into(), "php".into());
         let mut annotation = conv("shape.annotation.src.php", "Files here carry `@Entity`");
         annotation.scope = Scope::DirExt("src".into(), "php".into());
+        let mut macros = conv("shape.macros.src.php", "Files here use `add_filter`");
+        macros.scope = Scope::DirExt("src".into(), "php".into());
 
         let procedural = "<?php\nadd_action('init', 'setup');\n";
         let alone = verify_source("src/plugin.php", procedural, std::slice::from_ref(&ns));
         let beside_import = verify_source("src/plugin.php", procedural, &[ns.clone(), import]);
-        let beside_annotation = verify_source("src/plugin.php", procedural, &[ns, annotation]);
+        let beside_annotation =
+            verify_source("src/plugin.php", procedural, &[ns.clone(), annotation]);
+        let beside_macro = verify_source("src/plugin.php", procedural, &[ns, macros]);
         let namespace_lines = |vs: &[Violation]| {
             vs.iter().filter(|v| v.convention_id.starts_with("shape.namespace")).count()
         };
@@ -1357,6 +1428,11 @@ mod tests {
             namespace_lines(&alone),
             namespace_lines(&beside_annotation),
             "an unrelated annotation rule changed the namespace answer:\n{alone:#?}\n{beside_annotation:#?}"
+        );
+        assert_eq!(
+            namespace_lines(&alone),
+            namespace_lines(&beside_macro),
+            "an unrelated macro rule changed the namespace answer:\n{alone:#?}\n{beside_macro:#?}"
         );
     }
 
@@ -1389,6 +1465,53 @@ mod tests {
         assert!(
             violations.iter().any(|v| v.message.contains("carries no `@Injectable`")),
             "the derived statement and the check disagreed on the prefix: {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_macro_rule_is_checked_against_the_same_prefix_it_was_stated_with() {
+        // The derive side writes the statement and the check side parses it
+        // back out, so the two have to agree on exactly where the name sits
+        // inside it. A mismatch here fails silently: the rule still derives,
+        // `check_macro` just never matches it, and nothing catches a
+        // component drifting away from it. `<script setup>` declares no
+        // class, no export and no free function, so this is also the test
+        // that proves the check does not fall back to `declares_nothing` and
+        // stay silent about every file in the fixture.
+        let files = crate::fixture::agreeing(
+            "src/components",
+            "vue",
+            6,
+            "<template><div/></template>\n<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst props = defineProps<{ title: string }>()\nconst open = ref(false)\n</script>\n",
+        );
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let root = crate::fixture::build("verify-macro-roundtrip", &refs);
+        let settings = canon_core::Settings::default();
+        let entries = crate::walk::walk(&root, &settings);
+        let convs = crate::derive_from(&root, &settings, &entries);
+        let rule = convs.iter().find(|c| c.id.starts_with("shape.macros")).unwrap_or_else(|| {
+            panic!("no macro rule derived: {:?}", convs.iter().map(|c| &c.id).collect::<Vec<_>>())
+        });
+        let expected = backticked(&rule.statement, MACRO_PREFIX).expect("a backticked macro name");
+
+        // A component that calls something else, but never the macro its
+        // siblings agree on.
+        let violating = "<template><div/></template>\n<script setup lang=\"ts\">\nconst open = otherHelper()\n</script>\n";
+        let violations = verify_source("src/components/Plain.vue", violating, &convs);
+        assert!(
+            violations.iter().any(|v| v.message.contains(&format!("does not use `{expected}`"))),
+            "the derived statement and the check disagreed on the prefix: {violations:#?}"
+        );
+
+        // The shape every sibling in the fixture already has is not reported.
+        let conforming = verify_source(
+            "src/components/Conforming.vue",
+            &format!("<script setup lang=\"ts\">\nconst x = {expected}()\n</script>\n"),
+            &convs,
+        );
+        assert!(
+            !conforming.iter().any(|v| v.message.contains("does not use")),
+            "a conforming component was reported: {conforming:#?}"
         );
     }
 
