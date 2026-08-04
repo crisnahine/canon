@@ -313,8 +313,13 @@ fn public_arity(
     if arity == 0 {
         return None;
     }
+    // The whole id, not the family. `enforcement_for` reads guards off the
+    // rest of it — the extension a base rule was derived for, the rollup
+    // suffix — and handed a bare family none of them can fire, so the grade
+    // stored in the snapshot disagreed with the one the write path recomputes
+    // from the same id.
+    let id = format!("shape.public-arity.{}.{ext}", id_fragment(dir));
     Some(Convention {
-        id: format!("shape.public-arity.{}.{ext}", id_fragment(dir)),
         statement: format!(
             "Types here expose exactly {arity} public method{}",
             if arity == 1 { "" } else { "s" }
@@ -326,7 +331,8 @@ fn public_arity(
         exemplar: exemplar(&observations, &arity),
         evidence: evidence(&observations, &arity),
         sample_roots: Vec::new(),
-        enforcement: canon_core::enforcement_for("shape.public-arity", confidence, settings),
+        enforcement: canon_core::enforcement_for(&id, confidence, settings),
+        id,
     })
 }
 
@@ -353,8 +359,9 @@ fn entrypoint_name(
         })
         .collect();
     let (name, confidence, agreeing) = majority(&observations, settings)?;
+    // The whole id; see `public_arity`.
+    let id = format!("shape.entrypoint.{}.{ext}", id_fragment(dir));
     Some(Convention {
-        id: format!("shape.entrypoint.{}.{ext}", id_fragment(dir)),
         statement: format!("That public method is named `{name}`"),
         scope: scope_for(dir, ext),
         confidence,
@@ -363,7 +370,8 @@ fn entrypoint_name(
         exemplar: exemplar(&observations, &name),
         evidence: evidence(&observations, &name),
         sample_roots: Vec::new(),
-        enforcement: canon_core::enforcement_for("shape.entrypoint", confidence, settings),
+        enforcement: canon_core::enforcement_for(&id, confidence, settings),
+        id,
     })
 }
 
@@ -384,8 +392,13 @@ fn base_class(
     let (base, confidence, agreeing) = majority(&observations, settings)?;
     let winner = base.clone();
     let base = base?;
+    // The whole id, and here it decides the answer: `enforcement_for` reads
+    // the extension off the end to withhold a refusal from Rust and Python,
+    // whose base is whichever of several the author wrote first. A bare
+    // `shape.base` hides that extension, so a Python rule was stored
+    // `Blocking` and recomputed `Advisory` on every write.
+    let id = format!("shape.base.{}.{ext}", id_fragment(dir));
     Some(Convention {
-        id: format!("shape.base.{}.{ext}", id_fragment(dir)),
         statement: format!("Types here inherit from `{base}`"),
         scope: scope_for(dir, ext),
         confidence,
@@ -394,7 +407,8 @@ fn base_class(
         exemplar: exemplar(&observations, &winner),
         evidence: evidence(&observations, &winner),
         sample_roots: Vec::new(),
-        enforcement: canon_core::enforcement_for("shape.base", confidence, settings),
+        enforcement: canon_core::enforcement_for(&id, confidence, settings),
+        id,
     })
 }
 

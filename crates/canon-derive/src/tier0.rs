@@ -375,8 +375,12 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
             .count();
         let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
 
+        // The whole id, not the family. `enforcement_for` reads guards off the
+        // rest of it, and handed a bare family none of them can fire, so the
+        // grade stored in the snapshot could disagree with the one the write
+        // path recomputes from the same id.
+        let id = format!("naming.{}.{ext}", id_fragment(&dir));
         out.push(Convention {
-            id: format!("naming.{}.{ext}", id_fragment(&dir)),
             statement: format!("Files here are named in {}", style.label()),
             scope: scope_for(&dir, &ext),
             confidence,
@@ -387,7 +391,8 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
             // The complete set, not the capped evidence: a repository-wide rule
             // may only refuse a file in a directory that actually voted on it.
             sample_roots: roots_of(&members),
-            enforcement: canon_core::enforcement_for("naming", confidence, settings),
+            enforcement: canon_core::enforcement_for(&id, confidence, settings),
+            id,
         });
     }
     out

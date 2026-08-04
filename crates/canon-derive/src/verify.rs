@@ -492,8 +492,14 @@ fn check_annotation(facts: &FileFacts, convention: &Convention) -> Option<(Claim
         Violation {
             convention_id: convention.id.clone(),
             message: format!(
-                "this file carries no `@{expected}`; files here carry it ({}/{})",
-                convention.agreeing, convention.total
+                // The scope travels with the counts, for the reason
+                // `check_shape` gives: a bare "95/102" invites the reader to
+                // count the directory and find a different number, because
+                // the rule may have been counted over an ancestor of it.
+                "this file carries no `@{expected}`; files here carry it ({}/{} matching {})",
+                convention.agreeing,
+                convention.total,
+                convention.scope.render()
             ),
         },
     ))
@@ -529,8 +535,11 @@ fn check_macro(facts: &FileFacts, convention: &Convention) -> Option<(Claim, Vio
         Violation {
             convention_id: convention.id.clone(),
             message: format!(
-                "this file does not use `{expected}`; files here do ({}/{})",
-                convention.agreeing, convention.total
+                // The scope travels with the counts; see `check_annotation`.
+                "this file does not use `{expected}`; files here do ({}/{} matching {})",
+                convention.agreeing,
+                convention.total,
+                convention.scope.render()
             ),
         },
     ))
@@ -1959,6 +1968,33 @@ mod tests {
             !no_violation.iter().any(|v| v.message.contains("does not implement")),
             "a conforming job was reported: {no_violation:#?}"
         );
+    }
+
+    #[test]
+    fn every_violation_names_the_files_its_counts_came_from() {
+        // A bare "47/52" beside a sentence about "files here" invites the
+        // reader to count the directory and find a different number, because
+        // the rule may have been counted over an ancestor of it. Two families
+        // were emitting one.
+        let mut annotation =
+            conv("shape.annotation.src.orders.ts", "Files here carry `@Injectable`");
+        annotation.scope = Scope::DirExt("src/orders".into(), "ts".into());
+        let mut macros = conv("shape.macros.src.orders.ts", "Files here use `defineStore`");
+        macros.scope = Scope::DirExt("src/orders".into(), "ts".into());
+
+        let found = verify_source(
+            "src/orders/plain.ts",
+            "export class Plain {\n  go(): void { other(); }\n}\n",
+            &[annotation, macros],
+        );
+        assert_eq!(found.len(), 2, "got {found:#?}");
+        for v in &found {
+            assert!(
+                v.message.contains("47/52 matching src/orders/**/*.ts"),
+                "the counts travel without their scope: {}",
+                v.message
+            );
+        }
     }
 
     #[test]

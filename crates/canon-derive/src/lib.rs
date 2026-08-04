@@ -426,6 +426,47 @@ mod tests {
     }
 
     #[test]
+    fn the_grade_a_snapshot_stores_is_the_grade_the_write_path_recomputes() {
+        // `enforcement_for` reads its guards off the id: the extension a base
+        // rule was derived for, and the rollup suffix. Handed a bare family
+        // at the derive site none of them can fire, so a Python base rule at
+        // total agreement was stored `Blocking` and recomputed `Advisory` —
+        // the snapshot and the write path disagreeing about the one field
+        // that decides whether a write can be refused.
+        let mut files = fixture::agreeing(
+            "app/views",
+            "py",
+            6,
+            "class ItemView$N(BaseService):\n    def call(self):\n        pass\n",
+        );
+        files.extend(fixture::agreeing(
+            "app/services",
+            "rb",
+            6,
+            "class Item$N < ApplicationService\n  def call; end\nend\n",
+        ));
+        let root = fixture::build("stored-grade", &refs(&files));
+        let settings = Settings::default();
+        let (_, convs) = derive_all(&root, &settings);
+
+        assert!(
+            convs.iter().any(|c| {
+                c.id.starts_with("shape.base") && c.id.rsplit('.').next() == Some("py")
+            }),
+            "the fixture derived no Python base rule: {:?}",
+            convs.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        for c in &convs {
+            assert_eq!(
+                c.enforcement,
+                c.enforcement_now(&settings),
+                "`{}` is stored one way and recomputed another",
+                c.id
+            );
+        }
+    }
+
+    #[test]
     fn a_repository_of_agreeing_service_objects_yields_the_expected_conventions() {
         let files = fixture::agreeing(
             "app/services/enrolments",
