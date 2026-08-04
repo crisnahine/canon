@@ -82,34 +82,49 @@ fn rev_parse(root: &Path) -> Option<String> {
 /// repository unlucky enough to contain one.
 fn ls_files(root: &Path) -> Option<Vec<String>> {
     let output = git(root, &["ls-files", "-z", "--cached"])?;
-    let text = String::from_utf8(output).ok()?;
-    let files: Vec<String> =
-        text.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    let files = nul_separated(&output);
     // A repository with no commits yet answers successfully and says nothing.
     // Reading that as "this repository has no files" would silently produce no
     // conventions, so hand back `None` and let the caller decide.
     (!files.is_empty()).then_some(files)
 }
 
-fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output.status.success().then_some(output.stdout)
+/// The paths in a NUL-separated git listing.
+///
+/// Lossy, the way [`log_times`] already reads its own output. A path that is
+/// not valid UTF-8 is legal on Linux, and decoding the listing strictly threw
+/// all of it away for one of them: the caller then walked the filesystem,
+/// which is the answer this module exists to avoid, taken silently and on the
+/// repositories least able to afford it. One unreadable name arrives spelled
+/// with replacement characters, fails to open, and is dropped on its own.
+fn nul_separated(out: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(out).split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect()
 }
 
-/// How long a commit-time walk may run before this process stops waiting on
-/// it and the caller falls back to the filesystem mtime.
+fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    git_within(root, args, GIT_TIMEOUT)
+}
+
+/// [`git`] against a caller-supplied bound, so a test can prove the bound is
+/// applied without waiting one out.
+fn git_within(root: &Path, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).args(args);
+    bounded_output(&mut cmd, timeout)
+}
+
+/// How long any one git call may run before this process stops waiting on it.
 ///
-/// A `git log` over the whole history is the one call in this module whose
-/// cost scales with how long a repository has existed rather than how big it
-/// is today, and nothing here may block a session on it.
-const COMMIT_TIMES_TIMEOUT: Duration = Duration::from_secs(20);
+/// Nothing in this module may block a session, and every call here can hang:
+/// a `git log` over the whole history costs what a repository's age costs
+/// rather than what its size costs, and `ls-files` waits on an index that a
+/// network filesystem or another process holding the lock can stall
+/// indefinitely. `ls_files` runs on every `reconcile`, which is the end of
+/// every turn that touched a file.
+///
+/// The caller degrades in each case rather than failing: to the filesystem
+/// mtime for a commit time, to the filesystem walk for a file list.
+const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Run `cmd` and collect its stdout, killing it if it is still running once
 /// `timeout` has passed.
@@ -161,7 +176,7 @@ fn bounded_output(cmd: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
 /// never find their own time.
 ///
 /// `None` when git is unavailable, the repository has no commits yet, or the
-/// walk does not finish inside [`COMMIT_TIMES_TIMEOUT`]. The caller falls
+/// walk does not finish inside [`GIT_TIMEOUT`]. The caller falls
 /// back to mtime in every case, so a repository whose history is too large to
 /// walk degrades rather than hanging a session.
 #[must_use]
@@ -186,18 +201,18 @@ pub(crate) fn recent_commit_times(root: &Path) -> Option<HashMap<String, u64>> {
 /// rather than one that grows with the repository's age.
 const RECENT_COMMITS: usize = 2_000;
 
-/// One [`COMMIT_TIMES_TIMEOUT`] budget for the whole walk, root and every
+/// One [`GIT_TIMEOUT`] budget for the whole walk, root and every
 /// child combined.
 ///
 /// `bounded_output` already stops one hung `git log`, but a directory of
 /// repositories tries up to `MAX_CHILD_REPOS` children in sequence, and a
 /// timeout applied fresh to each one lets the walk as a whole run for their
-/// sum: up to 32 times [`COMMIT_TIMES_TIMEOUT`] on a hook that runs at the
+/// sum: up to 32 times [`GIT_TIMEOUT`] on a hook that runs at the
 /// end of every turn. Striking one deadline before the first attempt and
 /// spending it across every child, root included, keeps the walk's total cost
 /// the same whether the repository holds one checkout or thirty-two.
 fn walk_commit_times(root: &Path, limit: Option<usize>) -> Option<HashMap<String, u64>> {
-    walk_commit_times_by(root, limit, Instant::now() + COMMIT_TIMES_TIMEOUT)
+    walk_commit_times_by(root, limit, Instant::now() + GIT_TIMEOUT)
 }
 
 /// [`walk_commit_times`] against a caller-supplied deadline, so a test can
@@ -610,7 +625,7 @@ mod tests {
             return;
         }
 
-        let deadline = Instant::now() + COMMIT_TIMES_TIMEOUT;
+        let deadline = Instant::now() + GIT_TIMEOUT;
         let full = log_times(&repo, None, deadline).expect("a full walk");
         assert!(full.contains_key("old.rb") && full.contains_key("new.rb"), "got {full:?}");
 
@@ -645,7 +660,7 @@ mod tests {
     #[test]
     fn log_times_spends_a_shared_deadline_rather_than_a_fresh_timeout_per_call() {
         // The mechanism the aggregate bound rests on: before this, every call
-        // measured its own twenty seconds from `COMMIT_TIMES_TIMEOUT`, so an
+        // measured its own twenty seconds from `GIT_TIMEOUT`, so an
         // already-late call in a long walk still got a full fresh allowance.
         // A repository real and fast enough to answer inside any ordinary
         // timeout must still come back empty once the shared deadline it is
@@ -684,6 +699,36 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap()
+    }
+
+    #[test]
+    fn one_path_that_is_not_utf8_does_not_discard_the_tracked_list() {
+        // A path that is not valid UTF-8 is legal on Linux. Decoding the
+        // listing strictly threw the whole of it away for one of them, and the
+        // caller then walked the filesystem — the answer this module exists to
+        // avoid, taken silently and only on the repositories least able to
+        // afford it.
+        let files = nul_separated(b"a.rb\0bad\xff\xfename.rb\0b.rb\0");
+        assert_eq!(files.len(), 3, "got {files:?}");
+        assert!(files.contains(&"a.rb".to_string()), "got {files:?}");
+        assert!(files.contains(&"b.rb".to_string()), "got {files:?}");
+    }
+
+    #[test]
+    fn a_git_call_is_bounded_rather_than_run_to_completion() {
+        // `ls_files` runs on every `reconcile`, which is the end of every turn
+        // that touched a file, and `Command::output` waits on its child with
+        // no bound at all. A timeout that cannot elapse is the deterministic
+        // way to prove the bound is applied: the same call answers with a real
+        // one.
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if git_within(here, &["rev-parse", "HEAD"], GIT_TIMEOUT).is_none() {
+            return; // no usable git here
+        }
+        assert!(
+            git_within(here, &["rev-parse", "HEAD"], Duration::ZERO).is_none(),
+            "a git call ran past the bound it was given"
+        );
     }
 
     #[test]
