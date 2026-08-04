@@ -11,15 +11,22 @@ Two generators, both producing a file that a person would plausibly write:
              that directory, so a refusal is a false positive.
   test     - a test file written into a directory that has blocking shape
              rules, in each of the common naming idioms.
-  mutant   - a tracked file's class header rewritten to keep only its last
+  mutant   - a tracked file's type header rewritten to keep only its last
              base, so a directory where every class lists a mixin first
              (`class V(LoginRequiredMixin, ListView)`) gets a file that
              inherits the same real base without the mixin. A refusal here
              means a base-class rule learned the mixin's name instead.
+
+The mutant only measures anything in a language that admits several bases at
+once, because that is the only place "which one is the base" is a question. Two
+are wired: Python, and Go, whose embedded fields are an unordered set.
 """
 import os
 import re
-import json, subprocess, sys, os, collections, concurrent.futures as cf
+import sys, collections, concurrent.futures as cf
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import canon_replay as harness
 
 BIN, ROOT = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 CODE = {".rb", ".js", ".ts", ".tsx", ".jsx", ".py", ".go", ".rs", ".php", ".vue", ".erb"}
@@ -34,18 +41,6 @@ def is_testish(rel):
                    for q in stem.split(".")[1:])
             or stem.endswith(("_spec", "_test", "_tests", "Test"))
             or stem.startswith("test_"))
-
-def inject(cwd, rel, content):
-    p = json.dumps({"session_id": "s", "cwd": cwd, "tool_name": "Write",
-                    "tool_input": {"file_path": os.path.join(cwd, rel), "content": content}})
-    r = subprocess.run([BIN, "inject"], input=p, capture_output=True, text=True, cwd=cwd)
-    if r.returncode != 0 or r.stderr.strip():
-        return ("ERROR", r.stderr[:160])
-    h = json.loads(r.stdout or "{}").get("hookSpecificOutput", {})
-    if h.get("permissionDecision") == "deny":
-        why = h["permissionDecisionReason"].split("\n\n")
-        return ("DENY", why[1].strip().replace("\n", " / ") if len(why) > 1 else "")
-    return None
 
 TEST_BODIES = {
     ".py":  "class Test{C}:\n    def test_works(self): pass\n\n    def test_fails(self): pass\n",
@@ -68,22 +63,20 @@ TEST_NAMES = {
     ".rs":  ["{s}_test.rs"],
 }
 
-# Rewrite a class header so the file keeps its directory's shape but varies the
+# Rewrite a type header so the file keeps its directory's shape but varies the
 # part a base-class rule reads. A repository whose views all read
 # `class V(LoginRequiredMixin, ListView)` must not refuse `class V(ListView)`:
 # the mixin is not the base, and the author cannot be told to add one.
 #
-# Python gets its own scan rather than a regex character class: `[^)]+` stops
-# at the base list's first literal `)`, which breaks on a call-expression base
-# like `namedtuple('F', ['a', 'b'])`. Ruby, PHP and TypeScript keep the plain
-# regex below because a single base has no internal commas or parens to
-# mis-split.
+# Only Python and Go are wired, because they are the only languages canon reads
+# that put several bases in one ordered list. Ruby, PHP, TypeScript and
+# JavaScript each name exactly one, so dropping all but the last is the
+# identity and the case would measure nothing.
 PY_CLASS = re.compile(r"^class\s+\w+\(", re.M)
-MUTATORS = {
-    ".rb":  (re.compile(r"^(class\s+[\w:]+\s*<\s*)([\w:]+)(.*)$", re.M), None),
-    ".php": (re.compile(r"^(class\s+\w+\s+extends\s+)(\w+)(.*)$", re.M), None),
-    ".ts":  (re.compile(r"^(export class\s+\w+\s+extends\s+)([\w.]+)(.*)$", re.M), None),
-}
+GO_STRUCT = re.compile(r"^type\s+\w+\s+struct\s*\{[ \t]*$", re.M)
+# An embedded field is a field declaration carrying a type and no name, which
+# on its own line is a bare type and nothing else.
+GO_EMBED = re.compile(r"^\s*\*?[A-Za-z_][\w.]*(\[[^\]]*\])?\s*$")
 
 def py_header_span(content):
     """The `(...)` right after `class Name`, found by tracking bracket depth
@@ -143,6 +136,31 @@ def py_positional_bases(header):
             bases.append(s)
     return bases
 
+def go_drop_leading_embeds(content):
+    """Keep a struct's last embedded field and drop the ones before it.
+
+    Go's embeds are an unordered set — `sync.Mutex` beside `BaseService` says
+    the type is a service that also locks, in either order — so a file keeping
+    only one of them is ordinary code and refusing it is a false positive."""
+    m = GO_STRUCT.search(content)
+    if m is None:
+        return None
+    lines = content.split("\n")
+    start = content[:m.start()].count("\n")
+    depth, embeds, end = 0, [], None
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if depth == 0:
+            end = i
+            break
+        if i > start and GO_EMBED.match(lines[i]):
+            embeds.append(i)
+    if end is None or len(embeds) < 2:
+        return None
+    dropped = set(embeds[:-1])
+    return "\n".join(line for i, line in enumerate(lines) if i not in dropped)
+
+
 def mutate(ext, content):
     """Drop every base but the last, keeping the file otherwise intact."""
     if ext == ".py":
@@ -154,20 +172,9 @@ def mutate(ext, content):
         if len(bases) < 2:
             return None
         return content[:open_idx + 1] + bases[-1] + content[close_idx:]
-    entry = MUTATORS.get(ext)
-    if entry is None:
-        return None
-    pattern, sep = entry
-    m = pattern.search(content)
-    if m is None:
-        return None
-    if sep is None:
-        return None                      # single-base language: nothing to reorder
-    bases = [b.strip() for b in m.group(2).split(sep) if b.strip()]
-    if len(bases) < 2:
-        return None
-    kept = bases[-1]
-    return content[:m.start()] + m.group(1) + kept + m.group(3) + content[m.end():]
+    if ext == ".go":
+        return go_drop_leading_embeds(content)
+    return None
 
 def cases_for(cwd, files):
     by_dir = collections.defaultdict(list)
@@ -211,28 +218,43 @@ def cases_for(cwd, files):
 
 grand = collections.Counter()
 problems = []
-for repo in sorted(os.listdir(os.path.join(ROOT, "realrepos"))):
-    cwd = os.path.join(ROOT, "realrepos", repo)
-    if not os.path.isdir(cwd):
-        continue
-    files = [f for f in subprocess.run(["git", "ls-files"], cwd=cwd, capture_output=True,
-                                       text=True).stdout.split("\n") if f]
-    cases = cases_for(cwd, files)
+for repo, cwd in harness.repos(ROOT):
+    data = harness.index(BIN, cwd, repo)
+    cases = cases_for(cwd, harness.tracked(cwd))
     with cf.ThreadPoolExecutor(max_workers=12) as ex:
-        results = list(ex.map(lambda c: inject(cwd, c[1], c[2]), cases))
-    bad = [(repo, k, rel, r) for (k, rel, _), r in zip(cases, results) if r and k != "mutant"]
-    mut = [(repo, k, rel, r) for (k, rel, _), r in zip(cases, results) if r and k == "mutant"]
+        results = list(ex.map(lambda c: harness.inject(BIN, data, cwd, c[1], c[2]), cases))
+    blocked = sum(1 for _, _, b in results if b)
+    mutants = sum(1 for k, _, _ in cases if k == "mutant")
+    bad = [(repo, k, rel, r) for (k, rel, _), r in zip(cases, results)
+           if r[0] and k != "mutant"]
+    mut = [(repo, k, rel, r) for (k, rel, _), r in zip(cases, results)
+           if r[0] and k == "mutant"]
     grand["cases"] += len(cases)
+    grand["blocked"] += blocked
+    grand["mutants"] += mutants
     grand["bad"] += len(bad)
     grand["mutant"] += len(mut)
     problems += bad + mut
-    print(f"  {repo:<14} {len(cases):>5} new files   {len(bad)} refused/errored   {len(mut)} base-order refusals")
-print(f"\nTOTAL {grand['cases']} new files written into real directories, "
+    print(f"  {repo:<14} {len(cases):>5} new files ({mutants:>4} mutants)   {blocked:>5} with a block   "
+          f"{len(bad)} refused/errored   {len(mut)} base-order refusals")
+print(f"\nTOTAL {grand['cases']} new files written into real directories "
+      f"({grand['mutants']} of them mutants), {grand['blocked']} received a context block, "
       f"{grand['bad']} refused or errored, {grand['mutant']} refused for base order")
 seen = set()
-for repo, kind, rel, (verdict, why) in problems:
+for repo, kind, rel, (verdict, why, _) in problems:
     key = (repo, why[:60])
     if key in seen:
         continue
     seen.add(key)
     print(f"  {verdict} [{kind}] {repo} {rel}\n      {why[:150]}")
+
+# Without a snapshot every case comes back clean, which is what this harness
+# reported for as long as it ran `inject` against an empty data directory. A
+# block count of zero is that state, not a passing run.
+if grand["blocked"] == 0:
+    print("\nFAIL no case received a context block; the replay measured nothing")
+    sys.exit(1)
+if grand["mutants"] == 0:
+    print("\nFAIL no mutant was generated; the base-order case measured nothing")
+    sys.exit(1)
+sys.exit(1 if problems else 0)

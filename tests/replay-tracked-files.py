@@ -1,36 +1,57 @@
+"""Replay every tracked file back through the write path.
+
+A file already in the index has voted on every rule that speaks for it, so a
+rule that refuses it is a rule that contradicts its own evidence. Nothing here
+may be refused, and nothing here may break the fail-open contract.
+"""
+import concurrent.futures as cf
 import os
-import json,subprocess,sys,os,concurrent.futures as cf
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import canon_replay as harness
+
 BIN, ROOT = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
-EXTS={".rb",".rake",".gemspec",".js",".mjs",".cjs",".jsx",".ts",".mts",".cts",".tsx",
-      ".py",".pyi",".go",".rs",".php",".vue",".erb",".rhtml",".toml",".yml",".yaml",
-      ".json",".md",".scss",".css",".html",".stub",".rst",".adoc"}
-def check(args):
-    cwd,rel=args
+EXTS = {".rb", ".rake", ".gemspec", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx",
+        ".py", ".pyi", ".go", ".rs", ".php", ".vue", ".erb", ".rhtml", ".toml", ".yml", ".yaml",
+        ".json", ".md", ".scss", ".css", ".html", ".stub", ".rst", ".adoc"}
+
+
+def check(binary, data, cwd, rel):
     try:
-        content=open(os.path.join(cwd,rel),encoding="utf-8",errors="replace").read()
+        content = open(os.path.join(cwd, rel), encoding="utf-8", errors="replace").read()
     except OSError:
         return None
-    if len(content)>400_000: return None
-    payload=json.dumps({"session_id":"replay","cwd":cwd,"tool_name":"Write",
-        "tool_input":{"file_path":os.path.join(cwd,rel),"content":content}})
-    r=subprocess.run([BIN,"inject"],input=payload,capture_output=True,text=True,cwd=cwd)
-    if r.returncode!=0: return ("EXIT",rel,r.returncode,r.stderr[:200])
-    if r.stderr.strip(): return ("STDERR",rel,0,r.stderr[:200])
-    try: d=json.loads(r.stdout or "{}")
-    except Exception: return ("BADJSON",rel,0,r.stdout[:200])
-    h=d.get("hookSpecificOutput",{})
-    if h.get("permissionDecision")=="deny":
-        return ("DENY",rel,0,h["permissionDecisionReason"].split("\n\n")[1] if "\n\n" in h["permissionDecisionReason"] else "")
-    return None
-grand_files=0; grand_bad=[]
-for repo in sorted(os.listdir(os.path.join(ROOT,"realrepos"))):
-    cwd=os.path.join(ROOT,"realrepos",repo)
-    if not os.path.isdir(cwd): continue
-    tracked=subprocess.run(["git","ls-files"],cwd=cwd,capture_output=True,text=True).stdout.split("\n")
-    files=[f for f in tracked if f and os.path.splitext(f)[1] in EXTS]
+    if len(content) > 400_000:
+        return None
+    return harness.inject(binary, data, cwd, rel, content)
+
+
+grand_files = 0
+grand_blocked = 0
+grand_bad = []
+for repo, cwd in harness.repos(ROOT):
+    data = harness.index(BIN, cwd, repo)
+    files = [f for f in harness.tracked(cwd) if os.path.splitext(f)[1] in EXTS]
     with cf.ThreadPoolExecutor(max_workers=12) as ex:
-        results=[r for r in ex.map(check,[(cwd,f) for f in files]) if r]
-    grand_files+=len(files); grand_bad+=[(repo,)+r for r in results]
-    print(f"  {repo:<14} {len(files):>5} files   {len(results)} refused/failed")
-print(f"\nTOTAL {grand_files} tracked files replayed through the write path, {len(grand_bad)} refused or errored")
-for b in grand_bad[:60]: print("  ", b[0], b[1], b[2], "|", b[4].strip()[:150])
+        results = list(ex.map(lambda f: check(BIN, data, cwd, f), files))
+    judged = [(f, r) for f, r in zip(files, results) if r is not None]
+    blocked = sum(1 for _, (_, _, b) in judged if b)
+    bad = [(repo, f) + r[:2] for f, r in judged if r[0] is not None]
+    grand_files += len(judged)
+    grand_blocked += blocked
+    grand_bad += bad
+    print(f"  {repo:<14} {len(judged):>5} files   {blocked:>5} with a block   {len(bad)} refused/failed")
+
+print(f"\nTOTAL {grand_files} tracked files replayed through the write path, "
+      f"{grand_blocked} received a context block, {len(grand_bad)} refused or errored")
+for b in grand_bad[:60]:
+    print("  ", b[0], b[1], b[2], "|", b[3].strip()[:150])
+
+# A run where nothing received a block proves only that no rule was loaded.
+# That is the state a missing snapshot leaves the harness in, and it reported
+# a clean sweep from it for as long as it existed.
+if grand_blocked == 0:
+    print("\nFAIL no case received a context block; the replay measured nothing")
+    sys.exit(1)
+sys.exit(1 if grand_bad else 0)
