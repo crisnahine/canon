@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Child directories consulted when the root is not itself a repository.
 ///
@@ -186,13 +186,40 @@ pub(crate) fn recent_commit_times(root: &Path) -> Option<HashMap<String, u64>> {
 /// rather than one that grows with the repository's age.
 const RECENT_COMMITS: usize = 2_000;
 
+/// One [`COMMIT_TIMES_TIMEOUT`] budget for the whole walk, root and every
+/// child combined.
+///
+/// `bounded_output` already stops one hung `git log`, but a directory of
+/// repositories tries up to `MAX_CHILD_REPOS` children in sequence, and a
+/// timeout applied fresh to each one lets the walk as a whole run for their
+/// sum: up to 32 times [`COMMIT_TIMES_TIMEOUT`] on a hook that runs at the
+/// end of every turn. Striking one deadline before the first attempt and
+/// spending it across every child, root included, keeps the walk's total cost
+/// the same whether the repository holds one checkout or thirty-two.
 fn walk_commit_times(root: &Path, limit: Option<usize>) -> Option<HashMap<String, u64>> {
-    if let Some(times) = log_times(root, limit) {
+    walk_commit_times_by(root, limit, Instant::now() + COMMIT_TIMES_TIMEOUT)
+}
+
+/// [`walk_commit_times`] against a caller-supplied deadline, so a test can
+/// prove the budget is shared across children without waiting out a real
+/// twenty-second timeout.
+fn walk_commit_times_by(
+    root: &Path,
+    limit: Option<usize>,
+    deadline: Instant,
+) -> Option<HashMap<String, u64>> {
+    if let Some(times) = log_times(root, limit, deadline) {
         return Some(times);
     }
     let mut combined: HashMap<String, u64> = HashMap::new();
     for (name, path) in child_repos(root) {
-        if let Some(times) = log_times(&path, limit) {
+        // Checked before spawning rather than left to `bounded_output`: once
+        // the shared deadline has passed, a child gets no attempt at all
+        // instead of a share of a budget that is already zero.
+        if Instant::now() >= deadline {
+            break;
+        }
+        if let Some(times) = log_times(&path, limit, deadline) {
             combined.extend(times.into_iter().map(|(rel, at)| (format!("{name}/{rel}"), at)));
         }
     }
@@ -209,13 +236,17 @@ fn walk_commit_times(root: &Path, limit: Option<usize>) -> Option<HashMap<String
 ///
 /// Empty is `None`, so a root that is a repository with nothing to say hands
 /// the question to its children rather than answering for them.
-fn log_times(root: &Path, limit: Option<usize>) -> Option<HashMap<String, u64>> {
+fn log_times(root: &Path, limit: Option<usize>, deadline: Instant) -> Option<HashMap<String, u64>> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(root).args(["log", "--no-renames", "-z", "--format=%ct", "--name-only"]);
     if let Some(n) = limit {
         cmd.arg(format!("-n{n}"));
     }
-    let out = bounded_output(&mut cmd, COMMIT_TIMES_TIMEOUT)?;
+    let out = bounded_output(&mut cmd, remaining)?;
     let times = parse_commit_times(&String::from_utf8_lossy(&out));
     (!times.is_empty()).then_some(times)
 }
@@ -519,12 +550,57 @@ mod tests {
             return;
         }
 
-        let full = log_times(&repo, None).expect("a full walk");
+        let deadline = Instant::now() + COMMIT_TIMES_TIMEOUT;
+        let full = log_times(&repo, None, deadline).expect("a full walk");
         assert!(full.contains_key("old.rb") && full.contains_key("new.rb"), "got {full:?}");
 
-        let capped = log_times(&repo, Some(1)).expect("a capped walk");
+        let capped = log_times(&repo, Some(1), deadline).expect("a capped walk");
         assert!(capped.contains_key("new.rb"), "got {capped:?}");
         assert!(!capped.contains_key("old.rb"), "the cap read more than it asked for: {capped:?}");
+    }
+
+    #[test]
+    fn a_deadline_already_past_stops_the_walk_before_any_child_is_tried() {
+        // `child_repos` allows up to 32, so a timeout applied fresh to each
+        // one lets the walk run for their sum instead of one shared bound. A
+        // deadline that has already passed is the deterministic way to prove
+        // the budget is aggregate: two real, fast, otherwise-answerable
+        // repositories must still both go untried, because a per-child
+        // timeout would have let at least the first one run.
+        let root = std::env::temp_dir().join("canon-git-deadline-past");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let built = child_repo(&root, "api", &[("a.rb", "class A; end\n")])
+            && child_repo(&root, "client", &[("b.ts", "export const b = 1;\n")]);
+        if !built {
+            return; // no usable git here
+        }
+        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(
+            walk_commit_times_by(&root, None, expired).is_none(),
+            "a deadline already past must not let any child run"
+        );
+    }
+
+    #[test]
+    fn log_times_spends_a_shared_deadline_rather_than_a_fresh_timeout_per_call() {
+        // The mechanism the aggregate bound rests on: before this, every call
+        // measured its own twenty seconds from `COMMIT_TIMES_TIMEOUT`, so an
+        // already-late call in a long walk still got a full fresh allowance.
+        // A repository real and fast enough to answer inside any ordinary
+        // timeout must still come back empty once the shared deadline it is
+        // handed has already passed.
+        let parent = std::env::temp_dir();
+        let name = "canon-git-log-times-expired";
+        let _ = std::fs::remove_dir_all(parent.join(name));
+        if !child_repo(&parent, name, &[("a.rb", "class A; end\n")]) {
+            return;
+        }
+        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(
+            log_times(&parent.join(name), None, expired).is_none(),
+            "an expired deadline must not grant a fresh per-call timeout"
+        );
     }
 
     #[test]
