@@ -72,15 +72,88 @@ TEST_NAMES = {
 # part a base-class rule reads. A repository whose views all read
 # `class V(LoginRequiredMixin, ListView)` must not refuse `class V(ListView)`:
 # the mixin is not the base, and the author cannot be told to add one.
+#
+# Python gets its own scan rather than a regex character class: `[^)]+` stops
+# at the base list's first literal `)`, which breaks on a call-expression base
+# like `namedtuple('F', ['a', 'b'])`. Ruby, PHP and TypeScript keep the plain
+# regex below because a single base has no internal commas or parens to
+# mis-split.
+PY_CLASS = re.compile(r"^class\s+\w+\(", re.M)
 MUTATORS = {
-    ".py":  (re.compile(r"^(class\s+\w+\()([^)]+)(\).*)$", re.M), ", "),
     ".rb":  (re.compile(r"^(class\s+[\w:]+\s*<\s*)([\w:]+)(.*)$", re.M), None),
     ".php": (re.compile(r"^(class\s+\w+\s+extends\s+)(\w+)(.*)$", re.M), None),
     ".ts":  (re.compile(r"^(export class\s+\w+\s+extends\s+)([\w.]+)(.*)$", re.M), None),
 }
 
+def py_header_span(content):
+    """The `(...)` right after `class Name`, found by tracking bracket depth
+    rather than matching up to the first `)`, so a call-expression base with
+    its own parens or brackets does not truncate the scan early."""
+    m = PY_CLASS.search(content)
+    if m is None:
+        return None
+    open_idx = m.end() - 1
+    depth = 0
+    for i in range(open_idx, len(content)):
+        c = content[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return open_idx, i
+    return None                          # unbalanced; leave the file alone
+
+def py_positional_bases(header):
+    """Split on top-level commas, then drop anything that is not a plain
+    positional base: a keyword argument (`metaclass=ABCMeta`) configures the
+    class rather than naming a parent, the same reason `python.rs` already
+    skips a `keyword_argument` node when it reads a class's base. A splat
+    (`*bases`, `**kwargs`) is dropped for the same reason: it names no
+    parent in particular."""
+    items, depth, start = [], 0, 0
+    for i, c in enumerate(header):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            items.append(header[start:i])
+            start = i + 1
+    items.append(header[start:])
+    bases = []
+    for item in items:
+        s = item.strip()
+        if not s or s.startswith("*"):
+            continue
+        depth = 0
+        keyword = False
+        for i, c in enumerate(s):
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+            elif c == "=" and depth == 0:
+                prev_c = s[i - 1] if i > 0 else ""
+                next_c = s[i + 1] if i + 1 < len(s) else ""
+                if next_c != "=" and prev_c not in "=!<>:":
+                    keyword = True
+                    break
+        if not keyword:
+            bases.append(s)
+    return bases
+
 def mutate(ext, content):
     """Drop every base but the last, keeping the file otherwise intact."""
+    if ext == ".py":
+        span = py_header_span(content)
+        if span is None:
+            return None
+        open_idx, close_idx = span
+        bases = py_positional_bases(content[open_idx + 1:close_idx])
+        if len(bases) < 2:
+            return None
+        return content[:open_idx + 1] + bases[-1] + content[close_idx:]
     entry = MUTATORS.get(ext)
     if entry is None:
         return None
