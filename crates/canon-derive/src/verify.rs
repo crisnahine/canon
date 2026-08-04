@@ -374,6 +374,11 @@ const MIXIN_PREFIX: &str = "Types here include ";
 // strip from what follows the prefix instead of finding none and returning
 // `None` for every file.
 const CONTRACT_PREFIX: &str = "Types here implement ";
+// A strict prefix of `FAMILY_PREFIX`. Safe only because `backticked` requires
+// a backtick immediately after whatever it split on, so the family statement's
+// `a ` stops it; see `no_statement_parses_under_another_familys_prefix`.
+const BASE_PREFIX: &str = "Types here inherit from ";
+const ENTRYPOINT_PREFIX: &str = "That public method is named ";
 
 /// "Views here are named `*.html.erb`."
 ///
@@ -729,7 +734,7 @@ fn check_shape(
     // A refusal is gated, because the rule was derived over the files with one
     // public method and says nothing about the rest.
     let entrypoint_applies = strictness == Strictness::Advisory || t.public_arity() == 1;
-    if let Some(expected) = backticked(&convention.statement, "That public method is named ")
+    if let Some(expected) = backticked(&convention.statement, ENTRYPOINT_PREFIX)
         && entrypoint_applies
         && !t.public_methods.is_empty()
         && !t.public_methods.contains(&expected)
@@ -753,7 +758,7 @@ fn check_shape(
         ));
     }
 
-    if let Some(expected) = backticked(&convention.statement, "Types here inherit from ") {
+    if let Some(expected) = backticked(&convention.statement, BASE_PREFIX) {
         {
             // A type may declare several contracts, or embed several types, and
             // which one landed in `superclass` is decided by source order for
@@ -1511,14 +1516,14 @@ mod tests {
 
     #[test]
     fn the_families_added_for_templates_and_modules_can_never_refuse_a_write() {
-        // All five are advisory by construction: none of their id prefixes is
-        // in the enforceable set, and `blocking_violations` recomputes the
-        // grade from the id rather than trusting the stored decision. Pinned
-        // here because renaming one under `naming.` or `shape.base` would
-        // silently promote it — `shape.family` in particular has to keep its
-        // id spelled that way rather than `shape.base-family`, or
-        // `enforcement_for`'s `starts_with("shape.base")` check would catch
-        // it too.
+        // Every one of them is advisory by construction: none of their id
+        // prefixes is in the enforceable set, and `blocking_violations`
+        // recomputes the grade from the id rather than trusting the stored
+        // decision. Pinned here because renaming one under `naming.` or
+        // `shape.base` would silently promote it — `shape.family` in
+        // particular has to keep its id spelled that way rather than
+        // `shape.base-family`, or `enforcement_for`'s
+        // `starts_with("shape.base")` check would catch it too.
         let settings = canon_core::Settings::default();
         for (id, statement, scope) in [
             (
@@ -1546,12 +1551,108 @@ mod tests {
                 "Types here inherit from a `*BaseController`",
                 Scope::DirExt("app/controllers".into(), "rb".into()),
             ),
+            (
+                "shape.annotation.src.orders.ts",
+                "Files here carry `@Controller`",
+                Scope::DirExt("src/orders".into(), "ts".into()),
+            ),
+            (
+                "shape.mixin.app.workers.rb",
+                "Types here include `Sidekiq::Worker`",
+                Scope::DirExt("app/workers".into(), "rb".into()),
+            ),
+            (
+                "shape.contract.app.Jobs.php",
+                "Types here implement `ShouldQueue`",
+                Scope::DirExt("app/Jobs".into(), "php".into()),
+            ),
         ] {
             let rule = blocking(id, statement, scope);
             assert_eq!(
                 rule.enforcement_now(&settings),
                 Enforcement::Advisory,
                 "{id} was graded enforceable at total agreement"
+            );
+        }
+    }
+
+    /// Every statement format in the vocabulary, paired with the prefix its
+    /// check splits it on.
+    ///
+    /// `ANNOTATION_PREFIX` carries its own opening backtick and is parsed
+    /// with `strip_prefix` rather than with [`backticked`], so it is listed
+    /// for its statement and skipped when the assertion is about the prefix.
+    const VOCABULARY: &[(&str, &str)] = &[
+        (BASE_PREFIX, "Types here inherit from `ApplicationService`"),
+        (FAMILY_PREFIX, "Types here inherit from a `*BaseController`"),
+        (MIXIN_PREFIX, "Types here include `Sidekiq::Worker`"),
+        (CONTRACT_PREFIX, "Types here implement `ShouldQueue`"),
+        (ENTRYPOINT_PREFIX, "That public method is named `call`"),
+        (IMPORT_PREFIX, "Files here import from `src/config`"),
+        (MACRO_PREFIX, "Files here use `defineProps`"),
+        (NAMESPACE_PREFIX, "Files here declare namespace `App\\Services`"),
+        (FORMAT_PREFIX, "Files here are named `*.html.erb`"),
+        (SUFFIX_PREFIX, "Test files are named `*_spec.rb`"),
+        (ANNOTATION_PREFIX, "Files here carry `@Injectable`"),
+    ];
+
+    /// The statements that name nothing in backticks. They still have to stay
+    /// out of every prefix's way, and two of them are the reason the guard is
+    /// needed: `Files here use named exports` sits under `MACRO_PREFIX`, and
+    /// `Files here are named in snake_case` under `FORMAT_PREFIX`.
+    const UNBACKTICKED: &[&str] = &[
+        "Files here export a default",
+        "Files here use named exports",
+        "Files here are named in snake_case",
+        "Types here expose exactly 1 public method",
+        "Files here export exactly 1 function",
+        "Files here call `Ledger`",
+        "Every file here has a test of the same name",
+    ];
+
+    #[test]
+    fn no_statement_parses_under_another_familys_prefix() {
+        // `Types here inherit from ` is a strict prefix of `Types here
+        // inherit from a `, and `Files here use ` of `Files here use named
+        // exports`. Both are safe only because `backticked` requires a
+        // backtick immediately after the prefix it split on, and that one
+        // character is the entire separation between correct behaviour and a
+        // rule that derives, injects and is never checked — a failure that
+        // shipped three times on this branch, once per prefix added, each
+        // time with nothing to say so.
+        for (i, (_, statement)) in VOCABULARY.iter().enumerate() {
+            for (j, (prefix, _)) in VOCABULARY.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert_eq!(
+                    backticked(statement, prefix),
+                    None,
+                    "`{statement}` parses under another family's prefix `{prefix}`"
+                );
+            }
+            for other in UNBACKTICKED {
+                assert_eq!(
+                    backticked(other, VOCABULARY[i].0),
+                    None,
+                    "`{other}` parses under `{}`",
+                    VOCABULARY[i].0
+                );
+            }
+        }
+        // And each family still parses its own, or the guard above is
+        // satisfied by a check that stopped working altogether.
+        for (prefix, statement) in VOCABULARY {
+            if *prefix == ANNOTATION_PREFIX {
+                assert_eq!(
+                    statement.strip_prefix(ANNOTATION_PREFIX).and_then(|r| r.strip_suffix('`')),
+                    Some("Injectable")
+                );
+                continue;
+            }
+            assert!(
+                backticked(statement, prefix).is_some(),
+                "`{prefix}` no longer finds the name in `{statement}`"
             );
         }
     }
