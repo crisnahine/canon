@@ -94,7 +94,18 @@ pub struct FileEntry {
 /// half life computed from either number is close to inert, and exemplar
 /// selection falls through to whichever path sorts first. A file with a
 /// commit time uses it in place of its mtime; a file with none — untracked,
-/// or git unavailable — keeps its mtime, which is then the honest answer.
+/// git unavailable, or older than a capped walk's window — keeps its mtime,
+/// clamped at the newest commit time this call did find.
+///
+/// The clamp is the fix for a capped walk specifically. `git::recent_commit_times`
+/// bounds how much history it reads, so a file last touched before that
+/// window has no entry here at all and falls back to its mtime — on a fresh
+/// clone, the moment of the clone, later than every commit in `commit_times`
+/// including the newest one. Unclamped, that file would sort as the newest
+/// thing in the directory and win a place in `duplicates_against_siblings`'s
+/// shortlist ahead of files git can actually show were touched recently. A
+/// full, uncapped walk has no such file in practice — every tracked file has
+/// at least one commit — so the clamp changes nothing there.
 // The map always comes from `git::commit_times`, built with the standard
 // hasher, so generalising the parameter over `BuildHasher` buys callers
 // nothing and only adds a type parameter to a public signature.
@@ -107,6 +118,7 @@ pub fn entries_for(
     commit_times: &HashMap<String, u64>,
 ) -> Vec<FileEntry> {
     let now = unix_now();
+    let newest_commit = commit_times.values().copied().max();
     let mut out: Vec<FileEntry> = rels
         .iter()
         .filter_map(|rel| {
@@ -119,6 +131,11 @@ pub fn entries_for(
             if let Some(&committed) = commit_times.get(rel) {
                 entry.modified_unix = committed;
                 entry.weight = recency_weight(now, committed, settings.recency_half_life_days);
+            } else if let Some(cap) = newest_commit
+                && entry.modified_unix > cap
+            {
+                entry.modified_unix = cap;
+                entry.weight = recency_weight(now, cap, settings.recency_half_life_days);
             }
             Some(entry)
         })
@@ -400,5 +417,37 @@ mod tests {
             entries_for(&root, &Settings::default(), &["a.rb".to_string()], &HashMap::new());
         assert_eq!(files.len(), 1);
         assert!(files[0].modified_unix > 0);
+    }
+
+    #[test]
+    fn a_file_outside_a_capped_commit_walk_does_not_outrank_the_newest_real_commit() {
+        // A capped commit-time walk finds nothing for a file older than its
+        // window, and that file keeps its filesystem mtime — on a fresh
+        // clone, the moment of the clone, which is later than every commit
+        // stamp in `commit_times` including the newest one. Left alone, a
+        // file git has no recent history for would sort as the newest thing
+        // in the repository, ahead of everything git actually knows was
+        // touched recently.
+        let root = fixture::build(
+            "walk-clamp-mtime",
+            &[("recent.rb", "class Recent; end\n"), ("outside_cap.rb", "class Old; end\n")],
+        );
+        let now = unix_now();
+        let mut times = HashMap::new();
+        // `outside_cap.rb` has no entry at all: the capped walk that produced
+        // `times` never reached its commit.
+        times.insert("recent.rb".to_string(), now - 400 * 86_400);
+        let settings = Settings::default();
+        let rels = vec!["recent.rb".to_string(), "outside_cap.rb".to_string()];
+        let files = entries_for(&root, &settings, &rels, &times);
+        let recent = files.iter().find(|f| f.rel == "recent.rb").expect("recent");
+        let outside = files.iter().find(|f| f.rel == "outside_cap.rb").expect("outside");
+        assert!(
+            outside.modified_unix <= recent.modified_unix,
+            "a file with no commit time outranked the newest commit the walk found: \
+             outside={}, recent={}",
+            outside.modified_unix,
+            recent.modified_unix
+        );
     }
 }
