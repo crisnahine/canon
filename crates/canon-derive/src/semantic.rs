@@ -1198,6 +1198,36 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_with_no_shared_suffix_states_no_family() {
+        // Six unrelated base classes with no common suffix at all is not a
+        // family with a low-confidence winner, it is a directory with no
+        // agreement, and the majority gate that already governs `base_class`
+        // has to withhold a rule here for the same reason it withholds one
+        // there — not invent one from whichever base happened to repeat once
+        // more than the others.
+        let mut files: Vec<(String, String)> = Vec::new();
+        for (i, base) in ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"]
+            .iter()
+            .enumerate()
+        {
+            files.push((
+                format!("app/controllers/c{i}_controller.rb"),
+                format!("class C{i}Controller < {base}\n  def index; end\nend\n"),
+            ));
+        }
+        let convs = derive_from("sem-family-no-agreement", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.family")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn family_of_reads_the_last_segment_of_every_separator_canon_writes() {
+        assert_eq!(family_of("Api::V1::BaseController"), "BaseController");
+        assert_eq!(family_of("App\\Http\\Controllers\\BaseController"), "BaseController");
+        assert_eq!(family_of("controllers.base.BaseController"), "BaseController");
+        assert_eq!(family_of("BaseController"), "BaseController");
+    }
+
+    #[test]
     fn an_annotation_only_a_minority_carries_is_not_a_convention() {
         let mut files =
             fixture::agreeing("src/x", "ts", 6, "export class A$N {\n  go(): void {}\n}\n");
