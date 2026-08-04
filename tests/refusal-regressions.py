@@ -415,6 +415,33 @@ d, _ = inject(root, data, "app/dashboard/bad-name.tsx", "export const X = () => 
 check("a real style violation is still refused", d)
 shutil.rmtree(root); shutil.rmtree(data)
 
+# --- round six: Go embeds are an unordered set, not an ordered base list ----
+# Six structs embedding `sync.Mutex` before `BaseService` derived "types here
+# inherit from `sync.Mutex`" at 6/6 and denied a struct embedding `BaseService`
+# alone. Which embed lands in `superclass` is an artefact of source order, the
+# same reason Rust and Python were already exempt.
+files = {f"internal/svc/s{i}.go":
+         "package svc\n\nimport \"sync\"\n\n"
+         f"type S{i} struct {{\n\tsync.Mutex\n\tBaseService\n\tname string\n}}\n\n"
+         f"func (s *S{i}) Run() {{}}\n"
+         for i in range(1, 7)}
+root, data = mk(files, "go-embeds")
+subset = ("package svc\n\ntype Plain struct {\n\tBaseService\n\tname string\n}\n\n"
+          "func (s *Plain) Run() {}\n")
+d, w = inject(root, data, "internal/svc/plain.go", subset)
+check("a Go struct embedding a different subset is not refused", not d, w[:150])
+out = subprocess.run([BIN,"explain","internal/svc/"], cwd=root, capture_output=True, text=True,
+                     env={**os.environ,"CANON_DATA_DIR":data}).stdout
+base = out.split("shape.base")[1].split("\n\n")[0] if "shape.base" in out else ""
+check("the Go base rule survives as advice rather than vanishing",
+      "Advisory" in base and "Blocking" not in base, base[:150])
+odd = ("package svc\n\ntype Odd struct {\n\tSomethingElse\n\tname string\n}\n\n"
+       "func (s *Odd) Run() {}\n")
+liveness = verify(root, data, "internal/svc/odd.go", odd)
+check("the Go advisory still reports a base mismatch for an unrelated embed",
+      "inherits from" in liveness, liveness[:150])
+shutil.rmtree(root); shutil.rmtree(data)
+
 ok = sum(1 for _, o, _ in R if o)
 for n, o, d in R:
     if not o: print(f"  FAIL {n}\n       {d}")

@@ -225,12 +225,14 @@ pub fn enforcement_for(id: &str, confidence: Confidence, settings: &Settings) ->
     // A base type read from a language that allows several is not a base type,
     // it is whichever one the author wrote first. Rust has a set of traits a
     // type opts into one at a time; Python has a positional base list whose
-    // frameworks put mixins at the front and the concrete parent at the back.
-    // Both are recorded as the closest analogue and stated as advice, which is
-    // honest; refusing on either is not.
+    // frameworks put mixins at the front and the concrete parent at the back;
+    // Go embeds an unordered set of fields, so `sync.Mutex` beside a real base
+    // is composition and either may come first. All three are recorded as the
+    // closest analogue and stated as advice, which is honest; refusing on any
+    // of them is not.
     // The id ends in the extension the rule was derived for; canon builds it,
     // and it is always lowercase.
-    if id.starts_with("shape.base") && matches!(id.rsplit('.').next(), Some("rs" | "py")) {
+    if id.starts_with("shape.base") && matches!(id.rsplit('.').next(), Some("rs" | "py" | "go")) {
         return Enforcement::Advisory;
     }
     if settings.enforce
@@ -415,5 +417,17 @@ mod tests {
             enforcement_for("shape.base.app.services.rb", total, &settings),
             Enforcement::Blocking
         );
+    }
+
+    #[test]
+    fn a_go_base_rule_never_refuses_a_write() {
+        // Go's embedded fields are an unordered set, so which one is read as
+        // the base is decided by source order. Six structs embedding
+        // `sync.Mutex` before `BaseService` derived "types here inherit from
+        // `sync.Mutex`" at 6/6, and a struct embedding `BaseService` alone was
+        // denied.
+        let total = Confidence::derive(6, 6).expect("total agreement");
+        let settings = Settings::default();
+        assert_eq!(enforcement_for("shape.base.svc.go", total, &settings), Enforcement::Advisory);
     }
 }
