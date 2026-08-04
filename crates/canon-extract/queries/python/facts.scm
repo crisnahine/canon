@@ -24,3 +24,11 @@
 ; from a.b import c
 (import_from_statement
   module_name: (dotted_name) @import)
+
+; @property / @pytest.fixture / @router.get("/x")
+(decorator
+  [
+    (identifier) @annotation
+    (attribute) @annotation
+    (call function: [(identifier) (attribute)] @annotation)
+  ])

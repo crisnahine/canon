@@ -21,3 +21,7 @@
 
 (namespace_use_clause
   (qualified_name) @import)
+
+; #[Route('/x')] / #[ORM\Entity]
+(attribute
+  [(name) (qualified_name)] @annotation)

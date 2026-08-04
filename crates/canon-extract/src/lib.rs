@@ -110,6 +110,22 @@ impl TypeFacts {
     }
 }
 
+/// One decorator, attribute or annotation, by the name it was written with.
+///
+/// The construct four of the six wired languages use to say what a file is.
+/// A `NestJS` service is a plain class with `@Injectable()` on it, a Symfony
+/// controller is a plain class with `#[Route]` on its methods, and a Rust DTO
+/// is a plain struct with a derive list. None of those touch the base type,
+/// the public method count, or the export style, which is why a directory of
+/// them derived almost nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Annotation {
+    /// The path as written: `pytest.fixture`, `ORM\Entity`, `tokio::main`.
+    /// A Rust derive is one entry per trait, spelled `derive(Serialize)`,
+    /// because the list is the convention and the word `derive` is not.
+    pub name: String,
+}
+
 /// Everything one file contributes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFacts {
@@ -142,6 +158,13 @@ pub struct FileFacts {
     /// which is a convention a team really holds and no other fact here can
     /// express.
     pub namespace: Option<String>,
+    /// Decorators, attributes and annotations found anywhere in the file.
+    ///
+    /// Flat rather than attached to the declaration they annotate: the
+    /// convention a directory holds is which annotations appear in a file of
+    /// this kind, and resolving each one to its target costs a second pass for
+    /// a distinction no rule currently makes.
+    pub annotations: Vec<Annotation>,
 }
 
 impl FileFacts {
@@ -159,6 +182,7 @@ impl FileFacts {
             // files a default-export rule is derived from.
             && !self.default_export
             && self.namespace.is_none()
+            && self.annotations.is_empty()
     }
 }
 
@@ -269,6 +293,7 @@ fn extract_inner(
         let found = query::run(language, &tree, source);
         facts.calls = found.calls;
         facts.raises = found.raises;
+        facts.annotations = found.annotations;
         // The query is the better import extractor where it has one: it reads
         // the field rather than the first string it finds. Where it has none,
         // the structural pass already filled these in.

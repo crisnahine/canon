@@ -31,6 +31,8 @@
 //! | `@call.receiver` | what it was called on, when written |
 //! | `@raise` | an exception type being raised or thrown |
 //! | `@import` | a module path being imported |
+//! | `@annotation` | a decorator, attribute or annotation name, as written |
+//! | `@annotation.derive` | one trait named inside a Rust `#[derive(...)]` list |
 //!
 //! A capture the vocabulary does not define is ignored rather than an error, so
 //! a query can carry a helper capture for a predicate without the reader here
@@ -41,7 +43,7 @@ use std::sync::{Mutex, OnceLock};
 
 use tree_sitter::{Query, QueryCursor, StreamingIterator as _};
 
-use crate::Language;
+use crate::{Annotation, Language};
 
 /// One call site.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -73,6 +75,8 @@ pub(crate) struct QueryFacts {
     pub(crate) raises: Vec<String>,
     /// Imported module paths, as written.
     pub(crate) imports: Vec<String>,
+    /// Decorators, attributes and annotations, in source order.
+    pub(crate) annotations: Vec<Annotation>,
 }
 
 /// The query source for a language, or `None` when it has none yet.
@@ -164,6 +168,14 @@ pub(crate) fn run(language: Language, tree: &tree_sitter::Tree, source: &str) ->
         }
         if let Some(path) = index_of("import").and_then(&text) {
             facts.imports.push(crate::util::unquote(&path));
+        }
+        if let Some(name) = index_of("annotation").and_then(&text) {
+            facts.annotations.push(Annotation { name });
+        }
+        // A derive list is the convention; the word `derive` is not, so each
+        // trait becomes its own annotation and the bare attribute is dropped.
+        if let Some(t) = index_of("annotation.derive").and_then(&text) {
+            facts.annotations.push(Annotation { name: format!("derive({t})") });
         }
     }
     facts
@@ -266,6 +278,53 @@ mod tests {
 
         let py = facts(Language::Python, "import json\n");
         assert!(py.imports.iter().any(|i| i == "json"), "got {:?}", py.imports);
+    }
+
+    #[test]
+    fn annotations_are_captured_per_language() {
+        let cases = [
+            (Language::Python, "@pytest.fixture\ndef svc():\n    return 1\n", "pytest.fixture"),
+            (
+                Language::Python,
+                "@router.get(\"/x\")\nasync def go():\n    return 1\n",
+                "router.get",
+            ),
+            (Language::TypeScript, "@Injectable()\nexport class S {}\n", "Injectable"),
+            (Language::Php, "<?php\n#[Route('/x')]\nclass C {}\n", "Route"),
+            (Language::Rust, "#[tokio::main]\nasync fn main() {}\n", "tokio::main"),
+        ];
+        for (lang, src, wanted) in cases {
+            let got = facts(lang, src);
+            assert!(
+                got.annotations.iter().any(|a| a.name == wanted),
+                "{} did not yield `{wanted}`: {:?}",
+                lang.name(),
+                got.annotations
+            );
+        }
+    }
+
+    #[test]
+    fn a_rust_derive_is_one_annotation_per_trait() {
+        // `#[derive]` alone is true of almost every Rust file and says nothing.
+        // Which traits are derived is the convention a directory actually holds,
+        // so the bare word must not show up as an annotation of its own.
+        let got = facts(Language::Rust, "#[derive(Debug, Serialize)]\npub struct T;\n");
+        let names: Vec<&str> = got.annotations.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"derive(Debug)"), "got {names:?}");
+        assert!(names.contains(&"derive(Serialize)"), "got {names:?}");
+        assert!(!names.contains(&"derive"), "the bare word leaked through: {names:?}");
+    }
+
+    #[test]
+    fn a_typescript_method_decorator_is_captured_despite_living_on_class_body() {
+        // `method_definition` has no `decorator` field in this grammar; only
+        // `class_body` does. A query anchored to the method the way JavaScript's
+        // is would compile and silently match nothing here.
+        let got =
+            facts(Language::TypeScript, "@Controller('x')\nclass C {\n  @Get()\n  list() {}\n}\n");
+        let names: Vec<&str> = got.annotations.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"Get"), "got {names:?}");
     }
 
     #[test]

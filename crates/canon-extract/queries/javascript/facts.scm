@@ -30,3 +30,11 @@
   function: (identifier) @_require
   arguments: (arguments . (string) @import)
   (#eq? @_require "require"))
+
+; @Injectable() / @Controller('x') on a class, a method or a field
+(decorator
+  [
+    (identifier) @annotation
+    (member_expression) @annotation
+    (call_expression function: [(identifier) (member_expression)] @annotation)
+  ])

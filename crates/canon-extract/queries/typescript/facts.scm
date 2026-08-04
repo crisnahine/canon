@@ -34,3 +34,17 @@
   function: (identifier) @_require
   arguments: (arguments . (string) @import)
   (#eq? @_require "require"))
+
+; @Injectable() / @Controller('x') / @Get() / @Body()
+;
+; Matched by the decorator node itself rather than anchored to what it
+; decorates: `method_definition` carries no `decorator` field in this
+; grammar, only `class_body`, `public_field_definition` and
+; `required_parameter` do, so anchoring the way JavaScript does would compile
+; and match nothing on a method.
+(decorator
+  [
+    (identifier) @annotation
+    (member_expression) @annotation
+    (call_expression function: [(identifier) (member_expression)] @annotation)
+  ])
