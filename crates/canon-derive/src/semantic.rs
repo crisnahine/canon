@@ -440,7 +440,17 @@ fn base_family(
 /// namespaces of one family, and the namespace is exactly what differs.
 /// Handles every separator canon's languages spell a qualified name with —
 /// `::`, `\` and `.` — and a bare name with none of them is returned whole.
+///
+/// A call expression is returned whole too, because it is not a qualified
+/// name at all: `Struct.new(:street, :city)` builds a distinct anonymous type
+/// per argument list, which is why the extractor keeps it whole rather than
+/// truncating it at the `(`. Split on its separators it yields the family
+/// `city)` — a suffix no type ends with, and one two files with different
+/// argument lists could never share.
 pub(crate) fn family_of(base: &str) -> String {
+    if base.contains('(') {
+        return base.to_string();
+    }
     base.rsplit([':', '\\', '.']).next().unwrap_or(base).to_string()
 }
 
@@ -1424,6 +1434,17 @@ mod tests {
         assert_eq!(family_of("App\\Http\\Controllers\\BaseController"), "BaseController");
         assert_eq!(family_of("controllers.base.BaseController"), "BaseController");
         assert_eq!(family_of("BaseController"), "BaseController");
+    }
+
+    #[test]
+    fn a_call_expression_base_keeps_the_shape_the_extractor_gave_it() {
+        // The extractor deliberately keeps a call-expression base whole,
+        // because each argument list builds a different anonymous type. This
+        // split it again at the last separator it could find, so
+        // `Struct.new(:street, :city)` came out as the family `city)`.
+        assert_eq!(family_of("Struct.new(:street, :city)"), "Struct.new(:street, :city)");
+        assert_eq!(family_of("Data.define(x: Integer)"), "Data.define(x: Integer)");
+        assert_eq!(family_of("namedtuple('Point', ['x', 'y'])"), "namedtuple('Point', ['x', 'y'])");
     }
 
     #[test]

@@ -108,11 +108,25 @@ pub(crate) fn unquote(raw: &str) -> String {
 /// Truncating at the `(` would merge two files that genuinely subclass
 /// different, unrelated parents into one false rule.
 ///
+/// And only where the delimiter is the type's own. Inside a call's argument
+/// list it belongs to an argument: `class Point(namedtuple('Point', ['x',
+/// 'y']))` is a Python idiom, and cutting at that `[` names the base
+/// `namedtuple('Point',`.
+///
 /// Applied in the extractor so deriving and checking read the same value
 /// without either knowing the rule exists.
 #[must_use]
 pub(crate) fn bare_type(raw: &str) -> String {
-    raw.split(['[', '<']).next().unwrap_or(raw).trim().to_string()
+    let mut depth = 0usize;
+    for (at, ch) in raw.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '[' | '<' if depth == 0 => return raw.get(..at).unwrap_or(raw).trim().to_string(),
+            _ => {}
+        }
+    }
+    raw.trim().to_string()
 }
 
 #[cfg(test)]
@@ -188,5 +202,18 @@ mod tests {
         // argument list; stripping at `(` the way `[` and `<` are stripped
         // would merge two files that subclass different, unrelated parents.
         assert_eq!(bare_type("Struct.new(:street, :city)"), "Struct.new(:street, :city)");
+    }
+
+    #[test]
+    fn a_delimiter_inside_a_call_argument_list_is_not_a_parameter_list() {
+        // `class Point(namedtuple('Point', ['x', 'y']))` is how Python spelled
+        // a record before dataclasses, and the `[` opens a list literal among
+        // the call's arguments rather than the type's parameters. Cut there,
+        // the base a statement names is `namedtuple('Point',`.
+        assert_eq!(bare_type("namedtuple('Point', ['x', 'y'])"), "namedtuple('Point', ['x', 'y'])");
+        assert_eq!(bare_type("Generic(Mapping[str, int])"), "Generic(Mapping[str, int])");
+        // And the delimiters that are a parameter list are still stripped.
+        assert_eq!(bare_type("Base<Order>"), "Base");
+        assert_eq!(bare_type("Migration[7.2]"), "Migration");
     }
 }
