@@ -23,7 +23,12 @@ use serde::{Deserialize, Serialize};
 /// versions refuse to derive. A `kebab-case` rule pinned by a vendored
 /// `jquery-3.4.1.min.js` was graded `Blocking` from the stored snapshot and
 /// went on refusing writes after the release that stopped deriving it.
-pub const SNAPSHOT_VERSION: u32 = 15;
+pub const SNAPSHOT_VERSION: u32 = 16;
+// 16: a React hook (`useOnboarding`) and Next.js's hyphenated App Router
+//     boundaries (`not-found`, `global-error`) no longer count toward a
+//     naming rule. A v15 snapshot holds rules derived while those names still
+//     voted, including ones a framework-mandated name silenced entirely or
+//     tipped into disagreement.
 // 15: a directory is counted over its own files as well as over its whole
 //     subtree, and the grouping now reaches eight directories deep instead of
 //     four. A v14 snapshot has no rule for a directory a subdirectory of

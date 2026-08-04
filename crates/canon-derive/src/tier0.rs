@@ -277,7 +277,7 @@ const DATA_EXTENSIONS: &[&str] = &[
 fn nameable(entry: &FileEntry) -> bool {
     let root = naming::name_root(&entry.stem);
     !root.is_empty()
-        && !is_role_marked(root)
+        && !is_role_marked(&entry.stem, &entry.ext)
         && !ASSET_EXTENSIONS.contains(&entry.ext.as_str())
         && !CONVENTIONAL_NAMES.contains(&entry.stem.to_ascii_lowercase().as_str())
 }
@@ -298,14 +298,79 @@ fn nameable(entry: &FileEntry) -> bool {
 ///
 /// Shipped first for a leading underscore alone, which fixed a Rails view tree
 /// and left every file-based router refusing its own route files.
-fn is_role_marked(root: &str) -> bool {
+///
+/// A React hook is the same defect in a different shape: `useOnboarding` is
+/// valid camelCase, so it is inside the style system rather than outside it,
+/// and slipped through until this grew a third test for it. Next.js's
+/// `not-found.tsx` and `global-error.tsx` are a fourth: valid kebab-case, and
+/// the App Router calls them by that exact name. See
+/// [`is_framework_mandated_prefix`] and [`is_framework_mandated_name`].
+fn is_role_marked(stem: &str, ext: &str) -> bool {
+    let root = naming::name_root(stem);
     // A bare acronym belongs here for the same reason and was left out of it:
     // the check stopped treating `FAQ` as a violation without the derivation
     // stopping counting it, so one `docs/FAQ.md` in a directory of six
     // `kebab-case` files silenced the naming rule for every `.md` in the
     // repository. Deriving and checking have to agree on which names the style
     // system reaches.
-    naming::outside_the_style_system(root) || naming::is_bare_acronym(root)
+    naming::outside_the_style_system(root)
+        || naming::is_bare_acronym(root)
+        || is_framework_mandated_prefix(root, ext)
+        || is_framework_mandated_name(stem, ext)
+}
+
+/// The ECMA-family extensions: the only ones a JavaScript framework's own
+/// naming rules can reach. A Python `useThing.py` or a Ruby `not-found.rb` is
+/// not a name any framework chose.
+///
+/// The same grouping [`canon_extract::lang`] already draws around "can export
+/// a default" — JS, JSX, TS and TSX, plus the `mjs`/`cjs`/`mts`/`cts`
+/// siblings their providers list — reused here rather than a second list that
+/// could drift from it.
+fn is_ecma_family(ext: &str) -> bool {
+    canon_extract::lang::from_extension(ext)
+        .is_some_and(|l| canon_extract::lang::provider(l).default_exports)
+}
+
+/// Whether a framework's own rules, not the team's, chose this prefix.
+///
+/// React's Rules of Hooks require a function whose name begins with `use`
+/// followed by an uppercase letter — the `ESLint` rule that enforces them
+/// keys on exactly that shape — so `useOnboarding` cannot be renamed to
+/// satisfy a directory's `PascalCase` rule without breaking the hook.
+/// `user_session` is not a hook: the character after `use` is lowercase, and
+/// there is no author choice to overrule.
+///
+/// A directory that is entirely `useX` files — `src/hooks/**` — excludes
+/// every member and derives no naming rule at all, which is the right answer
+/// rather than a gap: the framework decided the shape, so there is no team
+/// convention left to state.
+fn is_framework_mandated_prefix(root: &str, ext: &str) -> bool {
+    is_ecma_family(ext)
+        && root.strip_prefix("use").is_some_and(|rest| rest.starts_with(char::is_uppercase))
+}
+
+/// Next.js App Router filenames a route boundary is called by, literally.
+///
+/// Every other special file in the same set — `page`, `layout`, `loading`,
+/// `error`, `template`, `default`, `route` — is a single word, and a single
+/// word is already exempt: [`naming::is_discriminating`] never lets a
+/// one-word name break a style rule, so counting it as evidence dilutes a
+/// sample without ever getting it refused. These two are the only ones with a
+/// hyphen, which reads as an ordinary two-word kebab-case name instead of a
+/// name nothing chose, and a `PascalCase` component directory refused both.
+const NEXTJS_HYPHENATED_SPECIALS: &[&str] = &["not-found", "global-error"];
+
+/// Whether a framework's own rules, not the team's, chose this exact name.
+///
+/// Matched against the whole stem, not the root [`is_framework_mandated_prefix`]
+/// reads: the App Router's file is always exactly `not-found.tsx`, with no
+/// qualifier after it. `NestJS` ships `not-found.exception.ts` for
+/// `NotFoundException`, an ordinary kebab-case name that happens to share the
+/// same first segment — matching on the root alone excluded it from a
+/// directory that has no App Router and nothing reserving the name.
+fn is_framework_mandated_name(stem: &str, ext: &str) -> bool {
+    is_ecma_family(ext) && NEXTJS_HYPHENATED_SPECIALS.contains(&stem)
 }
 
 /// Whether a file is the kind of thing that has a test.
@@ -331,7 +396,7 @@ pub(crate) fn counts_toward_naming(rel: &str) -> bool {
     let ext = ext.to_ascii_lowercase();
     let root = naming::name_root(stem);
     !root.is_empty()
-        && !is_role_marked(root)
+        && !is_role_marked(stem, &ext)
         && !ASSET_EXTENSIONS.contains(&ext.as_str())
         && !CONVENTIONAL_NAMES.contains(&stem.to_ascii_lowercase().as_str())
         && !is_test_path(rel)
@@ -1104,6 +1169,84 @@ mod tests {
         assert!(!matches_test_glob("charge_card_test.py", "test_*.py"));
         // The wildcard has to stand for something.
         assert!(!matches_test_glob("test_.py", "test_*.py"));
+    }
+
+    #[test]
+    fn a_hook_name_does_not_silence_a_pascal_case_directory() {
+        // React requires the `use` prefix on a hook, and the linter that
+        // enforces the Rules of Hooks keys on exactly that shape. Renaming
+        // `useOnboarding.tsx` to satisfy a PascalCase directory would break
+        // the hook, so the file cannot vote and cannot be refused by the
+        // rule the other five derive.
+        let convs = derive_from(
+            "t0-hook-pascal",
+            &[
+                ("src/components/EmailState.tsx", "x"),
+                ("src/components/StepInitial.tsx", "x"),
+                ("src/components/StepNew.tsx", "x"),
+                ("src/components/StepPassword.tsx", "x"),
+                ("src/components/StepSuccess.tsx", "x"),
+                ("src/components/useOnboarding.tsx", "x"),
+            ],
+        );
+        assert!(statements(&convs).contains("PascalCase"), "got {}", statements(&convs));
+        assert!(counts_toward_naming("src/components/EmailState.tsx"));
+        assert!(!counts_toward_naming("src/components/useOnboarding.tsx"));
+    }
+
+    #[test]
+    fn a_hook_name_is_gated_on_the_use_prefix_shape_and_ecma_extensions() {
+        // The character after `use` has to be uppercase, or this is an
+        // ordinary word that happens to start with the same three letters.
+        assert!(counts_toward_naming("app/models/user_session.rb"));
+        // And the rule this shape exists for is React's; nothing mandates it
+        // outside the ECMA-family extensions.
+        assert!(counts_toward_naming("scripts/useThing.py"));
+        assert!(!counts_toward_naming("src/hooks/useOnboarding.ts"));
+        assert!(!counts_toward_naming("src/hooks/useOnboarding.jsx"));
+        assert!(!counts_toward_naming("src/hooks/useOnboarding.js"));
+    }
+
+    #[test]
+    fn a_next_js_boundary_file_does_not_silence_a_pascal_case_app_router_tree() {
+        // `not-found.tsx` and `global-error.tsx` are the App Router's own
+        // names for a route boundary, called by React under that exact
+        // string. Every other special file in the same set — `page`,
+        // `layout`, `loading`, `error`, `template`, `default`, `route` — is a
+        // single word and already exempt: `is_discriminating` never lets a
+        // one-word name break a style rule. These two are the only ones with
+        // a hyphen, which makes them look like an ordinary kebab-case name
+        // instead of a name nothing chose.
+        let convs = derive_from(
+            "t0-nextjs-specials",
+            &[
+                ("app/dashboard/UserCard.tsx", "x"),
+                ("app/dashboard/OrderList.tsx", "x"),
+                ("app/dashboard/PayoutForm.tsx", "x"),
+                ("app/dashboard/LoginPanel.tsx", "x"),
+                ("app/dashboard/NavBar.tsx", "x"),
+                ("app/dashboard/not-found.tsx", "x"),
+                ("app/dashboard/global-error.tsx", "x"),
+            ],
+        );
+        assert!(statements(&convs).contains("PascalCase"), "got {}", statements(&convs));
+        assert!(!counts_toward_naming("app/dashboard/not-found.tsx"));
+        assert!(!counts_toward_naming("app/dashboard/global-error.tsx"));
+        // Single-word specials were never the problem; confirming they still
+        // are not is what tells the two above apart from a regression that
+        // excludes the whole set.
+        assert!(counts_toward_naming("app/dashboard/page.tsx"));
+    }
+
+    #[test]
+    fn a_qualified_name_that_merely_starts_with_a_special_word_still_counts() {
+        // NestJS ships `not-found.exception.ts` for `NotFoundException`, an
+        // ordinary kebab-case name with a qualifier, in a framework that has
+        // no App Router and no reserved boundary file. Matching on the root
+        // alone — the text before the first dot — read it as the same
+        // special Next.js calls by that exact, unqualified name.
+        assert!(counts_toward_naming("src/exceptions/not-found.exception.ts"));
+        assert!(counts_toward_naming("src/exceptions/global-error.handler.ts"));
     }
 
     #[test]

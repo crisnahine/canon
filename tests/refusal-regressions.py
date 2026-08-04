@@ -384,6 +384,37 @@ d, _ = inject(root, data, "app/services/odd_one.rb",
 check("a Ruby class with an unrelated base is still refused", d)
 shutil.rmtree(root); shutil.rmtree(data)
 
+# --- round five: a React hook is inside the style system, unlike a route file
+# `useOnboarding` is valid camelCase, so `outside_the_style_system` never
+# caught it; the framework mandates the `use` prefix, not the team, and the
+# file could not be renamed to satisfy a PascalCase directory's rule.
+files = {f"src/components/UniversalOnboarding/components/{n}.tsx":
+         f"export const {n} = () => null;\n"
+         for n in ["EmailState","StepInitial","StepNew","StepPassword","StepSuccess"]}
+root, data = mk(files, "react-hook")
+d, w = inject(root, data, "src/components/UniversalOnboarding/components/useOnboarding.tsx",
+  "export const useOnboarding = () => null;\n")
+check("a React hook is not refused in a PascalCase component directory", not d, w[:150])
+for rel in ["src/components/UniversalOnboarding/components/step-two.tsx",
+            "src/components/UniversalOnboarding/components/onboarding_helpers.tsx"]:
+    d, _ = inject(root, data, rel, "export const X = () => null;\n")
+    check(f"a genuinely mis-styled name is still refused: {os.path.basename(rel)}", d)
+shutil.rmtree(root); shutil.rmtree(data)
+
+# The same defect a second way: `not-found.tsx` and `global-error.tsx` are the
+# App Router's own names for a route boundary, and the only hyphenated members
+# of its special-file set, so they read as an ordinary two-word kebab-case
+# name in a PascalCase directory instead of a name nothing chose.
+files = {f"app/dashboard/{n}.tsx": f"export const {n} = () => null;\n"
+         for n in ["UserCard","OrderList","PayoutForm","LoginPanel","NavBar"]}
+root, data = mk(files, "app-router-specials")
+for rel in ["not-found", "global-error"]:
+    d, w = inject(root, data, f"app/dashboard/{rel}.tsx", "export default function P(){return null}\n")
+    check(f"App Router {rel}.tsx is not refused in a PascalCase directory", not d, w[:150])
+d, _ = inject(root, data, "app/dashboard/bad-name.tsx", "export const X = () => null;\n")
+check("a real style violation is still refused", d)
+shutil.rmtree(root); shutil.rmtree(data)
+
 ok = sum(1 for _, o, _ in R if o)
 for n, o, d in R:
     if not o: print(f"  FAIL {n}\n       {d}")
