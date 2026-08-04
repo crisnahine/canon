@@ -98,8 +98,9 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
     // The last positional base is the type the class is; anything before it is
     // a mixin, and a mixin is composition the type opts into rather than its
     // parent.
-    let superclass = bases.last().cloned();
-    let mixins: Vec<String> = bases.iter().take(bases.len().saturating_sub(1)).cloned().collect();
+    let named = without_markers(&bases);
+    let superclass = named.last().cloned();
+    let mixins: Vec<String> = named.iter().take(named.len().saturating_sub(1)).cloned().collect();
     let interfaces = Vec::new();
 
     let mut public_methods = Vec::new();
@@ -134,6 +135,36 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         interfaces,
         mixins,
     })
+}
+
+/// The positional bases that name a parent, markers dropped.
+///
+/// `Generic`, `Protocol` and `ABC` mark a capability rather than name a
+/// parent, and Python convention writes them last — exactly where the base is
+/// read from. Six files of `class Page(BaseModel, Generic[T])` derived "Types
+/// here inherit from `Generic`".
+///
+/// Not a preference between two spellings but agreement between them.
+/// `class C(Base, ABC)` and `class C(Base, metaclass=ABCMeta)` are one class,
+/// and the keyword form already reads as `Base` because the base list skips a
+/// keyword argument. `class C[T](Base)` is the same class as
+/// `class C(Base, Generic[T])` and already reads as `Base` too. Dropping the
+/// marker is what makes the legal spellings of one class derive one fact.
+///
+/// A marker that is the only base stays: `class BaseBlockOperation(ABC)` names
+/// one parent and a directory of them agrees on it, so dropping it would
+/// invent an absence rather than correct a misreading.
+fn without_markers(bases: &[String]) -> Vec<String> {
+    let named: Vec<String> = bases.iter().filter(|b| !is_marker(b)).cloned().collect();
+    if named.is_empty() { bases.to_vec() } else { named }
+}
+
+/// Whether a base marks a capability rather than naming a parent.
+///
+/// Read from the last dotted segment, because [`bare_base`] keeps the module a
+/// base was written with and `typing.Generic` is the same marker as `Generic`.
+fn is_marker(base: &str) -> bool {
+    matches!(base.rsplit('.').next().unwrap_or(base), "Generic" | "Protocol" | "ABC")
 }
 
 /// A base as written, minus its type parameters.
@@ -253,6 +284,53 @@ mod tests {
         assert_eq!(f.types[0].superclass.as_deref(), Some("BaseService"));
         assert!(f.types[0].interfaces.is_empty());
         assert!(f.types[0].mixins.is_empty());
+    }
+
+    #[test]
+    fn a_typing_marker_is_not_the_base_type() {
+        // Six files of this shape derived "Types here inherit from `Generic`".
+        // `Generic[T]` declares the class's type parameters; `BaseModel` is
+        // what the class is.
+        let f = f("class Page(BaseModel, Generic[T]):\n    def render(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("BaseModel"));
+        // And not restated as composition, or the mixin rule says the same
+        // wrong thing in another family.
+        assert!(f.types[0].mixins.is_empty(), "got {:?}", f.types[0].mixins);
+    }
+
+    #[test]
+    fn abc_and_protocol_are_markers_too() {
+        for (src, base) in [
+            ("class Op(BaseOperation, ABC):\n    def apply(self): pass\n", "BaseOperation"),
+            ("class Port(BasePort, Protocol):\n    def send(self): pass\n", "BasePort"),
+        ] {
+            let f = f(src);
+            assert_eq!(f.types[0].superclass.as_deref(), Some(base), "for {src}");
+            assert!(f.types[0].mixins.is_empty(), "for {src}");
+        }
+    }
+
+    #[test]
+    fn a_marker_is_recognised_through_the_module_it_is_written_with() {
+        let f = f("class Page(BaseModel, typing.Generic[T]):\n    def render(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("BaseModel"));
+    }
+
+    #[test]
+    fn a_marker_alone_is_still_what_the_class_declares() {
+        // Dropping it would invent an absence: this class names one base and
+        // a directory of them agrees on it.
+        let f = f("class BaseBlockOperation(ABC):\n    def apply(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("ABC"));
+    }
+
+    #[test]
+    fn a_marker_first_still_leaves_the_concrete_base_last() {
+        // Wagtail writes this. The marker skip must not disturb a list the
+        // positional reading already gets right.
+        let f = f("class BulkAction(ABC, FormView):\n    def get(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("FormView"));
+        assert!(f.types[0].mixins.is_empty(), "got {:?}", f.types[0].mixins);
     }
 
     #[test]

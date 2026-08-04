@@ -94,8 +94,13 @@ pub struct TypeFacts {
     /// check that only compared against that one refused a file for the order
     /// its `impl` blocks were written in.
     pub interfaces: Vec<String>,
-    /// The entries of `bases` that are not `superclass`, for a language where
-    /// that split is source order rather than a keyword.
+    /// The entries of `bases` that are not `superclass` and do name a parent,
+    /// for a language where that split is source order rather than a keyword.
+    ///
+    /// Python's `Generic`, `Protocol` and `ABC` are in `bases` and in neither
+    /// of the other two: they mark a capability rather than name a parent, and
+    /// calling one composition would restate the same misreading in the mixin
+    /// family.
     ///
     /// Composition a type opts into, not the type it is, which is why it lives
     /// apart from both `superclass` and `interfaces`: a Django view's leading

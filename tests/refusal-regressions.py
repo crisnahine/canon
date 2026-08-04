@@ -442,6 +442,43 @@ check("the Go advisory still reports a base mismatch for an unrelated embed",
       "inherits from" in liveness, liveness[:150])
 shutil.rmtree(root); shutil.rmtree(data)
 
+# --- a typing marker read as the base type ---------------------------------
+
+# The mirror of the Django case above. Python's frameworks order a base list
+# mixins-first, so the last entry is the type the class is; its typing markers
+# go last for the same reason, and the two conventions collide. Six files of
+# `class Page(BaseModel, Generic[T])` stated that types here inherit from
+# `Generic`. Advisory, so what is wrong is the sentence rather than a refusal.
+for marker, extra in [("Generic[T]", "from typing import Generic, TypeVar\n\nT = TypeVar('T')\n"),
+                      ("Protocol", "from typing import Protocol\n"),
+                      ("ABC", "from abc import ABC\n")]:
+    files = {f"app/schemas/p{i}.py":
+             f"from app.schemas.base import BaseModel\n{extra}\n\n"
+             f"class P{i}(BaseModel, {marker}):\n    def render(self):\n        return None\n"
+             for i in range(1, 7)}
+    root, data = mk(files, "py-marker")
+    out = subprocess.run([BIN, "explain", "app/schemas/"], cwd=root, capture_output=True, text=True,
+                         env={**os.environ, "CANON_DATA_DIR": data}).stdout
+    base = out.split("shape.base")[1].split("\n\n")[0] if "shape.base" in out else ""
+    check(f"a directory using {marker} states its real base, not the marker",
+          "`BaseModel`" in base, base[:150])
+    # A positive control: the marker must not resurface as composition either,
+    # or the mixin family states the same wrong thing in its own words.
+    check(f"{marker} is not restated as an included module",
+          "Types here include" not in out, out[:200])
+    # And the check has to agree with the statement, or the rule derives and
+    # never fires.
+    conforming = ("from app.schemas.base import BaseModel\n\n\n"
+                  "class Plain(BaseModel):\n    def render(self):\n        return None\n")
+    gate = verify(root, data, "app/schemas/plain.py", conforming)
+    check(f"a {marker}-free file on the real base reports no base mismatch",
+          "inherits from" not in gate, gate[:150])
+    odd = "class Odd(SomethingElse):\n    def render(self):\n        return None\n"
+    liveness = verify(root, data, "app/schemas/odd.py", odd)
+    check(f"the {marker} directory still reports a mismatch for an unrelated base",
+          "inherits from" in liveness, liveness[:150])
+    shutil.rmtree(root); shutil.rmtree(data)
+
 ok = sum(1 for _, o, _ in R if o)
 for n, o, d in R:
     if not o: print(f"  FAIL {n}\n       {d}")
