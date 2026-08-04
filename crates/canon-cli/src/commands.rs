@@ -25,9 +25,18 @@ use crate::{config, git, logging, paths};
 pub(crate) fn session_start(input: &HookInput) -> HookOutput {
     let root = input.root();
     let (settings, problem) = config::load_or_default(&root);
-    if let Some(e) = problem {
+    // Said to the user, not only to a log whose level defaults to off. The
+    // fallback is every default plus enforcement off, so a config that stops
+    // loading takes refusals and suppressions with it, and the previous
+    // behaviour was to do all of that in silence. A setting range can narrow
+    // between releases, which turns a file that loaded yesterday into this
+    // path; the one thing it must not be is invisible.
+    let unusable = problem.map(|e| {
         logging::warn(&format!("config unusable, running on defaults: {e}"));
-    }
+        format!(
+            "canon could not load .canon.toml and is running on defaults, with enforcement off, so nothing will refuse a write: {e}"
+        )
+    });
 
     // Housekeeping on the cold path: a snapshot for a repository that no
     // longer exists, and a touched-file list from a session that was killed
@@ -40,9 +49,16 @@ pub(crate) fn session_start(input: &HookInput) -> HookOutput {
     let snapshot = refresh(&root, &settings, false);
     if snapshot.conventions.is_empty() {
         logging::info("no conventions derived; staying quiet");
-        return HookOutput::silent();
+        return match unusable {
+            Some(said) => HookOutput::silent().with_system_message(said),
+            None => HookOutput::silent(),
+        };
     }
-    HookOutput::context(Event::SessionStart, manifest(&snapshot))
+    let out = HookOutput::context(Event::SessionStart, manifest(&snapshot));
+    match unusable {
+        Some(said) => out.with_system_message(said),
+        None => out,
+    }
 }
 
 /// State the same thing to a subagent.
@@ -427,7 +443,13 @@ pub(crate) fn explain(root: &Path, path: Option<&str>, id: Option<&str>) -> Stri
         .iter()
         .filter(|c| match (path, id) {
             (_, Some(wanted)) => c.id == wanted,
-            (Some(_), None) => relevant_to(&c.scope, &query, &c.evidence, names_file),
+            (Some(_), None) => relevant_to(
+                &c.scope,
+                &query,
+                &c.evidence,
+                names_file,
+                !names_file || canon_derive::offered_for_path(c, &query),
+            ),
             (None, None) => true,
         })
         .collect();
@@ -496,6 +518,7 @@ fn relevant_to(
     query: &str,
     evidence: &[canon_core::Evidence],
     names_file: bool,
+    speaks_here: bool,
 ) -> bool {
     let query = query.trim_end_matches('/');
     if query.is_empty() {
@@ -506,7 +529,12 @@ fn relevant_to(
     // the whole of issue #15, and it lands on someone who was just refused and
     // told to run this.
     if names_file {
-        return scope.matches(query);
+        // `speaks_here` carries the one filter a scope cannot express: a rule
+        // that speaks for its own directory and no other. Without it this
+        // surface named a namespace the injected block deliberately withholds
+        // and the checker refuses to judge on — on the page a reader is sent
+        // to after being told to run it.
+        return speaks_here && scope.matches(query);
     }
     match scope {
         canon_core::Scope::Repo => true,
@@ -1027,16 +1055,22 @@ mod tests {
         let other = Scope::DirExt("app/models".into(), "rb".into());
 
         // Asking about a directory shows the rules above and below it.
-        assert!(relevant_to(&mid, "app/services", &[], false));
-        assert!(relevant_to(&deep, "app/services", &[], false), "descendants are interesting");
-        assert!(relevant_to(&mid, "app/services/enrolments", &[], false), "ancestors govern it");
-        assert!(!relevant_to(&other, "app/services", &[], false), "siblings are not");
+        assert!(relevant_to(&mid, "app/services", &[], false, true));
+        assert!(
+            relevant_to(&deep, "app/services", &[], false, true),
+            "descendants are interesting"
+        );
+        assert!(
+            relevant_to(&mid, "app/services/enrolments", &[], false, true),
+            "ancestors govern it"
+        );
+        assert!(!relevant_to(&other, "app/services", &[], false, true), "siblings are not");
 
         // A trailing slash is how people type directories.
-        assert!(relevant_to(&mid, "app/services/", &[], false));
+        assert!(relevant_to(&mid, "app/services/", &[], false, true));
 
         // The repository-wide rule governs every directory.
-        assert!(relevant_to(&Scope::Repo, "app/services", &[], false));
+        assert!(relevant_to(&Scope::Repo, "app/services", &[], false, true));
 
         // An extension rule governs a directory only if it was counted over
         // something in it. Answering "yes, always" is how asking about a
@@ -1044,13 +1078,56 @@ mod tests {
         let ext = Scope::Ext("rb".into());
         let here = [ev("app/services/charge_card.rb")];
         let elsewhere = [ev("lib/tasks/backfill.rb")];
-        assert!(relevant_to(&ext, "app/services", &here, false));
-        assert!(!relevant_to(&ext, "app/services", &elsewhere, false));
-        assert!(!relevant_to(&ext, "app/services", &[], false));
+        assert!(relevant_to(&ext, "app/services", &here, false, true));
+        assert!(!relevant_to(&ext, "app/services", &elsewhere, false, true));
+        assert!(!relevant_to(&ext, "app/services", &[], false, true));
     }
 
     fn ev(rel: &str) -> canon_core::Evidence {
         canon_core::Evidence { rel: rel.to_string(), line: 0 }
+    }
+
+    fn rule(id: &str, scope: canon_core::Scope) -> canon_core::Convention {
+        canon_core::Convention {
+            id: id.into(),
+            statement: "Files here are named in snake_case".into(),
+            scope,
+            confidence: canon_core::Confidence::derive(9, 10).expect("valid"),
+            agreeing: 9,
+            total: 10,
+            exemplar: None,
+            evidence: vec![],
+            sample_roots: vec![],
+            enforcement: canon_core::Enforcement::Advisory,
+        }
+    }
+
+    #[test]
+    fn explain_withholds_from_a_file_exactly_what_injection_withholds() {
+        use canon_core::Scope;
+        // Someone stopped by a refusal runs this to find the rule that stopped
+        // them. Listing a rule the injected block withheld, and the checker
+        // refuses to judge on, sends them to a sentence that governs nothing.
+        let suffix = rule("tests.suffix.rb", Scope::Ext("rb".into()));
+        assert!(
+            !canon_derive::offered_for_path(&suffix, "app/services/charge_card.rb"),
+            "how tests are named is not about a file that is not a test"
+        );
+        assert!(canon_derive::offered_for_path(&suffix, "spec/services/charge_card_spec.rb"));
+
+        let parent = rule(
+            "shape.namespace.src.Services.Billing.php",
+            Scope::DirExt("src/Services/Billing".into(), "php".into()),
+        );
+        assert!(
+            !canon_derive::offered_for_path(&parent, "src/Services/Billing/Invoices/Void.php"),
+            "a namespace rule speaks for one directory"
+        );
+        assert!(canon_derive::offered_for_path(&parent, "src/Services/Billing/Charge.php"));
+
+        // Everything else a scope matches is still offered.
+        let naming = rule("naming.src.php", Scope::DirExt("src".into(), "php".into()));
+        assert!(canon_derive::offered_for_path(&naming, "src/Services/Billing/Invoices/Void.php"));
     }
 
     #[test]
@@ -1092,11 +1169,17 @@ mod tests {
         // this to find the rule that stopped them, and the whole snapshot is
         // not an answer.
         let rake = "lib/tasks/backfill.rake";
-        assert!(relevant_to(&Scope::Ext("rake".into()), rake, &[], true));
-        assert!(!relevant_to(&Scope::Ext("csv".into()), rake, &[ev("data/a.csv")], true));
-        assert!(!relevant_to(&Scope::DirExt("app".into(), "rb".into()), rake, &[], true));
-        assert!(relevant_to(&Scope::DirExt("lib/tasks".into(), "rake".into()), rake, &[], true));
-        assert!(relevant_to(&Scope::Repo, rake, &[], true));
+        assert!(relevant_to(&Scope::Ext("rake".into()), rake, &[], true, true));
+        assert!(!relevant_to(&Scope::Ext("csv".into()), rake, &[ev("data/a.csv")], true, true));
+        assert!(!relevant_to(&Scope::DirExt("app".into(), "rb".into()), rake, &[], true, true));
+        assert!(relevant_to(
+            &Scope::DirExt("lib/tasks".into(), "rake".into()),
+            rake,
+            &[],
+            true,
+            true
+        ));
+        assert!(relevant_to(&Scope::Repo, rake, &[], true, true));
     }
 
     #[test]
@@ -1104,7 +1187,7 @@ mod tests {
         use canon_core::Scope;
         let scope = Scope::DirExt("app/service".into(), "rb".into());
         assert!(
-            !relevant_to(&scope, "app/services", &[], false),
+            !relevant_to(&scope, "app/services", &[], false, true),
             "`service` must not capture `services`"
         );
     }

@@ -201,12 +201,33 @@ jobs:
           for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json; do
             python3 -c "import json,sys; json.load(open('$f'))" || exit 1
           done
-      - name: plugin version matches the workspace version
+      - name: every manifest version matches the workspace version
+        # marketplace.json used to be unchecked. Both manifests carried the
+        # same number, so they agreed by accident, and a release that bumped
+        # only plugin.json would have gone green with the marketplace still
+        # advertising the previous version.
         run: |
           crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           plugin=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])")
+          market=$(python3 -c "import json; print(json.load(open('.claude-plugin/marketplace.json'))['plugins'][0]['version'])")
           test "$crate" = "$plugin" || {
             echo "Cargo.toml says $crate, plugin.json says $plugin"
+            exit 1
+          }
+          test "$crate" = "$market" || {
+            echo "Cargo.toml says $crate, marketplace.json says $market"
+            exit 1
+          }
+      - name: the shim's fallback version matches too
+        # `bin/canon` reads the version out of Cargo.toml and falls back to a
+        # literal when that read fails. A stale literal downloads the previous
+        # release's binary from a URL built out of it, and the plugin runs a
+        # version it does not think it is running.
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          shim=$(sed -n 's/^: "${VERSION:=\(.*\)}"$/\1/p' bin/canon | head -1)
+          test "$crate" = "$shim" || {
+            echo "Cargo.toml says $crate, bin/canon falls back to $shim"
             exit 1
           }
       - name: every platform the shim can ask for is published

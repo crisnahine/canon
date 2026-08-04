@@ -46,6 +46,25 @@ pub use dup::{DuplicateHit, duplicates_against_siblings};
 pub use naming::Style;
 pub use render::render_block;
 pub use select::for_path;
+/// Whether `rel` is offered this rule, beyond the question its scope answers.
+///
+/// Two rules match a path and are still withheld from it: how tests are named
+/// is only about the file being written when that file *is* a test, and a rule
+/// that names one directory speaks for that directory alone.
+///
+/// Injection and `canon explain` both ask this, through this one function.
+/// Asked separately they drift, and the drift is silent: a page that lists a
+/// rule the injected block withheld sends someone looking for the rule that
+/// refused them to a sentence which governs nothing. The scope itself is not
+/// asked here, because both callers already filter on it and one of them means
+/// something looser by a directory query.
+#[must_use]
+pub fn offered_for_path(convention: &Convention, rel: &str) -> bool {
+    if convention.id.starts_with("tests.suffix") && !tier0::is_test_path(rel) {
+        return false;
+    }
+    speaks_for_this_directory(convention, rel)
+}
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot};
 pub use verify::{Violation, blocking_violations, missing_test, verify_source};
 pub use walk::{FileEntry, MAX_FILE_BYTES, entries_for, read_indexable, walk};
@@ -82,6 +101,16 @@ pub fn derive_from(
     conventions.extend(semantic::derive(&facts, settings));
     roll_up_agreeing_siblings(&mut conventions, settings);
     collapse_redundant(&mut conventions);
+    // Over the finished set, not inside the vote that produces each rule. A
+    // wide rule spans more files and so sits at lower agreement than the narrow
+    // rules inside it, and applying the floor during derivation killed the
+    // parent first: with no parent left to absorb them, every narrow child
+    // survived, and narrow children at total agreement are exactly what grades
+    // `Blocking`. Raising the floor to 1.00 multiplied the rules that may
+    // refuse a write by four. Filtering last is also the only place that
+    // catches a rolled-up rule, whose confidence is built from its children
+    // and never passed through the vote at all.
+    conventions.retain(|c| c.confidence.value() >= settings.confidence_floor);
     // Last, not first. A rule is derived at several scopes and the narrower
     // copies are removed by `collapse_redundant` because a wider one already
     // says it. Removing the wider one first left the narrower ones standing,
@@ -106,8 +135,13 @@ fn family(id: &str) -> &'static str {
         "shape.base",
         "shape.module-arity",
         "shape.collaborator",
+        "shape.export",
+        "shape.namespace",
+        "shape.import",
         "naming",
+        "format",
         "tests.suffix",
+        "tests.colocation",
     ];
     FAMILIES.iter().find(|f| id.starts_with(**f)).copied().unwrap_or("other")
 }
@@ -132,6 +166,9 @@ fn family(id: &str) -> &'static str {
 fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Settings) {
     use std::collections::HashMap;
 
+    /// A (parent directory, extension, statement) and the children holding it.
+    type Vote<'a> = ((String, String, String), Vec<&'a Convention>);
+
     // (parent directory, extension, statement) -> the children that hold it.
     let mut votes: HashMap<(String, String, String), Vec<&Convention>> = HashMap::new();
     // (parent, extension, family) -> the children that have an opinion of that
@@ -142,6 +179,14 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
         HashMap::new();
 
     for c in conventions.iter() {
+        // A rule that speaks for one directory cannot be stated at the parent
+        // by definition. Rolled up, a namespace shared by two subdirectories
+        // reappeared as a third rule naming the parent, which is the ancestor
+        // derivation `namespace_per_directory` exists to prevent — and it
+        // arrived with a statement no file in the parent had voted for.
+        if names_one_directory(c) {
+            continue;
+        }
         let dir = scope_dir(c);
         let ext = scope_ext(c);
         let Some((parent, _)) = dir.rsplit_once('/') else { continue };
@@ -153,7 +198,15 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
     }
 
     let mut rolled: Vec<Convention> = Vec::new();
-    for ((parent, ext, statement), holders) in votes {
+    // Both the outer order and each child list arrive from a `HashMap`, and
+    // everything below reads them: which child lends the rollup its id, which
+    // twelve files become its evidence, and how `sample_roots` is spelled.
+    // Left alone, an unchanged tree derived a rollup named after a different
+    // child each run, carrying a different twelve files.
+    let mut ordered: Vec<Vote<'_>> = votes.into_iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    for ((parent, ext, statement), mut holders) in ordered {
+        holders.sort_by(|a, b| a.id.cmp(&b.id));
         let Some(kind) = holders.first().map(|c| family(&c.id)) else { continue };
         let Some(all) = speakers.get(&(parent.clone(), ext.clone(), kind)) else { continue };
         // Two children is a pair, not a pattern.
@@ -180,7 +233,15 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
         let agreeing: usize = holders.iter().map(|c| c.agreeing).sum();
         let total: usize = holders.iter().map(|c| c.total).sum();
         let Some(confidence) = Confidence::derive(agreeing, total) else { continue };
-        let Some(widest) = holders.iter().max_by_key(|c| c.total) else { continue };
+        // Widest sample, then lowest id. The tie is common — sibling
+        // directories of equal size are the normal case — and left to
+        // `max_by_key` it resolved to whichever child the iteration happened
+        // to visit last, which renamed the rule between two runs.
+        let Some(widest) =
+            holders.iter().max_by(|a, b| a.total.cmp(&b.total).then_with(|| b.id.cmp(&a.id)))
+        else {
+            continue;
+        };
 
         rolled.push(Convention {
             id: format!("{}.rollup", widest.id),
@@ -214,15 +275,22 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
 /// happen to share a sentence each speak for their own files, and dropping
 /// either would leave those files with no rule at all.
 fn collapse_redundant(conventions: &mut Vec<Convention>) {
-    let keyed: Vec<(String, String, String, bool)> = conventions
+    struct Keyed {
+        statement: String,
+        ext: String,
+        dir: String,
+        rollup: bool,
+        /// Whether the rule speaks for its own directory and no other.
+        one_directory: bool,
+    }
+    let keyed: Vec<Keyed> = conventions
         .iter()
-        .map(|c| {
-            (
-                c.statement.clone(),
-                scope_ext(c),
-                scope_dir(c),
-                c.id.ends_with(canon_core::ROLLUP_SUFFIX),
-            )
+        .map(|c| Keyed {
+            statement: c.statement.clone(),
+            ext: scope_ext(c),
+            dir: scope_dir(c),
+            rollup: c.id.ends_with(canon_core::ROLLUP_SUFFIX),
+            one_directory: names_one_directory(c),
         })
         .collect();
 
@@ -235,15 +303,22 @@ fn collapse_redundant(conventions: &mut Vec<Convention>) {
     // to sibling directories that have not voted and never refuses anything.
     // Dropping the child moved a directory from enforced to advisory without
     // anything in the output saying so.
+    // Nor does an ancestor absorb a rule that speaks for one directory only.
+    // A namespace rule stated at `src/Legacy` says nothing about
+    // `src/Legacy/Http` even when both directories declare the same namespace,
+    // so dropping the child left it with no rule in either half — not injected
+    // before the write, not checked after it — while every tracked file in the
+    // tree disagreed with what got written.
     let keep: Vec<bool> = keyed
         .iter()
-        .map(|(statement, ext, dir, _)| {
-            !keyed.iter().any(|(other_statement, other_ext, other_dir, other_rollup)| {
-                other_statement == statement
-                    && other_ext == ext
-                    && !other_rollup
-                    && is_ancestor(other_dir, dir)
-            })
+        .map(|k| {
+            k.one_directory
+                || !keyed.iter().any(|other| {
+                    other.statement == k.statement
+                        && other.ext == k.ext
+                        && !other.rollup
+                        && is_ancestor(&other.dir, &k.dir)
+                })
         })
         .collect();
 
@@ -259,9 +334,42 @@ fn scope_ext(c: &Convention) -> String {
 }
 
 fn scope_dir(c: &Convention) -> String {
+    scope_dir_of(c).to_string()
+}
+
+/// Whether a rule that speaks for exactly one directory is the right one here.
+///
+/// Almost every rule generalises down the tree, and that is the point: a rule
+/// derived at `app/services` is meant to reach `app/services/billing`, so a
+/// folder created after indexing still inherits something. `shape.namespace` is
+/// the exception. PSR-4 makes a subdirectory's namespace differ from its
+/// parent's by definition, so for a file below it the parent's answer is not a
+/// less specific truth — it is false.
+///
+/// Applied to both halves. Checking must not judge a correct file against it,
+/// and selection must not offer it, or the block injected before the write
+/// names one namespace and the report after the write names another.
+pub(crate) fn speaks_for_this_directory(convention: &Convention, rel: &str) -> bool {
+    if !names_one_directory(convention) {
+        return true;
+    }
+    scope_dir_of(convention) == rel.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// Whether a rule speaks for the directory it names and for no other.
+///
+/// One family, and it needs its own answer in three places: selection, checking
+/// and [`collapse_redundant`], which must not let an ancestor absorb such a
+/// rule the way it absorbs the ordinary kind.
+fn names_one_directory(convention: &Convention) -> bool {
+    convention.id.starts_with("shape.namespace")
+}
+
+/// The directory a rule names, or the empty string when it names none.
+pub(crate) fn scope_dir_of(c: &Convention) -> &str {
     match &c.scope {
-        canon_core::Scope::Dir(d) | canon_core::Scope::DirExt(d, _) => d.clone(),
-        canon_core::Scope::Repo | canon_core::Scope::Ext(_) => String::new(),
+        canon_core::Scope::Dir(d) | canon_core::Scope::DirExt(d, _) => d,
+        canon_core::Scope::Repo | canon_core::Scope::Ext(_) => "",
     }
 }
 
@@ -361,6 +469,229 @@ mod tests {
         let root = fixture::build("stable", &refs(&files));
         let s = Settings::default();
         assert_eq!(derive_all(&root, &s).1, derive_all(&root, &s).1);
+    }
+
+    /// Two sibling directories that agree, under a parent that cannot state the
+    /// rule itself, which is the shape that produces a rollup.
+    fn rollup_tree() -> Vec<(String, String)> {
+        let mut files: Vec<(String, String)> = Vec::new();
+        for name in [
+            "taskList",
+            "taskStyles",
+            "parseSheet",
+            "miscIndex",
+            "feedbackSchema",
+            "questionSchema",
+            "sellerAvailability",
+            "valuationIndex",
+        ] {
+            files.push((
+                format!("src/components/TaskList/{name}.ts"),
+                "export const x = 1;\n".into(),
+            ));
+        }
+        for name in [
+            "buyOrSell",
+            "processEmailEvent",
+            "emailChecker",
+            "onboardingSchema",
+            "stepInitial",
+            "stepPassword",
+            "stepSuccess",
+            "stepNew",
+        ] {
+            files.push((
+                format!("src/components/UniversalOnboarding/{name}.ts"),
+                "export const x = 1;\n".into(),
+            ));
+        }
+        // Directly in the parent, and in another style, so the parent derives
+        // nothing per-file and the rule can only reach it by rolling up.
+        for name in ["Legacy", "OtherThing"] {
+            files.push((format!("src/components/{name}.ts"), "export const x = 1;\n".into()));
+        }
+        files
+    }
+
+    #[test]
+    fn a_rolled_up_rule_carries_the_same_evidence_every_run() {
+        // Issue #21. The children were collected in `conventions` order, which
+        // a HashMap decides, so the twelve evidence files a rollup kept were a
+        // different twelve each run and the snapshot was never byte-identical.
+        let files = rollup_tree();
+        let root = fixture::build("rollup-stable", &refs(&files));
+        let settings = Settings::default();
+        let entries = walk::walk(&root, &settings);
+
+        let first = derive_from(&root, &settings, &entries);
+        assert!(
+            first.iter().any(|c| c.id.ends_with(canon_core::ROLLUP_SUFFIX)),
+            "fixture derived no rollup, so it cannot test one: {:?}",
+            first.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        for run in 1..10 {
+            assert_eq!(derive_from(&root, &settings, &entries), first, "run {run} differs");
+        }
+    }
+
+    #[test]
+    fn raising_the_floor_states_less_rather_than_more() {
+        // Issue #20. The floor was applied inside the majority vote, so it
+        // removed the wide rule first and left standing every narrow one that
+        // the wide rule would have absorbed. On a 9,557-file repository the
+        // maximum floor produced 179 conventions against the default's 138,
+        // and 113 rules that may refuse a write against 26 — the opposite of
+        // what "only state what you are certain of" promises.
+        let mut files = fixture::agreeing(
+            "app/services/alpha",
+            "rb",
+            6,
+            "class ItemA$N < ApplicationService\n  def call; end\nend\n",
+        );
+        files.extend(fixture::agreeing(
+            "app/services/beta",
+            "rb",
+            6,
+            "class ItemB$N < ApplicationService\n  def call; end\nend\n",
+        ));
+        // One dissenter directly in the parent, so the parent holds the rule
+        // at 12/13 while each child holds it at 6/6.
+        files.push((
+            "app/services/odd.rb".to_string(),
+            "class Odd < SomethingElse\n  def call; end\nend\n".to_string(),
+        ));
+        let root = fixture::build("floor-monotonic", &refs(&files));
+
+        let default = derive_all(&root, &Settings::default()).1;
+        let strict =
+            derive_all(&root, &Settings { confidence_floor: 1.0, ..Settings::default() }).1;
+
+        let blocking = |cs: &[Convention]| {
+            cs.iter().filter(|c| c.enforcement == canon_core::Enforcement::Blocking).count()
+        };
+        assert!(
+            strict.len() <= default.len(),
+            "a higher floor produced more rules: {} against {}",
+            strict.len(),
+            default.len()
+        );
+        assert!(
+            blocking(&strict) <= blocking(&default),
+            "a higher floor produced more refusals: {} against {}",
+            blocking(&strict),
+            blocking(&default)
+        );
+        for c in &strict {
+            assert!(
+                default.iter().any(|d| d.id == c.id && d.statement == c.statement),
+                "`{}` is stated only at the higher floor",
+                c.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_keeps_its_namespace_rule_when_an_ancestor_shares_the_answer() {
+        // A namespace rule speaks for one directory, so an ancestor stating the
+        // same sentence does not cover the child the way an ancestor normally
+        // does. Absorbing it left the child with no rule in either half: not
+        // injected, not checked, in a tree where every tracked file disagrees
+        // with the file being written. Legacy PHP that predates PSR-4 spans one
+        // namespace over a subtree, which is exactly this shape.
+        let mut files = fixture::agreeing(
+            "src/Legacy",
+            "php",
+            6,
+            "<?php\nnamespace App\\Legacy;\nclass ItemA$N { public function handle() {} }\n",
+        );
+        files.extend(fixture::agreeing(
+            "src/Legacy/Http",
+            "php",
+            6,
+            "<?php\nnamespace App\\Legacy;\nclass ItemB$N { public function handle() {} }\n",
+        ));
+        let root = fixture::build("collapse-namespace", &refs(&files));
+        let (_, convs) = derive_all(&root, &Settings::default());
+
+        let rel = "src/Legacy/Http/Client.php";
+        assert!(
+            select::for_path(&convs, rel, 4000).iter().any(|c| c.id.starts_with("shape.namespace")),
+            "the child directory was left with no namespace rule: {:?}",
+            convs.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        let wrong = "<?php\nnamespace App\\Other;\nclass Client { public function handle() {} }\n";
+        assert!(
+            !verify::verify_source(rel, wrong, &convs).is_empty(),
+            "a file disagreeing with all twelve tracked files was not reported"
+        );
+    }
+
+    #[test]
+    fn a_namespace_shared_by_two_subdirectories_is_not_stated_at_their_parent() {
+        // Rolling a rule up to the parent is how a directory with no rule of
+        // its own inherits one, and it is exactly wrong for a namespace: the
+        // parent's files declare their own, and the rolled-up sentence names a
+        // namespace not one of them voted for. Two rules then reach one file
+        // and name two different namespaces.
+        let mut files = fixture::agreeing(
+            "src/Legacy",
+            "php",
+            6,
+            "<?php\nnamespace App\\Legacy;\nclass ItemA$N { public function handle() {} }\n",
+        );
+        for child in ["Http", "Api"] {
+            files.extend(fixture::agreeing(
+                &format!("src/Legacy/{child}"),
+                "php",
+                6,
+                &format!(
+                    "<?php\nnamespace App\\Shared;\nclass Item{child}$N {{ public function handle() {{}} }}\n"
+                ),
+            ));
+        }
+        let root = fixture::build("rollup-namespace", &refs(&files));
+        let (_, convs) = derive_all(&root, &Settings::default());
+
+        assert!(
+            !convs.iter().any(|c| c.id.starts_with("shape.namespace")
+                && c.id.ends_with(canon_core::ROLLUP_SUFFIX)),
+            "a namespace was assembled for a parent whose files never voted for it: {:?}",
+            convs.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        let offered: Vec<&str> = select::for_path(&convs, "src/Legacy/New.php", 4000)
+            .iter()
+            .filter(|c| c.id.starts_with("shape.namespace"))
+            .map(|c| c.statement.as_str())
+            .collect();
+        assert_eq!(offered.len(), 1, "two namespaces offered for one file: {offered:?}");
+        assert!(offered[0].ends_with("`App\\Legacy`"), "got {offered:?}");
+    }
+
+    #[test]
+    fn every_kind_of_rule_is_counted_in_its_own_bucket() {
+        // A child silent about one kind is not dissenting about it, which is
+        // why agreement is counted per kind. Two kinds were missing from the
+        // table and both fell to `other`, so a directory holding a colocation
+        // rule and no import rule read as an import dissenter and its siblings
+        // lost the rollup — for the family the code calls the highest-value
+        // thing canon derives.
+        let kinds = [
+            "shape.public-arity.a.rb",
+            "shape.entrypoint.a.rb",
+            "shape.base.a.rb",
+            "shape.module-arity.a.ts",
+            "shape.collaborator.a.rb",
+            "shape.export.a.tsx",
+            "shape.namespace.a.php",
+            "shape.import.a.ts",
+            "naming.a.rb",
+            "format.a.erb",
+            "tests.suffix.rb",
+            "tests.colocation.a.rb",
+        ];
+        let seen: std::collections::HashSet<&str> = kinds.iter().map(|id| family(id)).collect();
+        assert_eq!(seen.len(), kinds.len(), "two kinds share a bucket: {seen:?}");
+        assert!(!seen.contains("other"), "a real kind fell through to `other`: {seen:?}");
     }
 
     #[test]

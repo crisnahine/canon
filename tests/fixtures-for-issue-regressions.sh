@@ -96,3 +96,91 @@ OTHER = 2
 "
 done
 commit "$R"
+
+# --- vendored: four ordinary scripts and one version-numbered library (#19) ---
+R="$M/vendored"
+for n in main plugins helpers widgets; do
+  mk "$R" "$R/js/$n.js" "var $n = 1;
+"
+done
+mk "$R" "$R/js/jquery-3.4.1.min.js" "var j=1;
+"
+commit "$R"
+
+# --- views: an ERB tree whose format segment is the only rule it has (#16) ---
+R="$M/views"
+for n in index show edit confirm receipt summary; do
+  mk "$R" "$R/app/views/orders/$n.html.erb" "<h1>x</h1>
+"
+done
+commit "$R"
+
+# --- nested: shape rules at two levels over one defect (#17) ---
+R="$M/nested2"
+for d in billing/invoices billing/payments; do
+  for n in One Two Three Four Five Six Seven; do
+    l=$(printf '%s' "$n" | tr 'A-Z' 'a-z')
+    mk "$R" "$R/app/services/$d/${l}_service.rb" "class ${n}Service < RightBase
+  def run; end
+end
+"
+  done
+done
+for n in Odd Even Extra Spare; do
+  l=$(printf '%s' "$n" | tr 'A-Z' 'a-z')
+  mk "$R" "$R/app/services/billing/${l}_service.rb" "class ${n}Service < OtherBase
+  def run; end
+end
+"
+done
+commit "$R"
+
+# --- scoperoot: every sampled file in a subdirectory, none at the root (#18) ---
+R="$M/scoperoot"
+for d in one two; do
+  for n in Alpha Beta Gamma Delta Epsilon Zeta; do
+    mk "$R" "$R/src/components/group/sub$d/$n$d.tsx" "export const X = 1;
+"
+  done
+done
+# A differently-styled sibling tree, so no rule forms wide enough to absorb the
+# one under test and the surviving scope really is `src/components`.
+for n in first-page second-page third-page fourth-page fifth-page sixth-page; do
+  mk "$R" "$R/src/pages/$n.tsx" "export const X = 1;
+"
+done
+commit "$R"
+
+# --- floorsplit: children unanimous, parent split by one dissenter (#20) ---
+R="$M/floorsplit"
+for d in alpha beta; do
+  for n in One Two Three Four Five Six; do
+    l=$(printf '%s' "$n" | tr 'A-Z' 'a-z')
+    mk "$R" "$R/app/services/$d/${l}_${d}.rb" "class ${n}${d} < ApplicationService
+  def call; end
+end
+"
+  done
+done
+mk "$R" "$R/app/services/odd_one.rb" "class OddOne < SomethingElse
+  def call; end
+end
+"
+commit "$R"
+
+# --- rolluptie: two equal-sized children, so the rollup has a tie to break (#21) ---
+R="$M/rolluptie"
+for n in taskList taskStyles parseSheet miscIndex feedbackSchema questionSchema sellerAvailability valuationIndex; do
+  mk "$R" "$R/src/components/TaskList/$n.ts" "export const x = 1;
+"
+done
+for n in buyOrSell processEmailEvent emailChecker onboardingSchema stepInitial stepPassword stepSuccess stepNew; do
+  mk "$R" "$R/src/components/UniversalOnboarding/$n.ts" "export const x = 1;
+"
+done
+for n in Legacy OtherThing; do
+  mk "$R" "$R/src/components/$n.ts" "export const x = 1;
+"
+done
+commit "$R"
+

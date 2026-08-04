@@ -44,6 +44,14 @@ fn top_level(node: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
 
 /// An `export` is the boundary between a module's surface and its internals.
 fn export(node: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
+    // An unnamed token child, not a field, and it sits beside the declaration
+    // rather than wrapping it: `export default class Baz {}` is three children,
+    // `export` / `default` / `class_declaration`. `export default Qux;` carries
+    // no declaration at all, which is why this is read before the early return
+    // below rather than inside the match on it.
+    if child_of_kind(node, "default").is_some() {
+        facts.default_export = true;
+    }
     // `export { Foo, Bar }` re-exports names declared elsewhere in the file.
     if let Some(clause) = child_of_kind(node, "export_clause") {
         for spec in children_of(clause).into_iter().filter(|c| c.kind() == "export_specifier") {
@@ -172,6 +180,19 @@ mod tests {
     }
     fn js(src: &str) -> FileFacts {
         crate::tests::facts_of(crate::Language::JavaScript, src)
+    }
+
+    #[test]
+    fn whether_a_module_exports_a_default_is_a_fact() {
+        // Issue #16. Default versus named export is the convention a component
+        // tree actually holds, and the one a generated file gets wrong in a
+        // way that type-checks: the import side just changes shape.
+        assert!(tsx("export default function Card() { return null; }").default_export);
+        assert!(tsx("export default class Card {}").default_export);
+        assert!(tsx("const Card = () => null;\nexport default Card;").default_export);
+        assert!(!tsx("export const Card = () => null;").default_export);
+        assert!(!ts("export function build() {}").default_export);
+        assert!(!js("const a = 1;").default_export);
     }
 
     #[test]

@@ -161,6 +161,85 @@ line = context(h)
 check(16, "header does not credit a language that derived nothing",
       "Python" not in line or "0 conventions" in line, line.strip()[:140])
 
+# ---- #17 one defect is stated once, however many scopes derived the rule ----
+root = index("nested2")
+bad = "class Widget < WrongBase\n  def one; 1; end\n  def two; 2; end\n  def three; 3; end\nend\n"
+rel = "app/services/billing/invoices/widget.rb"
+p = os.path.join(root, rel)
+os.makedirs(os.path.dirname(p), exist_ok=True)
+open(p, "w").write(bad)
+h = hook(root, "verify", write_payload(root, rel, bad))
+lines = [l for l in context(h).split("\n") if l.startswith("- ")]
+base = [l for l in lines if "inherits from" in l]
+check(17, "one line per defect, not one per nesting level", len(base) <= 1, lines)
+check(17, "the line kept names the narrowest scope that derived it",
+      not base or "invoices" in base[0], base)
+os.remove(p)
+
+# ---- #18 a naming rule speaks for its own scope root ------------------------
+# Every sampled file lives in a subdirectory, so the scope root is an ancestor
+# of all of them and used to answer neither way.
+root = index("scoperoot")
+deep = hook(root, "inject", write_payload(root, "src/components/group/subone/zz-probe.tsx", "export const A = 1;\n"))
+at_root = hook(root, "inject", write_payload(root, "src/components/zz-probe.tsx", "export const A = 1;\n"))
+check(18, "the rule refuses in a directory it sampled", denied(deep), reason(deep)[:100])
+check(18, "and at the root of its own scope, which it never sampled directly",
+      denied(at_root), reason(at_root)[:100] or "allowed")
+
+# ---- #19 one version-numbered vendor file cannot pin a naming rule ----------
+root = index("vendored")
+out = run(root, "index", "--rebuild").stdout
+check(19, "a vendored version number witnesses no style", out.strip().startswith("0 conventions"), out.strip()[:120])
+h = hook(root, "inject", write_payload(root, "js/myWidget.js", "var a = 1;\n"))
+check(19, "and nothing is refused for the style it never witnessed", not denied(h), reason(h)[:120])
+
+# ---- #20 raising the floor states strictly less -----------------------------
+root = index("floorsplit")
+def count(root):
+    return int(run(root, "index", "--rebuild").stdout.split()[0])
+def blocking(root):
+    return run(root, "explain").stdout.count("enforcement Blocking")
+default, default_block = count(root), blocking(root)
+open(os.path.join(root, ".canon.toml"), "w").write("confidence_floor = 1.0\n")
+strict, strict_block = count(root), blocking(root)
+os.remove(os.path.join(root, ".canon.toml"))
+check(20, "a higher floor never states more", strict <= default, f"{strict} against {default}")
+check(20, "nor produces more rules that may refuse a write",
+      strict_block <= default_block, f"{strict_block} against {default_block}")
+open(os.path.join(root, ".canon.toml"), "w").write("confidence_floor = 0.6\n")
+out = run(root, "index", "--rebuild").stdout + run(root, "index", "--rebuild").stderr
+check(20, "a floor the hard floor already covers is a load error",
+      "must be between" in out, out.strip()[:140])
+os.remove(os.path.join(root, ".canon.toml"))
+run(root, "index", "--rebuild")
+
+# ---- #21 an unchanged tree derives the same set every time ------------------
+# Two equal-sized children under a parent that derives nothing itself, so the
+# rollup has a genuine tie to break: which child names it, and which twelve of
+# its sixteen files become the evidence.
+root = index("rolluptie")
+# Probabilistic on the broken build rather than certain: the tie resolved on a
+# per-process hash seed, so each rebuild was a coin flip and eight of them miss
+# the defect under one time in a hundred.
+seen = set()
+for _ in range(8):
+    run(root, "index", "--rebuild")
+    seen.add(run(root, "explain").stdout)
+check(21, "eight rebuilds of one tree produce one answer", len(seen) == 1,
+      f"{len(seen)} distinct outputs")
+
+# ---- #16 the new families reach the languages that had no vocabulary --------
+root = index("views")
+out = run(root, "explain").stdout
+check(16, "an ERB view tree derives its format segment", "*.html.erb" in out, out[:200])
+# `verify` reads the file from disk rather than the payload, because for an
+# `Edit` the payload carries a fragment and not the resulting file.
+missing = os.path.join(root, "app/views/orders/show.erb")
+open(missing, "w").write("<h1>x</h1>\n")
+h = hook(root, "verify", write_payload(root, "app/views/orders/show.erb", "<h1>x</h1>\n"))
+check(16, "and a view missing it is told", "*.html.erb" in context(h), context(h)[:200])
+os.remove(missing)
+
 shutil.rmtree(DATA, ignore_errors=True)
 by_issue = {}
 for issue, name, ok, detail in RESULTS:

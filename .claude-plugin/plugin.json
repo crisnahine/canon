@@ -1,6 +1,6 @@
 {
   "name": "canon",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Derives your repository's conventions from its AST and states them before each file is written. No CLAUDE.md required.",
   "author": {
     "name": "Cris Nahine"

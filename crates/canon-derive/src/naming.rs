@@ -136,17 +136,36 @@ pub(crate) fn is_bare_acronym(name: &str) -> bool {
 
 /// Whether `name` has enough structure to tell two styles apart.
 ///
-/// A name is discriminating when it contains a separator or an internal case
-/// change. `create` is not; `create_enrolment`, `createEnrolment` and
+/// A name is discriminating when it separates two words, or carries an internal
+/// case change. `create` is not; `create_enrolment`, `createEnrolment` and
 /// `CreateEnrolment` all are.
+///
+/// A separator beside a bare number is not a word boundary. `jquery-3.4.1.min`
+/// reduces to the root `jquery-3`, whose hyphen divides a library from its
+/// version — written that way by the library's author, in every repository,
+/// whatever naming style the repository holds. Read as a witness, one vendored
+/// file pinned `kebab-case` over a directory whose four other names were
+/// ordinary single words, at total agreement and therefore enforced. Deleting
+/// that file left the same directory deriving nothing.
+///
+/// Excluding `*.min.js`, or a `vendor/` path list, would fix the instance and
+/// leave the class: `bootstrap-5.3.0.css` and `python-3.11.txt` are the same
+/// shape, and plenty of repositories vendor without a directory that says so.
 #[must_use]
 pub(crate) fn is_discriminating(name: &str) -> bool {
-    if name.contains('_') || name.contains('-') {
+    let parts: Vec<&str> = name.split(['_', '-']).collect();
+    if parts.windows(2).any(|pair| pair.iter().all(|part| !part.is_empty() && !all_digits(part))) {
         return true;
     }
     let mut chars = name.chars();
     let Some(first) = chars.next() else { return false };
     first.is_uppercase() || chars.any(char::is_uppercase)
+}
+
+/// Whether a name segment is a bare number, as a version is. `v2`, `2fa` and
+/// `client` are words that happen to contain a digit and are not.
+fn all_digits(part: &str) -> bool {
+    part.chars().all(|c| c.is_ascii_digit())
 }
 
 /// The styles every name in `names` is compatible with, but only when the
@@ -311,6 +330,33 @@ mod tests {
     fn a_name_with_digits_still_classifies() {
         assert!(is_compatible("create_v2", Style::Snake));
         assert!(is_compatible("createV2", Style::Camel));
+    }
+
+    #[test]
+    fn a_separator_before_a_version_number_witnesses_no_style() {
+        // Issue #19. The hyphen in `jquery-3.4.1.min.js` separates a library
+        // from its version, not one word from another. Counted as a witness it
+        // pinned an enforced kebab-case rule over a directory whose four other
+        // files were ordinary single words, and deleting that one vendored
+        // file left the directory deriving nothing at all.
+        for vendored in ["jquery-3", "bootstrap-5", "python-3", "lodash_4"] {
+            assert!(!is_discriminating(vendored), "{vendored} witnessed a style");
+        }
+        // A separator between two words still witnesses, digits and all.
+        for real in ["create_v2", "user-2fa", "oauth2-client", "create_a", "html5-shim"] {
+            assert!(is_discriminating(real), "{real} stopped witnessing");
+        }
+    }
+
+    #[test]
+    fn one_vendored_filename_cannot_pin_a_style_for_a_directory() {
+        // The four ordinary names are compatible with snake, kebab and camel
+        // at once and witness none of them, so the sample witnesses nothing.
+        let sample = owned(&["main", "plugins", "helpers", "widgets", "jquery-3"]);
+        assert!(shared_styles(&sample, 5).is_empty(), "one vendored file decided the rule");
+        // One genuine multi-word name in the same sample does settle it.
+        let witnessed = owned(&["main", "plugins", "helpers", "widgets", "form-helpers"]);
+        assert_eq!(shared_styles(&witnessed, 5), vec![Style::Kebab]);
     }
 
     #[test]

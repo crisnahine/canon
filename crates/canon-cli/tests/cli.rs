@@ -273,6 +273,29 @@ fn session_start_states_what_the_repository_looks_like() {
 }
 
 #[test]
+fn a_config_that_will_not_load_is_said_out_loud_once() {
+    // The setting range narrowed in 0.5.0, so a `.canon.toml` that loaded
+    // yesterday can stop loading today. The fallback is every default plus
+    // enforcement off, which means refusals and suppressions both stop, and
+    // the only previous record was a log line at a level that defaults to
+    // off. Silence is the one thing this must not be.
+    // Its own fixture name. Tests run in parallel and `Fixture::new` clears the
+    // directory it is given, so two tests sharing a name race on it.
+    let f = Fixture::service_repo("badconfig-spoken");
+    f.write(".canon.toml", "confidence_floor = 0.7\n");
+    let payload = f.session_payload("s1", "SessionStart", &json!({ "source": "startup" }));
+    let parsed = f.json(&["session-start"], &payload);
+
+    let said = parsed["systemMessage"].as_str().unwrap_or_default();
+    assert!(said.contains(".canon.toml"), "the file was not named: {parsed}");
+    assert!(said.contains("confidence_floor"), "the reason was not given: {said}");
+    assert!(
+        said.contains("enforcement") || said.contains("refuse"),
+        "the consequence was not stated: {said}"
+    );
+}
+
+#[test]
 fn a_subagent_receives_the_same_manifest() {
     // The reason canon is a hook: a subagent starts with an empty context
     // window, so nothing in the conversation reaches it.

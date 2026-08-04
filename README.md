@@ -242,6 +242,31 @@ expressions rather than types and methods. The point is that they are no longer
 invisible: 340 `.erb` files in the repository measured above now contribute to
 the index and have their Ruby read.
 
+### Rules that are not about classes
+
+The first vocabulary was Rails-shaped. "Types here inherit from `X`" and "types
+here expose exactly one public method" describe a service-object codebase
+exactly, and describe a React component, a view template and a WordPress plugin
+file not at all — so those trees derived almost nothing however many files they
+held. Three rules cover what they actually agree on:
+
+| Rule | Reads | Example |
+|---|---|---|
+| `format` | the segment between the name and the extension | Files here are named `*.html.erb` |
+| `shape.export` | whether the module exports a default | Files here export a default |
+| `shape.namespace` | the namespace the file declares | Files here declare namespace `App\Services\Billing` |
+
+Measured on the same three checkouts: a 9,557-file Rails repository went from
+one ERB rule to nine; a 3,189-file React repository gained 39 export-style
+rules; a 698-file WordPress theme derived its first structural rule at all —
+though that one is a vendored library's namespace rather than a convention the
+team chose, which says as much about the theme as about the rule.
+
+All three are advisory and none can refuse a write. A view tree that is
+entirely `.html.erb` can still legitimately gain the one `.json.erb` an
+endpoint needs, and a component directory can gain the one barrel that exports
+no default.
+
 Adding a language is one module in `crates/canon-extract/src/`, one arm in
 `lang::provider`, and one `queries/<language>/facts.scm`. The match is
 exhaustive, so it will not compile until the capability table is updated.
@@ -312,11 +337,11 @@ Optional, and most repositories should never need it. Layered: defaults, then
 |---|---|---|---|
 | `enforce` | `true` | `CANON_ENFORCE` | whether a rule may refuse a write, or only advise |
 | `injection_budget` | `3000` | `CANON_INJECTION_BUDGET` | bytes of convention text per write |
-| `confidence_floor` | `0.8` | `CANON_CONFIDENCE_FLOOR` | agreement below this is not a convention |
+| `confidence_floor` | `0.8` | `CANON_CONFIDENCE_FLOOR` | agreement below this is not a convention; `0.8` to `1.0` |
 | `min_files` | `5` | `CANON_MIN_FILES` | sample below this is coincidence |
 | `recency_half_life_days` | `365` | `CANON_RECENCY_HALF_LIFE_DAYS` | how fast an old file loses its vote |
 | `suppress` | `[]` | `CANON_SUPPRESS` | convention ids to silence, `*` allowed |
-| `exclude_dirs` | 29 entries | — | directory names never scanned |
+| `exclude_dirs` | 30 entries | — | directory names never scanned |
 | `log_level` | `off` | `CANON_LOG` | `off`, `error`, `warn`, `info`, `debug`, `trace` |
 
 `canon check` prints all of these as they are actually resolved, so what is in
@@ -340,6 +365,12 @@ the sample: a rule over thirty files may hold four times in five, but the same
 ratio over four thousand is eight hundred counterexamples, and that is what a
 rule looks like when it has been derived from one kind of file and applied to
 every kind.
+
+`0.8` is the lowest value it accepts, because the sample-size bar starts there
+and a lower setting could admit nothing. Raising it states strictly less: it is
+read over the finished set, so the 9,557-file repository measured above derives
+146 conventions at the default, 72 at `0.95` and 49 at `1.0`, and the rules that
+may refuse a write never outnumber the default's.
 
 An unknown key is a hard error, because a typo means a setting you think is
 active never parsed. On the hook path a config that will not load runs on the

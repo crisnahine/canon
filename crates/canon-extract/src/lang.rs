@@ -101,6 +101,13 @@ pub struct Provider {
     pub visibility: Visibility,
     /// Extensions that map here.
     pub extensions: &'static [&'static str],
+    /// Whether a module in this language can export a default.
+    ///
+    /// A capability, not an extension list in the derivation layer. Without it,
+    /// counting "this file has no default export" across a Ruby directory finds
+    /// unanimous agreement about a thing Ruby has no word for, and states it as
+    /// a convention somebody chose.
+    pub default_exports: bool,
 }
 
 /// The capability table.
@@ -132,7 +139,14 @@ pub fn provider(language: Language) -> Provider {
             // Ruby inside markup, same mechanism.
             Language::Erb => (true, Visibility::SectionKeyword, &["erb", "rhtml"]),
         };
-    Provider { language, grammar_ready, visibility, extensions }
+    // ECMA modules and nothing else. Vue single-file components are compiled
+    // to one, but what canon parses of a `.vue` file is the script block alone,
+    // so the export sits outside what it reads.
+    let default_exports = matches!(
+        language,
+        Language::JavaScript | Language::Jsx | Language::TypeScript | Language::Tsx
+    );
+    Provider { language, grammar_ready, visibility, extensions, default_exports }
 }
 
 /// The tree-sitter grammar for a language, or `None` when none is linked.

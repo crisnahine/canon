@@ -3,6 +3,123 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-08-04
+
+Six issues, and the two that changed the most were not what their reports said.
+
+### Fixed
+
+- **Derivation was not deterministic: the same tree gave 50 to 54 conventions
+  (#21).** Two causes, and the issue named only one. `roll_up_agreeing_siblings`
+  read `HashMap` order, so a rolled-up rule was named after a different child
+  each run and carried a different twelve evidence files; votes and holders are
+  sorted now, and `widest` breaks a tie on lowest id. That alone did not fix the
+  count. The swing came from `recency_weight`, a continuous function of the wall
+  clock feeding a comparison against a fixed bar: two rebuilds ninety seconds
+  apart put a rule sitting on its threshold on opposite sides of it. Age is read
+  in whole days now, so the answer is the same all day. Measured: 146/146/146/146
+  on a 9,557-file repository, byte-identical conventions across six rebuilds.
+
+  Rollup ids can change on upgrade because of this. A tie on sample size used to
+  resolve by iteration order and now resolves to the lowest id, so a rule
+  previously called `tests.colocation.app.services.google.rb.rollup` may come
+  back under a sibling's name. If you suppress a `.rollup` id in `.canon.toml`,
+  check it still matches — the suppression is resolved against live config, so a
+  renamed id silently stops being suppressed.
+
+- **`confidence_floor` was inert below 0.8 and multiplied refusals fourfold when
+  raised (#20).** Below 0.8 nothing survived to admit, because
+  `Confidence::derive_counted` had already refused it; the validated range is
+  0.8 to 1.0 now and a lower value is a load error rather than a setting that
+  does nothing. Above the default it did the opposite of its name: applied
+  inside the majority vote it killed the wide rule first, and every narrow rule
+  the wide one would have absorbed survived — narrow rules at total agreement
+  being exactly what grades `Blocking`. At 1.0 that was 179 conventions against
+  138, and 113 rules that may refuse a write against 26. The floor is a filter
+  over the finished set now, after roll-up and collapsing: 146 / 72 / 49 at
+  0.8 / 0.95 / 1.0, and the refusal count never rises.
+
+- **One vendored filename could pin a `Blocking` naming rule for a whole
+  directory (#19).** `is_discriminating` accepted any `_` or `-` as a word
+  boundary, so `jquery-3.4.1.min.js` — root `jquery-3` — witnessed `kebab-case`
+  for a directory whose four other files were single words, at total agreement.
+  A separator now witnesses only with a non-numeric segment on both sides.
+  `create_v2`, `user-2fa` and `oauth2-client` still witness. Excluding `*.min.js`
+  or a `vendor/` path list would have fixed the instance and left the class.
+
+- **A naming rule refused in every sampled subdirectory but not at its own scope
+  root (#18).** The guard asked only whether the file sat *under* a counted
+  directory, so where every sample lived in a subdirectory the scope root
+  answered neither way. Scopes that name a directory accept the ancestor
+  direction now, fenced by their own prefix; scopes that do not — `Scope::Ext`,
+  `Scope::Repo` — deliberately still refuse it, or a `**/*.md` rule counted in
+  `docs/` would start refusing a root file. The empty-string sample root, which
+  records a file counted at the repository root, no longer licenses every
+  directory in the tree.
+
+- **One defect was reported once per nesting level, and the six-line cap then
+  dropped a distinct fact (#17).** A file breaking three rules in a three-level
+  directory emitted eight violations carrying four facts, and the fourth — this
+  file has no test — was the line that fell off the end. Violations are keyed on
+  the claim now, the narrowest scope wins, and the key is the defect rather than
+  the expected value, so two levels that disagree still produce one line instead
+  of two contradictory ones.
+
+### Added
+
+- **A vocabulary for the languages the first one could not describe (#16).**
+  "Types here inherit from `X`" and "types here expose exactly one public method"
+  describe a service-object codebase exactly and a React component, a view
+  template and a WordPress plugin file not at all, so those trees derived almost
+  nothing however many files they held. Three families, all advisory, none able
+  to refuse:
+
+  | Rule | Reads | Example |
+  |---|---|---|
+  | `format` | the segment between the name and the extension | Files here are named `*.html.erb` |
+  | `shape.export` | whether the module exports a default | Files here export a default |
+  | `shape.namespace` | the namespace the file declares | Files here declare namespace `App\Services\Billing` |
+
+  Measured: a 9,557-file Rails repository went from one ERB rule to nine, a
+  3,189-file React repository gained 39 export-style rules, and a 698-file
+  WordPress theme derived its first structural rule at all.
+
+  `shape.namespace` is the one family derived per exact directory rather than at
+  every ancestor. PSR-4 makes a subdirectory's namespace differ from its
+  parent's by definition, so an ancestor rule is not merely less specific for a
+  file below it — it is wrong. It is excluded from roll-up and from collapsing
+  for the same reason.
+
+  `FileFacts` gained `default_export` and `namespace`, and `Provider` gained
+  `default_exports` so a language without the concept abstains rather than
+  agreeing unanimously about a thing it has no word for.
+
+### Changed
+
+- `SNAPSHOT_VERSION` 9 to 10. The snapshot is a cache keyed on the commit, its
+  age and the settings, so a new binary at an unchanged commit goes on serving
+  the old binary's conventions — and a version 9 snapshot holds the vendored
+  `jquery-3` rule above, graded `Blocking`, which would go on refusing writes
+  after the release that stopped deriving it.
+
+- `confidence_floor` no longer accepts 0.5 to 0.79. Those values passed
+  validation, were printed by `canon check`, and changed no rule.
+
+  **If your `.canon.toml` sets one, raise it to 0.8 before upgrading.** A file
+  the loader rejects is not a partial failure: every setting in it reverts to
+  the default and enforcement is switched off, so suppressions stop applying
+  and nothing refuses a write. That fallback is deliberate, because the setting
+  that can block a write has to fail toward permissive, but until now it also
+  happened in silence. Session start says it out loud from this release.
+
+- A raised `confidence_floor` can now leave a directory with no rule where the
+  default would have given it one. The floor is read over the finished set, so
+  a wide rule at 0.92 that had already absorbed a narrow one at 1.00 is removed
+  without the narrow one coming back. That is the cost of the ordering: read
+  earlier, the floor removes the wide rule before it can absorb anything and
+  the narrow copies all survive, which is the fourfold refusal increase this
+  release fixes. Monotonicity was the property worth keeping.
+
 ## [0.4.2] — 2026-08-03
 
 ### Fixed

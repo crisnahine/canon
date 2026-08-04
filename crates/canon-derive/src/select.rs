@@ -18,14 +18,14 @@ pub fn for_path<'a>(
     rel: &str,
     budget: usize,
 ) -> Vec<&'a Convention> {
-    // How tests are named is only about the file being written when that file
-    // is a test. Otherwise it is a true sentence about somewhere else, spending
-    // budget and diluting the rules that do describe this path.
-    let writing_a_test = crate::tier0::is_test_path(rel);
+    // Everything beyond the scope itself lives in one predicate, which
+    // `canon explain` asks too. How tests are named is only about the file
+    // being written when that file is a test, and a namespace rule speaks for
+    // one directory rather than the subtree its scope reaches.
     let mut matching: Vec<&Convention> = conventions
         .iter()
         .filter(|c| c.scope.matches(rel))
-        .filter(|c| writing_a_test || !c.id.starts_with("tests.suffix"))
+        .filter(|c| crate::offered_for_path(c, rel))
         .collect();
     matching.sort_by(|a, b| b.rank().cmp(&a.rank()).then(a.id.cmp(&b.id)));
 
@@ -65,6 +65,87 @@ mod tests {
             sample_roots: vec![],
             enforcement: Enforcement::Advisory,
         }
+    }
+
+    #[test]
+    fn nothing_the_shared_predicate_withholds_survives_selection() {
+        // `canon explain` answers with `offered_for_path` and this answers with
+        // `for_path`. The two agreed by both remembering the same list of
+        // filters, which is an invariant on the honour system: the next filter
+        // added here and not there makes the audit page list a rule the
+        // injected block withheld. Asserting the containment is what makes the
+        // drift a test failure rather than a silent divergence.
+        let rules = [
+            conv(
+                "tests.suffix.rb",
+                "Test files are named `*_spec.rb`",
+                Scope::Ext("rb".into()),
+                9,
+                10,
+            ),
+            conv(
+                "shape.namespace.src.Services.php",
+                "Files here declare namespace `App\\Services`",
+                Scope::DirExt("src/Services".into(), "php".into()),
+                9,
+                10,
+            ),
+            conv(
+                "naming.src.rb",
+                "Files here are named in snake_case",
+                Scope::DirExt("src".into(), "rb".into()),
+                9,
+                10,
+            ),
+        ];
+        for rel in [
+            "src/Services/charge_card.rb",
+            "src/Services/Billing/Charge.php",
+            "src/Services/Charge.php",
+            "spec/services/charge_card_spec.rb",
+        ] {
+            for chosen in for_path(&rules, rel, 4000) {
+                assert!(
+                    crate::offered_for_path(chosen, rel),
+                    "`{}` reached {rel} through selection but the shared predicate withholds it",
+                    chosen.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_namespace_rule_is_not_offered_to_a_subdirectory_it_does_not_name() {
+        // PSR-4 makes a subdirectory's namespace differ from its parent's, so
+        // offering both tells the model two different namespaces for one file.
+        // The check half already refuses to judge on the parent's answer; the
+        // injected half has to agree, or the advice contradicts the report.
+        let parent = conv(
+            "shape.namespace.src.Services.Billing.php",
+            "Files here declare namespace `App\\Services\\Billing`",
+            Scope::DirExt("src/Services/Billing".into(), "php".into()),
+            6,
+            6,
+        );
+        let own = conv(
+            "shape.namespace.src.Services.Billing.Invoices.php",
+            "Files here declare namespace `App\\Services\\Billing\\Invoices`",
+            Scope::DirExt("src/Services/Billing/Invoices".into(), "php".into()),
+            6,
+            6,
+        );
+        let rules = [parent, own];
+        let chosen = for_path(&rules, "src/Services/Billing/Invoices/Void.php", 4000);
+        let namespaces: Vec<&str> = chosen
+            .iter()
+            .filter(|c| c.id.starts_with("shape.namespace"))
+            .map(|c| c.statement.as_str())
+            .collect();
+        assert_eq!(namespaces.len(), 1, "two namespaces offered for one file: {namespaces:?}");
+        assert!(
+            namespaces[0].ends_with("`App\\Services\\Billing\\Invoices`"),
+            "got {namespaces:?}"
+        );
     }
 
     #[test]

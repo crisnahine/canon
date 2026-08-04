@@ -188,11 +188,15 @@ pub(crate) fn recency_weight(now: u64, modified: u64, half_life_days: f32) -> f3
     if half_life_days <= 0.0 {
         return 1.0;
     }
-    // Seconds into days as f32: a repository would need to be older than the
-    // universe before the mantissa mattered, and the result feeds an
-    // exponential that is then clamped.
-    #[allow(clippy::cast_precision_loss)]
-    let age_days = now.saturating_sub(modified) as f32 / 86_400.0;
+    // Whole days, not a continuous clock. This weight feeds a comparison
+    // against a fixed bar, so a rule whose agreement lands on its threshold
+    // crossed it between two rebuilds ninety seconds apart: a 3,189-file
+    // repository derived 54 conventions, then 50, with nothing in the tree
+    // changed. Reading the age in days makes the answer the same all day, and
+    // a decay with a half-life in months has no meaning at finer grain anyway.
+    // The truncation is the point, so the integer division is deliberate.
+    #[allow(clippy::cast_precision_loss, clippy::integer_division)]
+    let age_days = (now.saturating_sub(modified) / 86_400) as f32;
     let decayed = 0.5_f32.powf(age_days / half_life_days);
     decayed.clamp(0.05, 1.0)
 }
@@ -255,6 +259,25 @@ mod tests {
         let files = walk(&root, &Settings::default());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].stem, "small");
+    }
+
+    #[test]
+    fn a_file_weighs_the_same_all_day_however_often_the_index_is_rebuilt() {
+        // Issue #21. The weight was a continuous function of the clock, and it
+        // feeds a comparison against a fixed bar. Two rebuilds ninety seconds
+        // apart put a rule that sits on its threshold on opposite sides of it,
+        // which moved a 3,189-file repository between 50 and 54 conventions
+        // with nothing in the tree changed.
+        let modified = 1_700_000_000;
+        let now = modified + 400 * 86_400;
+        let first = recency_weight(now, modified, 180.0);
+        for later in [1, 90, 3_600, 86_399] {
+            assert_eq!(
+                recency_weight(now + later, modified, 180.0),
+                first,
+                "the same file weighed differently {later}s later"
+            );
+        }
     }
 
     #[test]

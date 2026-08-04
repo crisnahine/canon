@@ -106,6 +106,21 @@ pub struct FileFacts {
     pub calls: Vec<Call>,
     /// Exception types raised or thrown.
     pub raises: Vec<String>,
+    /// Whether the module exports a default, for the languages that have one.
+    ///
+    /// A module's surface has a shape as well as a size, and a component tree
+    /// picks one and holds it. Getting it wrong is the drift that type-checks:
+    /// the file compiles, and every import of it has to be written the other
+    /// way round.
+    pub default_export: bool,
+    /// The namespace this file declares, for the languages that have one.
+    ///
+    /// Its own field rather than a synthetic type, because a namespace is a
+    /// property of the file and not of anything the file declares. PHP is the
+    /// language it was added for: PSR-4 makes namespace and directory agree,
+    /// which is a convention a team really holds and no other fact here can
+    /// express.
+    pub namespace: Option<String>,
 }
 
 impl FileFacts {
@@ -116,6 +131,13 @@ impl FileFacts {
             && self.free_functions.is_empty()
             && self.imports.is_empty()
             && self.calls.is_empty()
+            // Both are whole-file facts rather than declarations, so a file
+            // whose only contribution is one of them has still contributed.
+            // `export default Item;` declares nothing this reads as a free
+            // function, and dropping it as empty silently removed exactly the
+            // files a default-export rule is derived from.
+            && !self.default_export
+            && self.namespace.is_none()
     }
 }
 

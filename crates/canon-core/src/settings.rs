@@ -109,7 +109,7 @@ pub enum SettingsError {
         /// The ceiling.
         cap: usize,
     },
-    /// `confidence_floor` sits outside 0.5 to 1.0.
+    /// `confidence_floor` sits outside [`crate::Confidence::FLOOR`] to 1.0.
     FloorOutOfRange {
         /// The configured value, as a percentage, to keep the error comparable.
         got_times_100: i32,
@@ -135,7 +135,10 @@ impl std::fmt::Display for SettingsError {
                 write!(f, "injection_budget {got} exceeds the host's {cap}-byte hook output cap")
             }
             Self::FloorOutOfRange { got_times_100 } => {
-                write!(f, "confidence_floor {got_times_100}% must be between 50% and 100%")
+                write!(
+                    f,
+                    "confidence_floor {got_times_100}% must be between 80% and 100%; below 80% the sample-size bar refuses the convention first and the setting does nothing"
+                )
             }
             Self::MinFilesTooLow { got } => write!(
                 f,
@@ -161,7 +164,11 @@ impl Settings {
                 cap: crate::HOOK_OUTPUT_CAP,
             });
         }
-        if !(0.5..=1.0).contains(&self.confidence_floor) {
+        // From the hard floor, not from 0.5. A lower value passed validation,
+        // was printed by `canon check`, and admitted nothing: every path into
+        // a `Confidence` refuses agreement under `Confidence::FLOOR` before
+        // the configured value is ever consulted.
+        if !(crate::Confidence::FLOOR..=1.0).contains(&self.confidence_floor) {
             #[allow(clippy::cast_possible_truncation)]
             return Err(SettingsError::FloorOutOfRange {
                 got_times_100: (self.confidence_floor * 100.0) as i32,
@@ -214,6 +221,25 @@ mod tests {
     fn absurd_floor_is_rejected() {
         let s = Settings { confidence_floor: 0.1, ..Default::default() };
         assert!(matches!(s.validate(), Err(SettingsError::FloorOutOfRange { .. })));
+    }
+
+    #[test]
+    fn a_floor_the_hard_floor_already_covers_is_rejected_rather_than_ignored() {
+        // Issue #20. Half the validated range did nothing at all:
+        // `Confidence::derive_counted` refuses anything under `FLOOR` before
+        // the configured value is ever read, so 0.5 through 0.79 were
+        // accepted, printed by `canon check`, and changed no rule.
+        for got in [0.5, 0.6, 0.75, 0.79] {
+            let s = Settings { confidence_floor: got, ..Default::default() };
+            assert!(
+                matches!(s.validate(), Err(SettingsError::FloorOutOfRange { .. })),
+                "{got} was accepted and cannot admit anything"
+            );
+        }
+        for got in [crate::Confidence::FLOOR, 0.9, 1.0] {
+            let s = Settings { confidence_floor: got, ..Default::default() };
+            assert!(s.validate().is_ok(), "{got} is a value that does something");
+        }
     }
 
     #[test]

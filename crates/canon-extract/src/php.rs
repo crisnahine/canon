@@ -20,6 +20,13 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
                 facts.free_functions.push(n);
             }
         }
+        // The first wins. A file may reopen a namespace further down, but the
+        // one at the top is the one PSR-4 pairs with the directory.
+        "namespace_definition" if facts.namespace.is_none() => {
+            if let Some(n) = field_text(node, "name", source) {
+                facts.namespace = Some(n);
+            }
+        }
         "namespace_use_declaration" => {
             for clause in
                 children_of(node).into_iter().filter(|c| c.kind() == "namespace_use_clause")
@@ -128,6 +135,23 @@ mod tests {
     fn interfaces_and_traits_are_types() {
         let f = f("<?php interface I { public function a(); } trait T { public function b() {} }");
         assert_eq!(f.types.len(), 2);
+    }
+
+    #[test]
+    fn the_declared_namespace_is_a_fact() {
+        // Issue #16. PSR-4 agreement between namespace and path is a real,
+        // checkable PHP convention, and 134 tracked PHP files derived nothing
+        // at all because the whole vocabulary asked about base classes.
+        let f = f("<?php\nnamespace App\\Services\\Billing;\nclass ChargeCard {}\n");
+        assert_eq!(f.namespace.as_deref(), Some("App\\Services\\Billing"));
+    }
+
+    #[test]
+    fn a_file_with_no_namespace_declares_none() {
+        // Most of a WordPress plugin, and the absence has to be reportable
+        // rather than indistinguishable from a file nobody parsed.
+        let f = f("<?php\nclass ChargeCard {}\n");
+        assert_eq!(f.namespace, None);
     }
 
     #[test]

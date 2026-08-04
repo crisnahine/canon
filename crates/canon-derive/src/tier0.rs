@@ -26,9 +26,80 @@ const MAX_EVIDENCE: usize = 12;
 pub(crate) fn derive(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
     let mut out = Vec::new();
     out.extend(naming_conventions(files, settings));
+    out.extend(qualifier_conventions(files, settings));
     out.extend(test_suffix(files, settings));
     out.extend(colocation(files, settings));
     out
+}
+
+/// "Files here are named `*.html.erb`."
+///
+/// The segment between the name and the extension is a convention of its own,
+/// and for a view tree it is most of what there is to say: a 340-file
+/// `app/views` derived one rule between all of it, because the rest of the
+/// vocabulary asks about base classes and public method counts and a template
+/// has neither. `show.erb` renders nothing where `show.html.erb` renders, and
+/// no linter says so.
+///
+/// Stated only when the winning qualifier is a real one. Most directories carry
+/// no second extension at all, and "files here are named `*..rb`" is not a
+/// sentence anyone needs.
+///
+/// Advisory, never enforced. A directory that is entirely `.html.erb` can still
+/// legitimately gain the one `.json.erb` an endpoint needs, and refusing that
+/// is the check being wrong about a correct file. The id deliberately does not
+/// begin `naming.`, because `enforcement_for` grades that family `Blocking` at
+/// total agreement and this rule has no business refusing anything.
+fn qualifier_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
+    let mut groups: HashMap<(String, String), Vec<&FileEntry>> = HashMap::new();
+    for f in files.iter().filter(|f| !is_test(f) && nameable(f)) {
+        for dir in group_keys(f) {
+            groups.entry((dir, f.ext.clone())).or_default().push(f);
+        }
+    }
+
+    let mut out = Vec::new();
+    for ((dir, ext), members) in groups {
+        if members.len() < settings.min_files {
+            continue;
+        }
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for f in &members {
+            *counts.entry(qualifier_of(&f.stem)).or_default() += 1;
+        }
+        // Ties break on the qualifier text, so an unchanged tree derives the
+        // same rule twice rather than whichever the hash order visited last.
+        let Some((qualifier, agreeing)) = counts.into_iter().max_by_key(|(q, n)| (*n, *q)) else {
+            continue;
+        };
+        if qualifier.is_empty() {
+            continue;
+        }
+        let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
+
+        out.push(Convention {
+            id: format!("format.{}.{ext}", id_fragment(&dir)),
+            statement: format!("Files here are named `*.{qualifier}.{ext}`"),
+            scope: scope_for(&dir, &ext),
+            confidence,
+            agreeing,
+            total: members.len(),
+            exemplar: exemplar_of(&members),
+            evidence: evidence_of(&members),
+            sample_roots: roots_of(&members),
+            enforcement: Enforcement::Advisory,
+        });
+    }
+    out
+}
+
+/// The qualifiers between a file's name and its extension.
+///
+/// `charge_card.html` is `html`, `globals.d` is `d`, `index` is nothing. The
+/// stem arrives already stripped of the final extension, which is why this
+/// reads forward from the first dot rather than back from the last.
+fn qualifier_of(stem: &str) -> &str {
+    stem.split_once('.').map_or("", |(_, rest)| rest)
 }
 
 /// "Every file here has a test."
@@ -635,6 +706,63 @@ mod tests {
             ],
         );
         assert!(statements(&convs).contains("snake_case"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_view_directory_derives_the_format_segment_its_files_carry() {
+        // Issue #16. A 340-file ERB tree derived one rule between it and every
+        // other view in the repository, because the whole vocabulary was about
+        // base classes and public method counts. The format segment is a
+        // convention a view really holds and no linter checks: `show.erb`
+        // renders nothing where `show.html.erb` renders.
+        let convs = derive_from(
+            "t0-erb-format",
+            &[
+                ("app/views/orders/index.html.erb", "<h1>x</h1>"),
+                ("app/views/orders/show.html.erb", "<h1>x</h1>"),
+                ("app/views/orders/edit.html.erb", "<h1>x</h1>"),
+                ("app/views/orders/confirm.html.erb", "<h1>x</h1>"),
+                ("app/views/orders/receipt.html.erb", "<h1>x</h1>"),
+                ("app/views/orders/summary.html.erb", "<h1>x</h1>"),
+            ],
+        );
+        assert!(statements(&convs).contains("named `*.html.erb`"), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_directory_with_no_shared_qualifier_states_nothing_about_one() {
+        // Most directories carry no second extension at all, and "files here
+        // are named `*..rb`" is not a sentence.
+        let convs = derive_from(
+            "t0-no-qualifier",
+            &[
+                ("app/services/create_enrolment.rb", "x"),
+                ("app/services/update_enrolment.rb", "x"),
+                ("app/services/cancel_enrolment.rb", "x"),
+                ("app/services/refund_payment.rb", "x"),
+                ("app/services/approve_payout.rb", "x"),
+                ("app/services/reject_payout.rb", "x"),
+            ],
+        );
+        assert!(!statements(&convs).contains("named `*."), "got {}", statements(&convs));
+    }
+
+    #[test]
+    fn a_split_between_two_formats_states_neither() {
+        // A views directory that serves HTML and JSON has no single answer,
+        // and inventing one would refuse the endpoint that needs the other.
+        let convs = derive_from(
+            "t0-format-split",
+            &[
+                ("app/views/orders/index.html.erb", "x"),
+                ("app/views/orders/show.html.erb", "x"),
+                ("app/views/orders/edit.html.erb", "x"),
+                ("app/views/orders/index.json.erb", "x"),
+                ("app/views/orders/show.json.erb", "x"),
+                ("app/views/orders/edit.json.erb", "x"),
+            ],
+        );
+        assert!(!statements(&convs).contains("named `*."), "got {}", statements(&convs));
     }
 
     #[test]

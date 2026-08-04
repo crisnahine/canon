@@ -97,8 +97,132 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(module_arity(&dir, &ext, &members, settings));
         out.extend(collaborator(&dir, &ext, &members, settings));
         out.extend(import_source(&dir, &ext, &members, settings));
+        out.extend(export_style(&dir, &ext, &members, settings));
     }
+    out.extend(namespace_per_directory(sets, settings));
     out
+}
+
+/// Namespaces, grouped by the directory a file is actually in.
+///
+/// Every other rule is derived at each ancestor directory too, so a new folder
+/// inherits something from the tree above it. A namespace rule must not be:
+/// PSR-4 makes a subdirectory's namespace differ from its parent's by
+/// definition, so an ancestor group counts files that are all correct and
+/// finds them all in disagreement.
+///
+/// It also cannot use the shared grouping for a second reason. That grouping
+/// stops at [`MAX_GROUP_DEPTH`], and PSR-4 trees routinely run deeper —
+/// `wp-content/themes/<theme>/lib/jwt` is five levels down, and its five
+/// namespaced files had no group of their own at all.
+fn namespace_per_directory(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
+    let mut groups: HashMap<(&str, &str), Vec<&FactSet>> = HashMap::new();
+    for s in sets {
+        groups.entry((s.dir.as_str(), s.ext.as_str())).or_default().push(s);
+    }
+    // Sorted, so an unchanged tree derives the same set twice.
+    let mut keys: Vec<(&str, &str)> = groups.keys().copied().collect();
+    keys.sort_unstable();
+    keys.into_iter()
+        .filter(|(dir, _)| !dir.is_empty())
+        .filter_map(|key| {
+            let members = groups.get(&key)?;
+            namespace(key.0, key.1, members, settings)
+        })
+        .collect()
+}
+
+/// "Files here export a default."
+///
+/// The choice a component tree makes once and then holds, and the one that no
+/// other rule in the vocabulary can see: a 1,618-file TSX tree had two rules
+/// between all of it, because everything else asks about base classes and
+/// public method counts and a function component has neither. Getting it wrong
+/// is drift that compiles — the module is fine, and every import of it has to
+/// be written the other way round.
+///
+/// Only files that export something vote. A module that exports nothing has
+/// made no choice, and counting it as "not a default export" would let a
+/// directory of type declarations decide the rule for the components beside
+/// them.
+///
+/// Gated on the language having the concept at all. Counting `false` across a
+/// Ruby directory finds total agreement about a thing Ruby has no word for.
+fn export_style(
+    dir: &str,
+    ext: &str,
+    members: &[&FactSet],
+    settings: &Settings,
+) -> Option<Convention> {
+    if !canon_extract::lang::from_extension(ext)
+        .is_some_and(|l| canon_extract::lang::provider(l).default_exports)
+    {
+        return None;
+    }
+    let observations: Vec<(bool, f32, &FactSet)> = members
+        .iter()
+        .filter(|s| s.facts.default_export || !s.facts.free_functions.is_empty())
+        .map(|s| (s.facts.default_export, s.weight, *s))
+        .collect();
+    let (default_export, confidence, agreeing) = majority(&observations, settings)?;
+    Some(Convention {
+        id: format!("shape.export.{}.{ext}", id_fragment(dir)),
+        statement: if default_export {
+            "Files here export a default".to_string()
+        } else {
+            "Files here use named exports".to_string()
+        },
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &default_export),
+        evidence: evidence(&observations, &default_export),
+        sample_roots: Vec::new(),
+        // Advisory. A directory that exports defaults throughout can still
+        // legitimately gain the one barrel or constants module that does not,
+        // and refusing that is the check being wrong about a correct file.
+        enforcement: Enforcement::Advisory,
+    })
+}
+
+/// "Files here declare namespace `App\Services\Billing`."
+///
+/// PSR-4 makes a PHP file's namespace agree with its directory, which is a real
+/// convention a team holds and the only structural one a procedural plugin file
+/// has. 134 tracked PHP files derived nothing at all, because every rule above
+/// asks about a class and its base type.
+///
+/// Counted per directory, where the namespace is a constant. A file that
+/// declares none votes too — a directory where PSR-4 holds and one file forgot
+/// is exactly the disagreement worth reporting.
+///
+/// `members` are the files of one directory exactly, never a subtree; see
+/// [`namespace_per_directory`]. `check_namespace` applies the matching
+/// restriction, because the scope a rule carries still reaches the whole
+/// subtree the way every directory scope does.
+fn namespace(
+    dir: &str,
+    ext: &str,
+    members: &[&FactSet],
+    settings: &Settings,
+) -> Option<Convention> {
+    let observations: Vec<(Option<String>, f32, &FactSet)> =
+        members.iter().map(|s| (s.facts.namespace.clone(), s.weight, *s)).collect();
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let declared = winner.clone()?;
+    Some(Convention {
+        id: format!("shape.namespace.{}.{ext}", id_fragment(dir)),
+        statement: format!("Files here declare namespace `{declared}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
+        enforcement: Enforcement::Advisory,
+    })
 }
 
 /// The weighted majority of a set of `(value, weight, source)` observations.
@@ -119,10 +243,11 @@ fn majority<T: std::hash::Hash + Eq + Clone>(
     let (winner, weight) = tally
         .into_iter()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    // The configured floor is not applied here. Applied during the vote it
+    // removed the wide rule before `collapse_redundant` could use it, and every
+    // narrow rule the wide one would have absorbed survived instead; see
+    // `derive_from`, which filters the finished set.
     let confidence = Confidence::derive_counted(weight, total, observations.len())?;
-    if confidence.value() < settings.confidence_floor {
-        return None;
-    }
     let agreeing = observations.iter().filter(|(v, _, _)| *v == winner).count();
     Some((winner, confidence, agreeing))
 }
@@ -621,6 +746,128 @@ mod tests {
         files.push(("src/q/barrel.ts".to_string(), format!("{barrel}export const b = () => 1;\n")));
         let convs = derive_from("sem-barrel", &files);
         assert!(!joined(&convs).contains("pkg-rare"), "one file decided it: {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_component_directory_derives_the_export_style_it_holds() {
+        // Issue #16. Default versus named is the choice a component tree makes
+        // and holds, and the one a generated file gets wrong in a way that
+        // compiles: every import of it then has to be written the other way.
+        let files = fixture::agreeing(
+            "src/components",
+            "tsx",
+            6,
+            "const Item$N = () => <div/>;\nexport default Item$N;\n",
+        );
+        let convs = derive_from("sem-default-export", &files);
+        assert!(joined(&convs).contains("export a default"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_named_export_directory_derives_the_other_answer() {
+        let files =
+            fixture::agreeing("src/widgets", "tsx", 6, "export const Item$N = () => <div/>;\n");
+        let convs = derive_from("sem-named-export", &files);
+        assert!(joined(&convs).contains("named export"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_split_between_the_two_styles_states_neither() {
+        let mut files =
+            fixture::agreeing("src/mixed", "tsx", 5, "export const ItemA$N = () => <div/>;\n");
+        files.extend((0..5).map(|i| {
+            (
+                format!("src/mixed/b{i}.tsx"),
+                format!("const ItemB{i} = () => <div/>;\nexport default ItemB{i};\n"),
+            )
+        }));
+        let convs = derive_from("sem-split-export", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.export")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_language_with_no_default_export_says_nothing_about_one() {
+        // Ruby has no such concept, so counting `false` across a services
+        // directory would state a unanimous rule nobody ever chose.
+        let files =
+            fixture::agreeing("app/services", "rb", 6, "class Item$N\n  def call; end\nend\n");
+        let convs = derive_from("sem-rb-export", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.export")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_php_directory_derives_the_namespace_it_declares() {
+        // Issue #16. PSR-4 makes namespace and directory agree, and 134 tracked
+        // PHP files derived nothing at all because every rule in the vocabulary
+        // asked about base classes and method counts.
+        let files = fixture::agreeing(
+            "src/Services/Billing",
+            "php",
+            6,
+            "<?php\nnamespace App\\Services\\Billing;\nclass Item$N { public function handle() {} }\n",
+        );
+        let convs = derive_from("sem-php-namespace", &files);
+        assert!(
+            joined(&convs).contains("namespace `App\\Services\\Billing`"),
+            "got {}",
+            joined(&convs)
+        );
+    }
+
+    #[test]
+    fn a_namespace_deeper_than_the_grouping_limit_is_still_derived() {
+        // The shared grouping stops four directories down, and PSR-4 trees run
+        // deeper: a WordPress theme's `lib/jwt` sits five levels in, and its
+        // five namespaced files had no group of their own to be counted in.
+        let files = fixture::agreeing(
+            "wp-content/themes/site/lib/jwt",
+            "php",
+            6,
+            "<?php\nnamespace Theme\\Lib\\Jwt;\nclass Item$N { public function handle() {} }\n",
+        );
+        let convs = derive_from("sem-php-deep", &files);
+        let rule = convs
+            .iter()
+            .find(|c| c.id.starts_with("shape.namespace"))
+            .unwrap_or_else(|| panic!("no namespace rule in {}", joined(&convs)));
+        assert!(rule.statement.ends_with("`Theme\\Lib\\Jwt`"), "got {}", rule.statement);
+        // The scope is the half that was wrong, and the half that matters: the
+        // shared grouping stopped at the fourth directory, so the rule landed
+        // on `.../lib` and named a directory whose files it had never counted.
+        // A namespace rule scoped anywhere but its own directory is inert,
+        // because both halves now ask it to name exactly that directory.
+        assert_eq!(
+            rule.scope,
+            canon_core::Scope::DirExt("wp-content/themes/site/lib/jwt".into(), "php".into()),
+            "the rule names a directory other than the one it counted"
+        );
+    }
+
+    #[test]
+    fn a_parent_namespace_is_not_derived_from_its_children() {
+        // Every file here is correct under PSR-4, so there is no disagreement
+        // to report and no parent-level answer that would be true of them.
+        let mut files = fixture::agreeing(
+            "src/Services/Billing",
+            "php",
+            6,
+            "<?php\nnamespace App\\Services\\Billing;\nclass ItemA$N { public function handle() {} }\n",
+        );
+        files.extend(fixture::agreeing(
+            "src/Services/Billing/Invoices",
+            "php",
+            6,
+            "<?php\nnamespace App\\Services\\Billing\\Invoices;\nclass ItemB$N { public function handle() {} }\n",
+        ));
+        let convs = derive_from("sem-php-nested", &files);
+        let namespaces: Vec<&str> = convs
+            .iter()
+            .filter(|c| c.id.starts_with("shape.namespace"))
+            .map(|c| c.statement.as_str())
+            .collect();
+        assert_eq!(namespaces.len(), 2, "got {namespaces:?}");
+        assert!(namespaces.iter().any(|s| s.ends_with("`App\\Services\\Billing`")));
+        assert!(namespaces.iter().any(|s| s.ends_with("`App\\Services\\Billing\\Invoices`")));
     }
 
     #[test]

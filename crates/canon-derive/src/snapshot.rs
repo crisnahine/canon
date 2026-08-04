@@ -16,7 +16,18 @@ use serde::{Deserialize, Serialize};
 /// A snapshot from a different version is discarded rather than migrated. It
 /// is a cache of something cheap to recompute, and migration code for a cache
 /// is a permanent liability for a temporary gain.
-pub const SNAPSHOT_VERSION: u32 = 9;
+///
+/// Bumped for content, not only for shape. Freshness is decided by the commit,
+/// the age and the settings, so a new binary at an unchanged commit goes on
+/// serving the old binary's conventions — and version 9 held rules that later
+/// versions refuse to derive. A `kebab-case` rule pinned by a vendored
+/// `jquery-3.4.1.min.js` was graded `Blocking` from the stored snapshot and
+/// went on refusing writes after the release that stopped deriving it.
+pub const SNAPSHOT_VERSION: u32 = 10;
+// 10: `format`, `shape.export` and `shape.namespace` are derived, and a
+//      naming rule pinned by a version-numbered vendor file no longer is. A
+//      v9 snapshot holds that rule, graded `Blocking`, and freshness alone
+//      would go on serving it after the release that stopped deriving it.
 // 9: Ruby class methods, Python dotted and generic bases, and Rust trait sets
 //    are all visible now, and the file's subject is resolved differently for
 //    every language whose file names are not snake_case. A snapshot from before
@@ -54,7 +65,7 @@ pub const SNAPSHOT_VERSION: u32 = 9;
 
 /// Size past which a file at the snapshot path is not a snapshot canon wrote.
 ///
-/// The largest measured is 144 KB, on a 9,500-file repository with a hundred
+/// The largest measured is 158 KB, on a 9,557-file repository with 146
 /// conventions. Two orders of magnitude of headroom, and still a bound.
 const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -114,7 +125,7 @@ impl Snapshot {
         // The first read every hook performs, before the config and before
         // anything else, so a FIFO here hangs all of them and a character
         // device grows until the process is killed. A snapshot has a knowable
-        // size — 144 KB on a 9,500-file repository — and one larger than the
+        // size — 158 KB on a 9,557-file repository — and one larger than the
         // cap is not one canon wrote.
         let meta = std::fs::symlink_metadata(path).ok()?;
         if !meta.is_file() || meta.len() > MAX_SNAPSHOT_BYTES {

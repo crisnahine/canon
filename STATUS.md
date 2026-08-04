@@ -1,4 +1,4 @@
-# Measured status — v0.4.2
+# Measured status — v0.5.0
 
 Every number below was executed. Reproduce with the commands shown.
 
@@ -6,14 +6,14 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release                      0 errors
-cargo test --workspace                     358 passing
+cargo test --workspace                     399 passing
 cargo clippy --workspace                   0 warnings
 cargo fmt --all --check                    clean
 ./tests/fail-open.sh                       75/75
 ./tests/asset-coverage.sh                  8 of 8 platforms
 ./tests/injection-reaches-the-model.sh     PASS
 tests/refusal-regressions.py               50/50
-tests/issue-regressions.py                 23/23
+tests/issue-regressions.py                 35/35
 ```
 
 The last two need fixtures and the corpus:
@@ -28,8 +28,29 @@ python3 tests/replay-tracked-files.py ./target/release/canon /tmp/canon-corpus
 python3 tests/replay-new-files.py     ./target/release/canon /tmp/canon-corpus
 ```
 
-11,848 lines of Rust across five crates, of which roughly half are tests,
+13,755 lines of Rust across five crates, of which roughly half are tests,
 plus 195 lines of tree-sitter query across seven languages.
+
+## What the six issues moved
+
+Measured with one pinned binary against the three real checkouts, before and
+after, at the same commit with a clean tree:
+
+| Repository | Conventions | Rules that may refuse |
+|---|---|---|
+| 9,557-file Rails | 138 to 146 | 26 to 26 |
+| 3,189-file React | 52 to 93 | 12 to 12, identical ids |
+| 698-file WordPress | 2 to 2 | 2 to 1 |
+
+The gains are the new vocabulary: ERB from one rule to nine, 39 export-style
+rules in the React tree, and the first structural PHP rule. Nothing gained a
+refusal anywhere, and the one lost is `naming.simple-vt.js`, a `kebab-case`
+rule at 5/5 resting on `jquery-3.4.1.min.js` and `modernizr-3.7.1.min.js` — the
+defect in #19, found in the wild in the repository it was reported against.
+
+Determinism is the other measured change: the same tree now derives a
+byte-identical convention set across rebuilds, where it moved between 50 and 54
+before.
 
 ## What a pre-push review found, and why the harnesses missed it
 
@@ -333,8 +354,6 @@ tool a team installs next, which is why the cap exists as well.
 ## What is not built
 
 - **CSS and Tailwind.** Value-frequency analysis, a different engine entirely.
-- **Export style, default versus named.** Cheap and within reach of the ECMA
-  extractor, and currently unexpressed.
 - **Rewriting a write rather than refusing it.** `PreToolUse` accepts an
   `updatedInput`, and it works: a hook can replace the content before it is
   written. Measured, and deliberately not used. canon silently authoring
