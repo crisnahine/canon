@@ -56,17 +56,19 @@ reach enforcement: a narrower directory reaches total agreement where its
 parent did not, which is where the Rails API's extra thirteen refusing rules
 come from.
 
-The two columns move in opposite directions on the other three, and each fall
-is a rule this branch decided not to enforce.
+On two of the five the columns move in opposite directions — more said, less
+refused — and each fall is a rule this branch decided not to enforce.
 
 - wagtail's base rules go from 10 refusing to 1. A Python class lists several
-  bases and which one is "the" base is a reading, not a fact, so the grade for
-  a Python base rule is now Advisory.
+  bases and which one is "the" base is a reading, not a fact, so a Python base
+  rule is graded Advisory.
 - The React client's naming rules go from 12 refusing to 8 while the family
   triples in size, because a rule may now only refuse inside the directories
-  its sample actually covered.
-- Mid-branch that number was 54, not 12 or 8. Deeper grouping produced the
-  rules first and the sample gate arrived after it.
+  its sample actually covered. Mid-branch that number was 54: deeper grouping
+  produced the rules first and the sample gate arrived after it.
+
+starship and the FastAPI template refuse on the same count as before, and the
+Rails API is the only one that refuses on more.
 
 ## The numbers this document used to carry were measured against nothing
 
