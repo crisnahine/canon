@@ -343,8 +343,14 @@ public_view = ("from django.views.generic import ListView\n\n\n"
                "class PublicListView(ListView):\n    def get(self, request):\n        return None\n")
 d, w = inject(root, data, "shop/views/public.py", public_view)
 check("a view that keeps the directory's real base without the login mixin is not refused", not d, w[:150])
-advisory = verify(root, data, "shop/views/public.py", public_view)
-check("the advisory names the real base, not the access mixin", "LoginRequiredMixin" not in advisory, advisory[:150])
+# A negative assertion alone can pass on a verify that went silent for the
+# wrong reason, so it needs a positive control in the same fixture: an
+# unrelated base must still be reported, or the gate could pass by accident.
+gate = verify(root, data, "shop/views/public.py", public_view)
+check("the view advisory reports no base mismatch for the real base", "inherits from" not in gate, gate[:150])
+odd_view = "class Odd(SomethingElse):\n    def get(self, request):\n        return None\n"
+liveness = verify(root, data, "shop/views/odd.py", odd_view)
+check("the view advisory still reports a base mismatch for an unrelated base", "inherits from" in liveness, liveness[:150])
 shutil.rmtree(root); shutil.rmtree(data)
 
 # 2. the same shape on a model directory: a mixin ahead of models.Model
@@ -359,8 +365,11 @@ plain_model = ("from django.db import models\n\n\n"
                "class Plain(models.Model):\n    def clean(self):\n        pass\n")
 d, w = inject(root, data, "shop/models/plain.py", plain_model)
 check("a model that keeps the directory's real base without the timestamp mixin is not refused", not d, w[:150])
-advisory = verify(root, data, "shop/models/plain.py", plain_model)
-check("the advisory names the real base, not the timestamp mixin", "TimeStamped" not in advisory, advisory[:150])
+gate = verify(root, data, "shop/models/plain.py", plain_model)
+check("the model advisory reports no base mismatch for the real base", "inherits from" not in gate, gate[:150])
+odd_model = "class OddModel(SomethingElse):\n    def clean(self):\n        pass\n"
+liveness = verify(root, data, "shop/models/odd.py", odd_model)
+check("the model advisory still reports a base mismatch for an unrelated base", "inherits from" in liveness, liveness[:150])
 shutil.rmtree(root); shutil.rmtree(data)
 
 # 3. Ruby, single base: shape.base enforcement is not disabled outright, only
