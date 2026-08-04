@@ -97,7 +97,17 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         if base.is_none() {
             out.extend(base_family(&dir, &ext, &members, settings));
         }
-        out.extend(base);
+        let contract = contract(&dir, &ext, &members, settings);
+        // A Rust type's `superclass` is its first trait impl, so both rules
+        // read one fact and would state it twice — "Types here inherit from
+        // `Loggable`" beside "Types here implement `Loggable`", two lines of
+        // the injected budget and two claims the checker cannot collapse. A
+        // trait impl is not a base class, and `contract` is the sentence that
+        // says so, the same way `base_family` yields to `base_class` above.
+        if !(contract.is_some() && reads_a_base_from_a_contract(&ext)) {
+            out.extend(base);
+        }
+        out.extend(contract);
         out.extend(module_arity(&dir, &ext, &members, settings));
         out.extend(collaborator(&dir, &ext, &members, settings));
         out.extend(macros(&dir, &ext, &members, settings));
@@ -105,7 +115,6 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(export_style(&dir, &ext, &members, settings));
         out.extend(annotation(&dir, &ext, &members, settings));
         out.extend(mixin(&dir, &ext, &members, settings));
-        out.extend(contract(&dir, &ext, &members, settings));
     }
     out.extend(namespace_per_directory(sets, settings));
     out
@@ -868,6 +877,18 @@ fn contract(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> 
     })
 }
 
+/// Whether this language's base type is one of the contracts the type
+/// declares rather than a second fact about it.
+///
+/// Only Rust. It has no inheritance at all, so the extractor records the first
+/// trait impl as the closest analogue of a base and `superclass` is a copy of
+/// an entry in `interfaces`. Every other language reads a base and an
+/// `implements` clause from two different pieces of syntax, and both are worth
+/// stating.
+fn reads_a_base_from_a_contract(ext: &str) -> bool {
+    matches!(canon_extract::lang::from_extension(ext), Some(canon_extract::Language::Rust))
+}
+
 /// Whether an import names something the whole repository can agree about.
 ///
 /// A relative path resolves differently from every directory, so counting the
@@ -1606,6 +1627,47 @@ mod tests {
         );
         let convs = derive_from("sem-contract-rs", &files);
         assert!(joined(&convs).contains("implement `Loggable`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_rust_trait_impl_is_stated_once_rather_than_as_a_base_as_well() {
+        // A Rust type's `superclass` is its first trait impl, so `base_class`
+        // and `contract` read one fact and state it twice: "Types here
+        // inherit from `Loggable`" beside "Types here implement `Loggable`",
+        // two injected lines and two claims nothing can collapse. A trait
+        // impl is not inheritance, and `contract` is the honest sentence.
+        let files = fixture::agreeing(
+            "src/models",
+            "rs",
+            6,
+            "pub struct Item$N;\n\nimpl Loggable for Item$N {\n    fn log(&self) {}\n}\n",
+        );
+        let convs = derive_from("sem-rs-one-fact", &files);
+        assert!(joined(&convs).contains("implement `Loggable`"), "got {}", joined(&convs));
+        assert!(
+            !convs.iter().any(|c| c.id.starts_with("shape.base")),
+            "one fact stated twice: {}",
+            joined(&convs)
+        );
+    }
+
+    #[test]
+    fn a_ruby_base_class_is_not_suppressed_by_a_contract_rule() {
+        // The suppression is about Rust, where one fact fills both fields.
+        // Every other language reads a base and an `implements` clause from
+        // two different pieces of syntax, and both remain worth stating.
+        let files = fixture::agreeing(
+            "app/services",
+            "rb",
+            6,
+            "class Item$N < ApplicationService\n  def call; end\nend\n",
+        );
+        let convs = derive_from("sem-rb-base-kept", &files);
+        assert!(
+            joined(&convs).contains("inherit from `ApplicationService`"),
+            "got {}",
+            joined(&convs)
+        );
     }
 
     #[test]
