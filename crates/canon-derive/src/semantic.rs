@@ -105,6 +105,7 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(export_style(&dir, &ext, &members, settings));
         out.extend(annotation(&dir, &ext, &members, settings));
         out.extend(mixin(&dir, &ext, &members, settings));
+        out.extend(contract(&dir, &ext, &members, settings));
     }
     out.extend(namespace_per_directory(sets, settings));
     out
@@ -760,6 +761,74 @@ fn mixin(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Opt
     })
 }
 
+/// "Types here implement `ShouldQueue`."
+///
+/// `interfaces` has named an `implements` clause since the extractors that
+/// fill it were written, and until now nothing derived a rule from it —
+/// only one fallback branch in the checker ever read it, after the base
+/// class check had already failed. Measured on a real Laravel repository,
+/// 119 of 119 files in `app/Jobs` declare `implements ShouldQueue`, and this
+/// said nothing about any of them.
+///
+/// Gated to the languages whose `interfaces` comes from an `implements`
+/// clause, so the statement stays true of what it names. Python's leading
+/// bases and Go's extra embeds are composition, not a contract, and already
+/// land in [`mixin`]'s field instead: their `interfaces` is empty by
+/// construction after that split. The gate reads the language rather than
+/// trusting that emptiness, so an extractor change that started recording
+/// something there could not silently turn composition into a false
+/// "implement" statement.
+///
+/// Counted only over files with a resolvable subject, the same restriction
+/// [`mixin`] applies, and by presence per file: a type declaring several
+/// interfaces is one vote for whichever one recurs most within it, not one
+/// vote per interface it names.
+fn contract(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
+    if !matches!(
+        canon_extract::lang::from_extension(ext),
+        Some(
+            canon_extract::Language::Php
+                | canon_extract::Language::TypeScript
+                | canon_extract::Language::Tsx
+                | canon_extract::Language::Rust
+        )
+    ) {
+        return None;
+    }
+    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+        .iter()
+        .filter_map(|s| {
+            let t = s.subject()?;
+            let mut names: Vec<&String> = t.interfaces.iter().collect();
+            names.sort_unstable();
+            names.dedup();
+            let dominant = names
+                .into_iter()
+                .max_by_key(|n| t.interfaces.iter().filter(|i| i == n).count())
+                .cloned();
+            Some((dominant, s.weight, *s))
+        })
+        .collect();
+
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let name = winner.clone()?;
+    Some(Convention {
+        id: format!("shape.contract.{}.{ext}", id_fragment(dir)),
+        statement: format!("Types here implement `{name}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
+        // Advisory. A directory that agrees on one interface can still
+        // legitimately hold the one type that implements another, or none
+        // at all.
+        enforcement: Enforcement::Advisory,
+    })
+}
+
 /// Whether an import names something the whole repository can agree about.
 ///
 /// A relative path resolves differently from every directory, so counting the
@@ -1342,6 +1411,118 @@ mod tests {
                 .iter()
                 .any(|c| c.id.starts_with("shape.macros") && c.statement.contains("`include`")),
             "got {text}"
+        );
+    }
+
+    #[test]
+    fn a_laravel_job_directory_derives_its_queue_contract() {
+        // Measured on a real Laravel repository: 119 of 119 files in
+        // `app/Jobs` declare `implements ShouldQueue`, and `interfaces` had
+        // been extracted for the life of the extractor without deriving
+        // anything from it.
+        let files = fixture::agreeing(
+            "app/Jobs",
+            "php",
+            6,
+            "<?php\nnamespace App\\Jobs;\nclass Job$N implements ShouldQueue\n{\n    public function handle() {}\n}\n",
+        );
+        let convs = derive_from("sem-contract", &files);
+        assert!(joined(&convs).contains("implement `ShouldQueue`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_ruby_directory_derives_no_contract_rule() {
+        // Ruby has no `implements` clause at all; whatever composition it
+        // does is already `mixin`'s to state, never this rule's.
+        let files = fixture::agreeing(
+            "app/workers",
+            "rb",
+            6,
+            "class Item$N\n  include Sidekiq::Worker\n\n  def perform; end\nend\n",
+        );
+        let convs = derive_from("sem-contract-rb", &files);
+        assert!(
+            !convs.iter().any(|c| c.id.starts_with("shape.contract")),
+            "got {}",
+            joined(&convs)
+        );
+    }
+
+    #[test]
+    fn a_python_directory_derives_no_contract_rule_even_if_interfaces_were_populated() {
+        // Python's `interfaces` is empty by construction today; its leading
+        // bases land in `mixins` instead. The gate reads the language rather
+        // than trusting that emptiness, so an extractor change that started
+        // recording something there could not silently produce a false
+        // "implement" statement — proven here by handing the rule a
+        // `FactSet` with `interfaces` populated directly, bypassing the
+        // extractor entirely.
+        let members: Vec<FactSet> = (0..6)
+            .map(|i| {
+                let facts = FileFacts {
+                    types: vec![canon_extract::TypeFacts {
+                        name: format!("Item{i}"),
+                        interfaces: vec!["ShouldQueue".to_string()],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                FactSet {
+                    rel: format!("app/jobs/item{i}.py"),
+                    dir: "app/jobs".to_string(),
+                    ext: "py".to_string(),
+                    weight: 1.0,
+                    modified_unix: 0,
+                    stem: format!("item{i}"),
+                    facts,
+                }
+            })
+            .collect();
+        let refs: Vec<&FactSet> = members.iter().collect();
+        let settings = Settings::default();
+        assert!(contract("app/jobs", "py", &refs, &settings).is_none());
+    }
+
+    #[test]
+    fn a_type_implementing_two_interfaces_votes_for_the_one_the_directory_agrees_on() {
+        // Four of six files list a second interface ahead of the one the
+        // whole directory agrees on. A dominant pick that took the first
+        // name in source order, the way `superclass` does, would vote for
+        // that other interface on those four files and lose the majority
+        // the two plain files already hold — 4/6 falls under the confidence
+        // floor, so the rule would derive nothing at all instead of naming
+        // `ShouldQueue`.
+        let mut files: Vec<(String, String)> = (0..4)
+            .map(|i| {
+                (
+                    format!("app/Jobs/Multi{i}.php"),
+                    format!(
+                        "<?php\nclass Multi{i} implements Loggable, ShouldQueue\n{{\n    public function handle() {{}}\n}}\n"
+                    ),
+                )
+            })
+            .collect();
+        files.extend((0..2).map(|i| {
+            (
+                format!("app/Jobs/Plain{i}.php"),
+                format!(
+                    "<?php\nclass Plain{i} implements ShouldQueue\n{{\n    public function handle() {{}}\n}}\n"
+                ),
+            )
+        }));
+        let convs = derive_from("sem-contract-two-interfaces", &files);
+        assert!(joined(&convs).contains("implement `ShouldQueue`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_type_with_no_interfaces_derives_no_contract_rule() {
+        let files =
+            fixture::agreeing("src/models", "ts", 6, "export class Item$N {\n  go(): void {}\n}\n");
+        let convs = derive_from("sem-no-contract", &files);
+        assert!(
+            !convs.iter().any(|c| c.id.starts_with("shape.contract")),
+            "got {}",
+            joined(&convs)
         );
     }
 

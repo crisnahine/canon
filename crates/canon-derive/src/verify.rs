@@ -370,6 +370,10 @@ const FAMILY_PREFIX: &str = "Types here inherit from a ";
 // has one left to strip from what follows the prefix instead of finding none
 // and returning `None` for every file.
 const MIXIN_PREFIX: &str = "Types here include ";
+// Same reasoning again: no trailing backtick, so `backticked` has one left to
+// strip from what follows instead of finding none and returning `None` for
+// every file — the defect that shipped, unnoticed, twice already.
+const CONTRACT_PREFIX: &str = "Types here implement ";
 
 /// "Views here are named `*.html.erb`."
 ///
@@ -784,10 +788,26 @@ fn check_shape(
         }
     }
 
-    out.extend(check_family(t, convention, &evidence));
-    out.extend(check_mixin(t, convention, &evidence));
+    out.extend(check_composition(t, convention, &evidence));
 
     out
+}
+
+/// [`check_family`], [`check_mixin`] and [`check_contract`], called as one.
+///
+/// [`check_shape`] already sits at the length `clippy::pedantic` allows, so a
+/// third arm calling each check in turn would grow it past that limit; this
+/// exists only to keep the addition to a single line there.
+fn check_composition(
+    t: &canon_extract::TypeFacts,
+    convention: &Convention,
+    evidence: &str,
+) -> Vec<(Claim, Violation)> {
+    check_family(t, convention, evidence)
+        .into_iter()
+        .chain(check_mixin(t, convention, evidence))
+        .chain(check_contract(t, convention, evidence))
+        .collect()
 }
 
 /// "Types here inherit from a `*BaseController`."
@@ -856,6 +876,41 @@ fn check_mixin(
             convention_id: convention.id.clone(),
             message: format!(
                 "`{}` does not include `{expected}`; types here do ({evidence})",
+                t.name
+            ),
+        },
+    ))
+}
+
+/// "Types here implement `ShouldQueue`."
+///
+/// A dedicated function rather than another arm of [`check_shape`], for the
+/// same reason [`check_family`] and [`check_mixin`] are: that function
+/// already carries the `shape.base` arm this sits beside in the derivation,
+/// and folding every arm into one body reads past the length
+/// `clippy::pedantic` allows.
+///
+/// Reads `interfaces` only, never `mixins`. `shape.contract` and
+/// `shape.mixin` state two different facts about a type — what it
+/// implements and what it composes — and checking either against the
+/// other's field would pass a file for implementing an interface it only
+/// included, or fail one for not including an interface it correctly
+/// implements.
+fn check_contract(
+    t: &canon_extract::TypeFacts,
+    convention: &Convention,
+    evidence: &str,
+) -> Option<(Claim, Violation)> {
+    let expected = backticked(&convention.statement, CONTRACT_PREFIX)?;
+    if t.interfaces.contains(&expected) {
+        return None;
+    }
+    Some((
+        ("shape.contract", t.name.clone()),
+        Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "`{}` does not implement `{expected}`; types here do ({evidence})",
                 t.name
             ),
         },
@@ -1707,6 +1762,54 @@ mod tests {
         assert!(
             !no_violation.iter().any(|v| v.message.contains("does not include")),
             "a conforming worker was reported: {no_violation:#?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_contract_rule_is_checked_against_the_same_prefix_it_was_stated_with() {
+        // `CONTRACT_PREFIX` carries no trailing backtick, the same reasoning
+        // `FAMILY_PREFIX`'s and `MIXIN_PREFIX`'s doc comments give:
+        // `backticked` splits on the prefix first and only then strips one
+        // leading backtick from what remains, so a prefix that already ends
+        // in one leaves nothing to strip and returns `None` for every file,
+        // and the rule derives, injects, and is never checked. Driven
+        // through the real fixture pipeline rather than two literals, so a
+        // mismatch here would have to survive both derivation and the check
+        // disagreeing about where the name sits.
+        let files = crate::fixture::agreeing(
+            "app/Jobs",
+            "php",
+            6,
+            "<?php\nnamespace App\\Jobs;\nclass Job$N implements ShouldQueue\n{\n    public function handle() {}\n}\n",
+        );
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let root = crate::fixture::build("verify-contract-roundtrip", &refs);
+        let settings = canon_core::Settings::default();
+        let entries = crate::walk::walk(&root, &settings);
+        let convs = crate::derive_from(&root, &settings, &entries);
+        let rule = convs.iter().find(|c| c.id.starts_with("shape.contract")).unwrap_or_else(|| {
+            panic!(
+                "no contract rule derived: {:?}",
+                convs.iter().map(|c| &c.id).collect::<Vec<_>>()
+            )
+        });
+        assert!(rule.statement.contains("`ShouldQueue`"), "got {}", rule.statement);
+
+        // A job that declares no interface at all.
+        let violating =
+            "<?php\nnamespace App\\Jobs;\nclass Rogue\n{\n    public function handle() {}\n}\n";
+        let violations = verify_source("app/Jobs/Rogue.php", violating, &convs);
+        assert!(
+            violations.iter().any(|v| v.message.contains("does not implement `ShouldQueue`")),
+            "the derived statement and the check disagreed on the prefix: {violations:#?}"
+        );
+
+        // A job that already implements it is not reported.
+        let conforming = "<?php\nnamespace App\\Jobs;\nclass Fresh implements ShouldQueue\n{\n    public function handle() {}\n}\n";
+        let no_violation = verify_source("app/Jobs/Fresh.php", conforming, &convs);
+        assert!(
+            !no_violation.iter().any(|v| v.message.contains("does not implement")),
+            "a conforming job was reported: {no_violation:#?}"
         );
     }
 
