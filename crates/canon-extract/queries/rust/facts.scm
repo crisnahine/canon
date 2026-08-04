@@ -33,9 +33,14 @@
 (attribute [(identifier) (scoped_identifier)] @annotation
   (#not-eq? @annotation "derive"))
 
-; #[derive(Debug, Serialize)] — one capture per derived trait.
+; #[derive(Debug, thiserror::Error)] — the list whole, split into one
+; annotation per trait in Rust.
+;
+; A `token_tree` is a flat token list, not a parse of what it holds, so a
+; capture per `identifier` inside it read `thiserror::Error` as the two traits
+; `thiserror` and `Error`. Neither is one.
 (attribute_item
   (attribute
     (identifier) @_derive
-    arguments: (token_tree (identifier) @annotation.derive))
+    arguments: (token_tree) @annotation.derive)
   (#eq? @_derive "derive"))

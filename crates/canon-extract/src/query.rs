@@ -149,11 +149,11 @@ pub(crate) fn run(language: Language, tree: &tree_sitter::Tree, source: &str) ->
     let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         let text = |index: u32| -> Option<String> {
-            m.captures
-                .iter()
-                .find(|c| c.index == index)
-                .and_then(|c| c.node.utf8_text(source.as_bytes()).ok())
-                .map(str::to_string)
+            let node = m.captures.iter().find(|c| c.index == index)?.node;
+            if outside_the_file(language, node, source) {
+                return None;
+            }
+            node.utf8_text(source.as_bytes()).ok().map(str::to_string)
         };
         let index_of = |wanted: &str| {
             names.iter().position(|n| *n == wanted).and_then(|i| u32::try_from(i).ok())
@@ -174,8 +174,10 @@ pub(crate) fn run(language: Language, tree: &tree_sitter::Tree, source: &str) ->
         }
         // A derive list is the convention; the word `derive` is not, so each
         // trait becomes its own annotation and the bare attribute is dropped.
-        if let Some(t) = index_of("annotation.derive").and_then(&text) {
-            facts.annotations.push(Annotation { name: format!("derive({t})") });
+        if let Some(list) = index_of("annotation.derive").and_then(&text) {
+            for derived in derived_traits(&list) {
+                facts.annotations.push(Annotation { name: format!("derive({derived})") });
+            }
         }
     }
     facts
@@ -183,6 +185,70 @@ pub(crate) fn run(language: Language, tree: &tree_sitter::Tree, source: &str) ->
 
 /// Matches past which a file is generated rather than written.
 const MATCH_LIMIT: u32 = 20_000;
+
+/// The traits a `#[derive(...)]` list names, as written.
+///
+/// The list arrives as the text of a `token_tree`, which is a flat run of
+/// tokens rather than a parse of what it holds. Splitting it here is what lets
+/// a qualified trait stay one name: matched token by token, `thiserror::Error`
+/// came back as `thiserror` and `Error`, and neither is a trait.
+fn derived_traits(list: &str) -> Vec<&str> {
+    list.trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Whether a capture sits in a subtree the structural pass already left out of
+/// the file.
+///
+/// Rust's inline `mod test`/`mod tests` is the only one: [`crate::rustlang`]
+/// skips it when it reads the file's shape, and the two passes have to agree
+/// about what the file is. Read otherwise, the one annotation rule a Rust
+/// directory gets is won by `cfg`, `test` and `allow` — attributes belonging
+/// to fixtures nobody chose as a convention — and its import rule by the
+/// `use super::*` such a module opens with.
+fn outside_the_file(language: Language, node: tree_sitter::Node<'_>, src: &str) -> bool {
+    if language != Language::Rust {
+        return false;
+    }
+    let mut at = Some(node);
+    while let Some(n) = at {
+        if is_test_module(n, src) || attribute_on_a_test_module(n, src) {
+            return true;
+        }
+        at = n.parent();
+    }
+    false
+}
+
+fn is_test_module(node: tree_sitter::Node<'_>, src: &str) -> bool {
+    node.kind() == "mod_item"
+        && matches!(crate::util::field_text(node, "name", src).as_deref(), Some("test" | "tests"))
+}
+
+/// Whether this attribute is one of those a test module carries.
+///
+/// The module's own `#[cfg(test)]` is a sibling of the module rather than a
+/// child of it, so the ancestor walk above never reaches it from the
+/// attribute. Found instead by looking forward past any further attributes to
+/// the item the run of them belongs to.
+fn attribute_on_a_test_module(node: tree_sitter::Node<'_>, src: &str) -> bool {
+    if node.kind() != "attribute_item" {
+        return false;
+    }
+    let mut next = node.next_named_sibling();
+    while let Some(sibling) = next {
+        if sibling.kind() != "attribute_item" {
+            return is_test_module(sibling, src);
+        }
+        next = sibling.next_named_sibling();
+    }
+    false
+}
 
 #[cfg(test)]
 mod tests {
@@ -342,6 +408,47 @@ mod tests {
         assert!(names.contains(&"derive(Debug)"), "got {names:?}");
         assert!(names.contains(&"derive(Serialize)"), "got {names:?}");
         assert!(!names.contains(&"derive"), "the bare word leaked through: {names:?}");
+    }
+
+    #[test]
+    fn a_qualified_derive_names_the_trait_and_not_its_crate() {
+        // A `token_tree` is a flat token list, so `thiserror::Error` arrives as
+        // two identifiers and a `::`. Read one capture per identifier it
+        // produced `derive(thiserror)`, which is not a trait.
+        let got = facts(Language::Rust, "#[derive(thiserror::Error, Debug)]\npub struct E;\n");
+        let names: Vec<&str> = got.annotations.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"derive(thiserror::Error)"), "got {names:?}");
+        assert!(names.contains(&"derive(Debug)"), "got {names:?}");
+        assert!(!names.contains(&"derive(thiserror)"), "a crate name read as a trait: {names:?}");
+        assert!(!names.contains(&"derive(Error)"), "half a path read as a trait: {names:?}");
+    }
+
+    #[test]
+    fn an_inline_test_module_contributes_no_annotations() {
+        // `rustlang.rs` leaves a `#[cfg(test)] mod tests` out of the file's
+        // shape, and the two passes have to agree about that: a directory gets
+        // one annotation rule, and `cfg`, `test` and `allow` won it from
+        // fixtures nobody chose as a convention.
+        let got = facts(
+            Language::Rust,
+            "#[derive(Debug)]\npub struct S;\n\n#[cfg(test)]\nmod tests {\n    #[allow(dead_code)]\n    #[test]\n    fn works() {}\n}\n",
+        );
+        let names: Vec<&str> = got.annotations.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"derive(Debug)"), "got {names:?}");
+        assert!(!names.contains(&"test"), "a test attribute leaked out: {names:?}");
+        assert!(!names.contains(&"allow"), "a test-only allow leaked out: {names:?}");
+        // The module's own `#[cfg(test)]` goes with it: it says the module is
+        // the file's tests, which is the thing being excluded.
+        assert!(!names.contains(&"cfg"), "the gate on the excluded module leaked out: {names:?}");
+    }
+
+    #[test]
+    fn a_cfg_outside_a_test_module_is_still_the_files_own_annotation() {
+        // The positive control. `#[cfg(unix)]` on a real item is a choice the
+        // file made, and excluding a test module must not reach it.
+        let got = facts(Language::Rust, "#[cfg(unix)]\npub struct Handle;\n");
+        let names: Vec<&str> = got.annotations.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"cfg"), "got {names:?}");
     }
 
     #[test]
