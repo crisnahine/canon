@@ -60,11 +60,11 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
         if !addresses_this_file(&raw) {
             continue;
         }
-        let ty = bare_name(&raw);
-        let trait_name = field_text(*child, "trait", source).map(|t| bare_name(&t));
+        let ty = target_name(&raw);
+        let implemented = field_text(*child, "trait", source).map(|t| trait_name(&t));
         let Some(index) = target_of(&facts.types, &modules, &ty, module) else { continue };
         let Some(target) = facts.types.get_mut(index) else { continue };
-        if let Some(t) = trait_name {
+        if let Some(t) = implemented {
             // A Rust type routinely implements several traits, and which one
             // landed in `superclass` was decided by where the author put the
             // block. Keeping all of them lets the check accept the file
@@ -196,15 +196,36 @@ fn is_pub(item: tree_sitter::Node<'_>) -> bool {
     child_of_kind(item, "visibility_modifier").is_some()
 }
 
-/// A type name without its generic arguments or its path prefix.
+/// The declaration an `impl` target names, without generics or path prefix.
 ///
 /// `impl<W: Write> Printer<W>` names the type `Printer<W>`, which never equals
 /// the `Printer` the struct declared, so every generic type came out with no
 /// methods and no trait. Eighty-one of ripgrep's two hundred and sixty
 /// top-level impls are generic.
-fn bare_name(text: &str) -> String {
-    let head = text.split_once('<').map_or(text, |(name, _)| name);
+///
+/// The prefix goes because this is matched against a name declared in this
+/// file, and [`addresses_this_file`] has already established that any path
+/// here is `crate::`, `self::` or `super::` — a route to a local declaration,
+/// not part of its name.
+fn target_name(text: &str) -> String {
+    let head = without_generics(text);
     head.rsplit("::").next().unwrap_or(head).trim().to_string()
+}
+
+/// The trait an `impl` block names, as the author wrote it.
+///
+/// Generics go for the same reason they go from a target. The qualifier stays:
+/// a statement is an instruction, and a directory whose types implement
+/// `serde::Serialize` has to be told `serde::Serialize`, which is the line to
+/// write. `Serialize` is a different line, and only correct in a file that has
+/// already imported the trait. Python and Go keep their qualifiers for the
+/// same reason.
+fn trait_name(text: &str) -> String {
+    without_generics(text).trim().to_string()
+}
+
+fn without_generics(text: &str) -> &str {
+    text.split_once('<').map_or(text, |(name, _)| name)
 }
 
 /// Every item declared in the file, including the ones nested in a `mod`.
@@ -290,6 +311,23 @@ mod tests {
     fn a_generic_trait_implementation_records_the_bare_trait() {
         let f = f("pub struct S;\nimpl From<u8> for S { fn from(_: u8) -> Self { S } }\n");
         assert_eq!(f.types[0].superclass.as_deref(), Some("From"));
+    }
+
+    #[test]
+    fn a_qualified_trait_keeps_the_qualifier_the_author_wrote() {
+        // A statement is an instruction. A directory whose types implement
+        // `serde::Serialize` has to be told `serde::Serialize`, which is the
+        // line to write; `Serialize` is a different line, and only correct in
+        // a file that has already imported the trait.
+        let qualified =
+            f("pub struct S;\nimpl serde::Serialize for S { fn serialize(&self) {} }\n");
+        assert_eq!(qualified.types[0].interfaces, vec!["serde::Serialize"]);
+        assert_eq!(qualified.types[0].superclass.as_deref(), Some("serde::Serialize"));
+
+        // The impl target keeps losing its prefix, because that prefix is a
+        // route to a local declaration rather than part of its name.
+        let rooted = f("pub struct S;\nimpl crate::S { pub fn call(&self) {} }\n");
+        assert_eq!(rooted.types[0].public_arity(), 1);
     }
 
     #[test]

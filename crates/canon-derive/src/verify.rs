@@ -204,9 +204,9 @@ fn one_line_per_claim(found: Vec<(Claim, &Convention, Violation)>) -> Vec<Violat
 ///
 /// `FileFacts::is_empty` is the wrong question here, because it consults
 /// `calls`, and only the full extraction records those: `verify_with` takes the
-/// cheap structural pass unless an import rule happens to be in scope, so a
-/// predicate reading `calls` answers differently depending on an unrelated
-/// rule. These three fields are populated identically either way.
+/// cheap structural pass unless an import, annotation or macro rule happens to
+/// be in scope, so a predicate reading `calls` answers differently depending on
+/// an unrelated rule. These three fields are populated identically either way.
 fn declares_nothing(facts: &FileFacts) -> bool {
     facts.namespace.is_none() && facts.types.is_empty() && facts.free_functions.is_empty()
 }
@@ -507,14 +507,20 @@ fn check_annotation(facts: &FileFacts, convention: &Convention) -> Option<(Claim
 
 /// A file that calls none of the macros its directory agrees on.
 ///
-/// Reported only when the file makes some call. Gated on `facts.calls` rather
-/// than [`declares_nothing`], unlike its neighbours: that check reads
-/// `types`, `free_functions` and `namespace`, none of which a Vue
-/// `<script setup>` block ever populates, and gating on it here would exempt
-/// exactly the files this family exists to speak about. A file that calls
-/// nothing at all — blank, markup-only, or pure type declarations — has made
-/// no choice, and saying so spends a line describing an absence nobody
-/// decided.
+/// Reported only when the file makes a call the derivation would have
+/// counted. Gated on `facts.calls` rather than [`declares_nothing`], unlike
+/// its neighbours: that check reads `types`, `free_functions` and
+/// `namespace`, none of which a Vue `<script setup>` block ever populates,
+/// and gating on it here would exempt exactly the files this family exists to
+/// speak about. A file that makes no such call — blank, markup-only, pure
+/// type declarations, or one whose every call names a receiver — has made no
+/// choice, and saying so spends a line describing an absence nobody decided.
+///
+/// The gate applies `macros`' own filter rather than asking whether the file
+/// calls anything at all. The derivation counts only receiverless calls that
+/// are not import or composition keywords, so a file whose calls all name a
+/// receiver contributed nothing it could have counted, and judging it here
+/// held it to a fact it does not have.
 ///
 /// Parsed with the shared [`backticked`], unlike [`check_annotation`]:
 /// `MACRO_PREFIX` stops short of the opening backtick, so splitting on it and
@@ -525,9 +531,10 @@ fn check_annotation(facts: &FileFacts, convention: &Convention) -> Option<(Claim
 /// would derive and never be checked, with nothing to say so.
 fn check_macro(facts: &FileFacts, convention: &Convention) -> Option<(Claim, Violation)> {
     let expected = backticked(&convention.statement, MACRO_PREFIX)?;
-    if facts.calls.is_empty()
-        || facts.calls.iter().any(|c| c.receiver.is_none() && c.name == expected)
-    {
+    let mut counted =
+        facts.calls.iter().filter(|c| c.receiver.is_none() && crate::semantic::is_macro(&c.name));
+    let first = counted.next()?;
+    if first.name == expected || counted.any(|c| c.name == expected) {
         return None;
     }
     Some((
@@ -1968,6 +1975,41 @@ mod tests {
             !no_violation.iter().any(|v| v.message.contains("does not implement")),
             "a conforming job was reported: {no_violation:#?}"
         );
+    }
+
+    #[test]
+    fn a_file_that_made_no_call_the_derivation_counts_is_not_told_it_forgot_a_macro() {
+        // The derivation counts only receiverless calls that are not import
+        // or composition keywords. A file whose every call names a receiver
+        // contributed nothing it could have counted, and asking whether the
+        // file called anything at all answers a different question.
+        let mut rule = conv("shape.macros.src.vue", "Files here use `defineProps`");
+        rule.scope = Scope::DirExt("src".into(), "vue".into());
+        let receivered = verify_source(
+            "src/Widget.vue",
+            "<script setup lang=\"ts\">\nconst x = store.load()\n</script>\n",
+            std::slice::from_ref(&rule),
+        );
+        assert!(receivered.is_empty(), "a file with no counted call was judged: {receivered:#?}");
+
+        // Nor a file whose only receiverless call is one the derivation
+        // excludes by name.
+        let mut rb = conv("shape.macros.app.workers.rb", "Files here use `sidekiq_options`");
+        rb.scope = Scope::DirExt("app/workers".into(), "rb".into());
+        let keyword_only =
+            verify_source("app/workers/plain.rb", "require 'json'\n", std::slice::from_ref(&rb));
+        assert!(
+            keyword_only.is_empty(),
+            "an import keyword was read as a macro choice: {keyword_only:#?}"
+        );
+
+        // A file that does make a counted call is still judged.
+        let called = verify_source(
+            "src/Widget.vue",
+            "<script setup lang=\"ts\">\nconst x = otherHelper()\n</script>\n",
+            &[rule],
+        );
+        assert_eq!(called.len(), 1, "got {called:#?}");
     }
 
     #[test]

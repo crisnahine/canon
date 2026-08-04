@@ -82,8 +82,11 @@ pub struct TypeFacts {
     /// requirement rather than a preference. Go has no order at all, only a
     /// set of embedded fields.
     ///
-    /// Empty for a language with a single base, where `superclass` says
-    /// everything there is to say.
+    /// Filled by the languages whose declaration may name several — Python's
+    /// positional base list and Go's embedded fields — and filled there even
+    /// when it names only one, so the field reads the same way for every file
+    /// of a language. Empty for the languages whose declaration may name one,
+    /// where `superclass` says everything there is to say.
     pub bases: Vec<String>,
     /// Every contract the type declares, when the language lets it declare more
     /// than one: Rust's trait impls, PHP's `implements`, TypeScript's

@@ -235,6 +235,17 @@ mod tests {
     }
 
     #[test]
+    fn a_splatted_base_list_names_only_the_bases_written_out() {
+        // `*extra` is a computed base list and `**kw` is configuration for the
+        // metaclass. Neither names a type, and reading either as one puts
+        // `*extra` into the statement a directory of them derives.
+        let f = f("class M(Base, *extra, **kw):\n    def go(self): pass\n");
+        assert_eq!(f.types[0].bases, vec!["Base"]);
+        assert_eq!(f.types[0].superclass.as_deref(), Some("Base"));
+        assert!(f.types[0].mixins.is_empty());
+    }
+
+    #[test]
     fn a_single_base_is_unchanged_by_ordering() {
         // `bare_base` already strips a trailing `[...]`; adding the ordering
         // logic for a multi-base class must not disturb that.

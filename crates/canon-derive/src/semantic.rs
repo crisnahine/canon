@@ -618,39 +618,53 @@ fn macros(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Op
 
 /// Whether a receiverless call is a framework macro rather than plumbing.
 ///
-/// Import keywords are already an import fact: `require "json"` parses as a
-/// call with an argument list in the same query pass that also records it as
-/// an import, and counting it again would find every Ruby directory agreeing
-/// that it uses `require`. Everything else is left in: a helper a directory
-/// calls unanimously is as much a convention as a framework macro, and the
-/// agreement bar decides which one survives.
+/// Everything not named below is left in: a helper a directory calls
+/// unanimously is as much a convention as a framework macro, and the
+/// agreement bar decides which one survives. The two exclusions are excluded
+/// for unrelated reasons, so each states its own.
+pub(crate) fn is_macro(name: &str) -> bool {
+    !is_import_keyword(name) && !is_composition_keyword(name)
+}
+
+/// A keyword that is already an import fact.
 ///
-/// `include`, `extend` and `prepend` are excluded the same way, now that
-/// [`mixin`] already turns a class-body one into `` Types here include
-/// `Sidekiq::Worker` ``, a fact both more specific and more true than `` Files
-/// here use `include` `` sitting beside it and saying nothing a Ruby author
-/// does not already know.
+/// `require "json"` parses as a call with an argument list in the same query
+/// pass that also records it as an import, and counting it again would find
+/// every Ruby directory agreeing that it uses `require`.
+fn is_import_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "require" | "require_relative" | "load" | "import" | "include_once" | "require_once"
+    )
+}
+
+/// A keyword [`mixin`] already states more precisely.
 ///
-/// The cost: `calls` comes from the query pass and is unscoped, while
+/// `` Types here include `Sidekiq::Worker` `` names the module; `` Files here
+/// use `include` `` would name only the keyword every Ruby author already
+/// knows.
+///
+/// Two costs, both accepted.
+///
+/// `calls` comes from the query pass and is unscoped, while
 /// `TypeFacts::mixins` is read from the class body only, so this also
 /// silences the macro rule for an `include`/`extend`/`prepend` written
-/// outside one, which `mixin` never sees and so never replaces. That case is
-/// narrow in practice: the common `def self.included(base)` hook calls
+/// outside one, which [`mixin`] never sees and so never replaces. That case
+/// is narrow in practice: the common `def self.included(base)` hook calls
 /// `extend` on a receiver (`base.extend(ClassMethods)`), so it was never a
 /// receiverless call to begin with.
-fn is_macro(name: &str) -> bool {
-    !matches!(
-        name,
-        "require"
-            | "require_relative"
-            | "load"
-            | "import"
-            | "include_once"
-            | "require_once"
-            | "include"
-            | "extend"
-            | "prepend"
-    )
+///
+/// And the test is the name, not the language, so Django pays for Ruby's
+/// keyword: a `urls.py` writes `include('blog.urls')`, a real framework macro
+/// that is neither an import nor a mixin, and this silences it. Reading the
+/// language instead would mean threading it through the checker as well,
+/// which is handed one file rather than one directory — and the Django
+/// directories that lose `include` still derive `path`, the receiverless call
+/// that sits beside every one of them and characterises the file just as
+/// well. Admitting `include` by name, meanwhile, would put `` Files here use
+/// `include` `` on every Ruby directory in the tree.
+fn is_composition_keyword(name: &str) -> bool {
+    matches!(name, "include" | "extend" | "prepend")
 }
 
 /// "Files here import from `src/config`."
