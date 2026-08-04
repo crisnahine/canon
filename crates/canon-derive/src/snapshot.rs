@@ -23,7 +23,13 @@ use serde::{Deserialize, Serialize};
 /// versions refuse to derive. A `kebab-case` rule pinned by a vendored
 /// `jquery-3.4.1.min.js` was graded `Blocking` from the stored snapshot and
 /// went on refusing writes after the release that stopped deriving it.
-pub const SNAPSHOT_VERSION: u32 = 17;
+pub const SNAPSHOT_VERSION: u32 = 18;
+// 18: a Python typing marker is no longer read as the type's base, a Rust
+//     derive list is read whole, and a Rust `#[cfg(test)] mod tests` no longer
+//     contributes facts. A v17 snapshot holds `` Types here inherit from
+//     `Generic` `` for a directory of generic models, `derive(thiserror)` as a
+//     derived trait, and annotation and import rules naming `cfg`, `test`,
+//     `allow` and `super::*`.
 // 17: a Cypress suite directory is read as a test directory, and a commit time
 //     is keyed the way the index spells the file it belongs to. A v16 snapshot
 //     holds `shape.macros` rules stating Cypress's own vocabulary, and — for

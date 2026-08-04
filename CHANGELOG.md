@@ -10,6 +10,47 @@ class is not how most frameworks say what a file is.
 
 ### Fixed
 
+- **A Python typing marker was read as the type's base.** Python's frameworks
+  order a base list mixins-first, so the last positional base is the type the
+  class is -- and its typing markers go last for the same reason. Six files of
+  `class Page(BaseModel, Generic[T])` stated that types here inherit from
+  `Generic`; `ABC` and `Protocol` failed the same way. The three are dropped
+  when choosing the base, which is agreement between spellings rather than a
+  preference between them: `class C(Base, ABC)` and
+  `class C(Base, metaclass=ABCMeta)` are one class and the keyword form already
+  read as `Base`. The alternative, tallying the directory's bases by presence,
+  was measured and rejected -- it ties at 6/6 in the reported case and resolves
+  alphabetically, and it names `PermissionCheckedMixin` and
+  `AdminTemplateTestUtils` as the base in four of the five wagtail directories
+  where it moves. A marker that is the only base stays.
+
+- **`#[derive(thiserror::Error)]` yielded two traits, neither of them one.** A
+  `token_tree` is a flat run of tokens rather than a parse of what it holds, so
+  a capture per identifier inside it read the crate name and the trait name as
+  two separate derives. The list is read whole and split at its commas.
+
+- **A Rust file's annotation and import rules came from its test module.** The
+  fact query ran over `#[cfg(test)] mod tests`, which the structural pass
+  deliberately leaves out of the file's shape. On canon's own tree that cost
+  four annotation rules naming `cfg`, `test` and `allow`, and an import rule
+  naming `super::*`; a real one naming `must_use` at 10/11 was underneath them.
+  On starship it cost two `cfg` rules.
+
+- **Every git call was unbounded, and one unreadable path cost the whole file
+  list.** `Command::output` waits on its child with no bound, so the module's
+  claim that nothing in it may block a session held only for the commit-time
+  walk -- while `ls_files` runs at the end of every turn that touched a file
+  and waits on an index a network filesystem or a held lock can stall. The
+  listing is also decoded the way the commit walk already decodes its own: a
+  path that is not valid UTF-8 is legal on Linux, and strict decoding discarded
+  the entire tracked list for one of them, silently handing the caller the
+  filesystem walk this module exists to avoid.
+
+- **The issue harness's violating fixture broke nothing.** It broke three rules
+  and stopped refusing when each was deliberately narrowed on this branch, so
+  three checks had been failing -- the ones holding `Edit`/`Write` parity and
+  the `.canon.toml` escape hatch. It now breaks exactly one rule still enforced.
+
 - **A React hook and a Next.js route boundary were refused for their
   framework-mandated names.** `useOnboarding.tsx` is valid `camelCase`, so the
   guard that exempts a name no style admits never saw it, and a `PascalCase`
@@ -65,9 +106,9 @@ class is not how most frameworks say what a file is.
   for a context block, and a run with no blocks at all fails rather than
   passing. The base-order mutant was also Python-only, which is the one language
   whose base rule was already advisory, so it measured the exemption; it
-  generates Go mutants too. Real numbers over nine repositories: 20,679 tracked
-  files replayed with 18,694 blocks and no refusals, and 12,323 new files with
-  11,677 blocks and no refusals.
+  generates Go mutants too. Real numbers over nine repositories: 20,718 tracked
+  files replayed with 18,625 blocks and no refusals, and 12,324 new files with
+  11,673 blocks and no refusals.
 
 - **A Django view was refused for inheriting from its own mixin.** Python's
   base list is positional and its frameworks order it mixins-first, so reading
@@ -214,10 +255,39 @@ class is not how most frameworks say what a file is.
   the same derivation cost. Cost is bounded from the other side by `min_files`,
   which derives nothing from a group too small however deep it sits.
 
-- `SNAPSHOT_VERSION` 10 to 17. The snapshot is a cache keyed on the commit, its
+- **One table for the whole vocabulary.** Two contracts lived apart and each
+  had already shipped a silent bug: a family left off the list of those needing
+  the tree-sitter query pass does not go quiet but reports a violation against
+  every file, because the field it reads is empty in the cheap pass; and a
+  statement formatted in one file and parsed in another derives, reaches the
+  model, and is never checked when the two disagree by one character. Each
+  family now declares its words and its pass once, deriving and checking read
+  that one row, and the guard is executable -- every family has a file that
+  satisfies a rule of it and one that breaks it. `check_shape` becomes a table
+  of named arms, four derivations that were the same twenty lines fold onto one
+  body, and so do the two checks that differed in four values. Every convention
+  and every grade on the Rails API, the React client, nuxt-ui and starship is
+  identical across the change.
+
+- `SNAPSHOT_VERSION` 10 to 18. The snapshot is a cache keyed on the commit, its
   age and the settings, so a new binary at an unchanged commit goes on serving
   the old binary's conventions, including, from a version 10 snapshot, the
   first-positional-base reading that refused a Django view.
+
+### Verified
+
+- **Every replay figure in the 0.4.1 and 0.5.0 notes below is void**, for the
+  reason the harness fix above gives: they were measured against a snapshot
+  nobody loaded, so they count files opened rather than files checked.
+
+- The corpus is nine checkouts and 28,388 tracked files, deriving 1,000
+  conventions of which 188 may refuse. No naming rule that may refuse refuses a
+  name the repository already uses inside that rule's own scope, on any of the
+  nine.
+
+- 514 unit tests, 78 refusal-regression assertions, 35 issue-regression
+  assertions, 75 fail-open checks, 8 of 8 published platform assets.
+  `tests/injection-reaches-the-model.sh` passes against the installed host.
 
 ## [0.5.0] — 2026-08-04
 
@@ -631,6 +701,10 @@ The corpus is seventeen repositories now: 15,974 tracked files replayed and
 5,946 new files written into real directories, none refused. `SNAPSHOT_VERSION`
 is 9.
 
+> Both replay figures above are void: the harnesses that produced them loaded
+> no snapshot, so nothing was checked. See the `Verified` note under
+> `[Unreleased]`.
+
 
 ### Fixed — a third review round, and six defects older than any of it
 
@@ -701,7 +775,9 @@ Older than all three rounds:
   run against the binary from before its fix to confirm it fails there. Three
   did not, when first written, and were rebuilt until they did.
 - 15,974 tracked files from the seventeen repositories replayed through the
-  write path: 11,700 given conventions, none refused, none errored.
+  write path: 11,700 given conventions, none refused, none errored. *Void: the
+  harness loaded no snapshot, so no rule was ever applied. See the `Verified`
+  note under `[Unreleased]`.*
 - 5,946 *new* files written into those same directories — one file's content at
   its neighbour's name, and a test in each naming idiom into every directory
   with an enforceable rule — none refused. This is the harness that matters:

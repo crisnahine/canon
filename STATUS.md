@@ -6,17 +6,20 @@ Every number below was executed. Reproduce with the commands shown.
 
 ```
 cargo build --release                      0 errors
-cargo test --workspace                     399 passing
-cargo clippy --workspace                   0 warnings
+cargo test --workspace                     514 passing
+cargo clippy --workspace --all-targets     0 warnings
 cargo fmt --all --check                    clean
 ./tests/fail-open.sh                       75/75
 ./tests/asset-coverage.sh                  8 of 8 platforms
 ./tests/injection-reaches-the-model.sh     PASS
-tests/refusal-regressions.py               50/50
+tests/refusal-regressions.py               78/78
 tests/issue-regressions.py                 35/35
+tests/replay-tracked-files.py              20,718 replayed, 0 refused
+tests/replay-new-files.py                  12,324 written,  0 refused
+tests/naming-already-used.py               0 names refused that the sample used
 ```
 
-The last two need fixtures and the corpus:
+The last five need fixtures and the corpus:
 
 ```
 tests/fixtures-for-issue-regressions.sh /tmp/canon-fixtures
@@ -26,31 +29,59 @@ python3 tests/refusal-regressions.py  ./target/release/canon
 tests/clone-corpus.sh /tmp/canon-corpus/realrepos
 python3 tests/replay-tracked-files.py ./target/release/canon /tmp/canon-corpus
 python3 tests/replay-new-files.py     ./target/release/canon /tmp/canon-corpus
+python3 tests/naming-already-used.py  ./target/release/canon /tmp/canon-corpus
 ```
 
-13,755 lines of Rust across five crates, of which roughly half are tests,
-plus 195 lines of tree-sitter query across seven languages.
+18,325 lines of Rust across five crates, of which roughly half are tests,
+plus 258 lines of tree-sitter query across seven languages.
 
-## What the six issues moved
+## What this branch moved
 
-Measured with one pinned binary against the three real checkouts, before and
-after, at the same commit with a clean tree:
+Two binaries, one built at the branch point and one at its tip, run against the
+same five checkouts at the same commit with a clean tree:
 
-| Repository | Conventions | Rules that may refuse |
-|---|---|---|
-| 9,557-file Rails | 138 to 146 | 26 to 26 |
-| 3,189-file React | 52 to 93 | 12 to 12, identical ids |
-| 698-file WordPress | 2 to 2 | 2 to 1 |
+| Repository | Tracked | Conventions | Rules that may refuse |
+|---|---|---|---|
+| Rails API | 9,588 | 146 to 264 | 26 to 39 |
+| TypeScript/React client | 3,193 | 93 to 166 | 12 to 8 |
+| wagtail | 5,210 | 74 to 111 | 34 to 25 |
+| FastAPI template | 238 | 10 to 17 | 6 to 6 |
+| starship | 814 | 7 to 9 | 4 to 4 |
 
-The gains are the new vocabulary: ERB from one rule to nine, 39 export-style
-rules in the React tree, and the first structural PHP rule. Nothing gained a
-refusal anywhere, and the one lost is `naming.simple-vt.js`, a `kebab-case`
-rule at 5/5 resting on `jquery-3.4.1.min.js` and `modernizr-3.7.1.min.js` — the
-defect in #19, found in the wild in the repository it was reported against.
+Most of the gain is vocabulary that did not exist before and refuses nothing:
+54 macro rules and 23 mixin rules on the Rails API, 23 macro rules on the React
+client, 14 on wagtail, the first `shape.contract` rule on starship. Grouping
+eight directories deep rather than four is the rest of it, and that one does
+reach enforcement: a narrower directory reaches total agreement where its
+parent did not, which is where the Rails API's extra thirteen refusing rules
+come from.
 
-Determinism is the other measured change: the same tree now derives a
-byte-identical convention set across rebuilds, where it moved between 50 and 54
-before.
+The two columns move in opposite directions on the other three, and each fall
+is a rule this branch decided not to enforce.
+
+- wagtail's base rules go from 10 refusing to 1. A Python class lists several
+  bases and which one is "the" base is a reading, not a fact, so the grade for
+  a Python base rule is now Advisory.
+- The React client's naming rules go from 12 refusing to 8 while the family
+  triples in size, because a rule may now only refuse inside the directories
+  its sample actually covered.
+- Mid-branch that number was 54, not 12 or 8. Deeper grouping produced the
+  rules first and the sample gate arrived after it.
+
+## The numbers this document used to carry were measured against nothing
+
+Every replay figure in the version of this file before this one is void, and
+the reason is worth stating rather than quietly correcting.
+
+Both replay harnesses ran `canon inject` with no data directory of their own
+and no `sys.exit`. With no snapshot, `inject` answers `{}` for every case, so
+each harness loaded zero rules, saw zero refusals, and reported a clean sweep
+it could not have failed. The counts they printed were counts of files opened.
+
+That is why both now count how many replayed cases actually received a context
+block, and fail when none did. A harness that cannot tell "no rule fired" from
+"no rule exists" is not evidence, and this one reported success from the second
+state for as long as it existed.
 
 ## What a pre-push review found, and why the harnesses missed it
 
@@ -157,17 +188,43 @@ until the next session, because the decision was baked into the snapshot. The
 escape hatch a refusal points at was inert at the only moment anyone reaches
 for it.
 
-## Nothing legitimate is refused, at 15,974 files and 5,946 new ones
+## Nothing legitimate is refused, at 20,718 files and 12,324 new ones
 
 The safety claim behind enforcement is that a rule may only refuse when every
 file in scope already agrees, so nothing already in the tree can break one.
 
-Measured rather than argued. Every tracked file of a supported extension in all
-seventeen repositories was replayed through the write path, as though the model
-had just written it:
+The corpus is nine checkouts, 28,388 tracked files, and it derives 1,000
+conventions of which 188 may refuse:
+
+| | tracked | conventions | may refuse |
+|---|---|---|---|
+| rails-api | 9,567 | 264 | 39 |
+| py-wagtail | 5,203 | 111 | 25 |
+| client | 3,189 | 166 | 8 |
+| pixelfed | 2,603 | 150 | 50 |
+| hugo | 2,539 | 67 | 31 |
+| nest | 2,128 | 146 | 12 |
+| nuxt-ui | 2,117 | 70 | 13 |
+| starship | 808 | 9 | 4 |
+| fastapi-app | 234 | 17 | 6 |
+
+Measured rather than argued. Every tracked file of a supported extension was
+replayed through the write path, as though the model had just written it. The
+middle column is the one that separates evidence from an empty snapshot: how
+many of those writes canon actually had something to say about.
 
 ```
-15,974 files   11,700 given conventions   0 refused   0 errors
+                files   with a block   refused
+rails-api       6,384          5,722         0
+py-wagtail      2,796          2,481         0
+client          2,688          2,536         0
+pixelfed        2,231          1,845         0
+hugo            2,119          1,786         0
+nest            2,031          1,964         0
+nuxt-ui         1,541          1,454         0
+starship          737            710         0
+fastapi-app       191            127         0
+TOTAL          20,718         18,625         0
 ```
 
 That result is weaker than it sounds, and it is worth being precise about why.
@@ -178,18 +235,29 @@ which is a file that does not exist yet.
 
 So the second harness writes *new* files into real directories. The content of
 one tracked file at the path of another in the same directory — both the name
-and the shape idiomatic for that directory — and a test file in each of the
-common naming idioms, into every directory that has an enforceable shape rule:
+and the shape idiomatic for that directory — a test file in each of the common
+naming idioms, into every directory that has an enforceable shape rule, and a
+mutant: a tracked file's type header rewritten to keep only its last base, so a
+directory where every class lists a mixin first yields a file that inherits the
+same real base without the mixin.
 
 ```
-5,946 new files   0 refused   0 errors
+12,324 new files   11,673 with a block   0 refused   0 errors
 ```
 
-Three false positives were found this way and by nothing else. Two Rust files
-that satisfy the arity rule they were refused by — two modules declaring the
-same type name, and a type implemented from two `#[cfg]`-gated modules — and
-the first test file written into any directory of service objects, which was
-told it must inherit `BaseService` and expose one public method.
+29 of those are mutants, all in the two languages where a declaration may name
+several bases at once: 20 in wagtail's Python and 9 in hugo's Go. None refused.
+
+A third harness asks the narrowest form of the same question: for every naming
+rule that may refuse, does it refuse a name the repository already uses? Across
+the corpus, no rule refuses a name used inside its own scope.
+
+Three false positives were found by the new-file harness and by nothing else.
+Two Rust files that satisfy the arity rule they were refused by — two modules
+declaring the same type name, and a type implemented from two `#[cfg]`-gated
+modules — and the first test file written into any directory of service
+objects, which was told it must inherit `BaseService` and expose one public
+method.
 
 Deliberate violations are still caught, through the same code path: a Laravel
 console command whose entrypoint is `run` rather than `handle`, a RuboCop cop
@@ -444,8 +512,9 @@ it would prevent.
 The default is on because the alternative is a tool followed when convenient,
 and because the condition for refusing makes a false positive a contradiction:
 a rule only qualifies when every file in scope already agrees, so no existing
-file can break one. Checked rather than argued — 15,265 tracked files from
-fourteen public repositories, replayed through the write path, refused none.
+file can break one. Checked rather than argued — 20,718 tracked files from nine
+production repositories, replayed through the write path, refused none, and
+18,625 of them given a rule to check against.
 
 The injection budget is not what bounds the block. Measured on the same
 workspace, real paths spend 262 to 486 bytes of it, and raising it from 1,500

@@ -180,17 +180,18 @@ get the same verdict either way.
 
 Because a rule may only refuse when *every* file already agrees, no file that
 exists in the repository can violate one. That is checkable rather than
-reassuring: 15,265 tracked files from fourteen production repositories —
-Mastodon, Laravel, RuboCop, Nuxt, Vue, Redux Toolkit, ripgrep, Flask, requests,
-gin, cobra, Slim, Sinatra, axios — replayed through the write path, refused
-none of them.
+reassuring: 20,718 tracked files from nine production repositories — a Rails
+API, a TypeScript/React client, wagtail, pixelfed, hugo, NestJS, nuxt-ui,
+starship and the FastAPI template — replayed through the write path, refused
+none of them. 18,625 of those writes got a rule to check against, which is what
+separates that result from a snapshot nobody loaded.
 
 That is the weaker half of the check, because a file already in the index has
-already voted. The half that finds things writes 5,700 *new* files into those
-same directories — the content of one file at the name of its neighbour, and a
-test in each naming idiom into every directory holding an enforceable rule.
-None of those are refused either, and three false positives were found that
-way and no other.
+already voted. The half that finds things writes 12,324 *new* files into those
+same directories — the content of one file at the name of its neighbour, a test
+in each naming idiom into every directory holding an enforceable rule, and a
+class rewritten to keep only the base its neighbours put last. None of those
+are refused either, and three false positives were found that way and no other.
 
 ```toml
 # .canon.toml — if you would rather never be interrupted
