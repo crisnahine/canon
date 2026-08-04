@@ -584,13 +584,35 @@ fn macros(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Op
 /// Import keywords are already an import fact: `require "json"` parses as a
 /// call with an argument list in the same query pass that also records it as
 /// an import, and counting it again would find every Ruby directory agreeing
-/// that it uses `require`. Everything else is left in — a helper a directory
+/// that it uses `require`. Everything else is left in: a helper a directory
 /// calls unanimously is as much a convention as a framework macro, and the
 /// agreement bar decides which one survives.
+///
+/// `include`, `extend` and `prepend` are excluded the same way, now that
+/// [`mixin`] already turns a class-body one into `` Types here include
+/// `Sidekiq::Worker` ``, a fact both more specific and more true than `` Files
+/// here use `include` `` sitting beside it and saying nothing a Ruby author
+/// does not already know.
+///
+/// The cost: `calls` comes from the query pass and is unscoped, while
+/// `TypeFacts::mixins` is read from the class body only, so this also
+/// silences the macro rule for an `include`/`extend`/`prepend` written
+/// outside one, which `mixin` never sees and so never replaces. That case is
+/// narrow in practice: the common `def self.included(base)` hook calls
+/// `extend` on a receiver (`base.extend(ClassMethods)`), so it was never a
+/// receiverless call to begin with.
 fn is_macro(name: &str) -> bool {
     !matches!(
         name,
-        "require" | "require_relative" | "load" | "import" | "include_once" | "require_once"
+        "require"
+            | "require_relative"
+            | "load"
+            | "import"
+            | "include_once"
+            | "require_once"
+            | "include"
+            | "extend"
+            | "prepend"
     )
 }
 
@@ -1297,6 +1319,30 @@ mod tests {
             fixture::agreeing("app/models", "rb", 6, "class Item$N < ApplicationRecord\nend\n");
         let convs = derive_from("sem-no-mixin", &files);
         assert!(!convs.iter().any(|c| c.id.starts_with("shape.mixin")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_class_body_include_does_not_also_derive_a_macro_rule() {
+        // `include` is a fact `shape.mixin` already carries, more precisely
+        // than `shape.macros` ever could: `Types here include
+        // `Sidekiq::Worker`` names the module, where `Files here use
+        // `include`` would only name the keyword every Ruby author already
+        // knows.
+        let files = fixture::agreeing(
+            "app/workers",
+            "rb",
+            6,
+            "class Item$N\n  include Sidekiq::Worker\n\n  def perform; end\nend\n",
+        );
+        let convs = derive_from("sem-mixin-not-macro", &files);
+        let text = joined(&convs);
+        assert!(text.contains("include `Sidekiq::Worker`"), "got {text}");
+        assert!(
+            !convs
+                .iter()
+                .any(|c| c.id.starts_with("shape.macros") && c.statement.contains("`include`")),
+            "got {text}"
+        );
     }
 
     #[test]
