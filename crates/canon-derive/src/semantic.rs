@@ -1967,4 +1967,23 @@ mod tests {
         assert!(rule.statement.contains("`defineProps`"), "got {}", rule.statement);
         assert_eq!(rule.agreeing, 6, "the shared macro was not counted in every file");
     }
+
+    #[test]
+    fn a_directory_deeper_than_four_levels_derives_a_rule_of_its_own() {
+        // A workspace holding several checkouts prefixes every path with the
+        // checkout name, so `api/app/services/billing` is already four levels
+        // down and everything below it had no group at all.
+        let files = fixture::agreeing(
+            "api/app/services/billing/invoices",
+            "rb",
+            6,
+            "class Item$N < InvoiceService\n  def call; end\nend\n",
+        );
+        let convs = derive_from("sem-deep-group", &files);
+        assert!(
+            convs.iter().any(|c| crate::scope_dir_of(c) == "api/app/services/billing/invoices"),
+            "nothing was derived at the fifth level: {:?}",
+            convs.iter().map(|c| c.scope.render()).collect::<Vec<_>>()
+        );
+    }
 }

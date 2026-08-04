@@ -128,6 +128,23 @@ class is not how most frameworks say what a file is.
 
 ### Changed
 
+- **The grouping depth cap, 4 to 8.** Rules are derived at every ancestor
+  directory up to a cap, and at four it was binding rather than generous: a
+  snapshot's scope-depth histogram stopped dead at 4 on every repository
+  measured, while 25% of the Rails API's Ruby files and 52% of the React
+  client's TypeScript files lived deeper and could never have a rule of their
+  own. The sharpest case is the layout canon documents as a feature. A
+  workspace holding several checkouts prefixes every path with the checkout
+  name, so `api/app/services/billing` is already at the cap: opening
+  `empire-flippers/` derived 152 rules where `api` and `client` opened
+  separately derived 285 between them. It now derives 450.
+
+  Eight by measurement. Against 4, caps of 6, 8 and 10 were measured on eight
+  real repositories: 6 recovers most of the loss, 8 recovers effectively all of
+  it, and 10 adds two rules on one repository and three on the workspace for
+  the same derivation cost. Cost is bounded from the other side by `min_files`,
+  which derives nothing from a group too small however deep it sits.
+
 - `SNAPSHOT_VERSION` 10 to 15. The snapshot is a cache keyed on the commit, its
   age and the settings, so a new binary at an unchanged commit goes on serving
   the old binary's conventions, including, from a version 10 snapshot, the

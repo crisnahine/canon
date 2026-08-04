@@ -85,7 +85,30 @@ pub fn derive_all(
 }
 
 /// Ancestor depth past which grouping stops paying for itself.
-pub(crate) const MAX_GROUP_DEPTH: usize = 4;
+///
+/// Every rule below is derived at each ancestor directory as well as at the
+/// leaf, so the number of groups grows with the cap and the derivation pays for
+/// each one. Four was the original guess and it cost a quarter of a Rails
+/// repository's Ruby files and half of a React repository's TypeScript files
+/// any rule of their own: a snapshot's scope-depth histogram stopped dead at 4
+/// on every repository measured, which is what a cap looks like when it is
+/// binding rather than generous.
+///
+/// The sharpest case is the layout canon documents as a feature. A workspace
+/// holding several checkouts prefixes every path with the checkout name, so
+/// `api/app/services/billing` is already at the cap and nothing below it exists:
+/// opening the workspace root derived 152 rules where the two checkouts opened
+/// separately derived 285 between them.
+///
+/// Eight, chosen by measurement rather than by argument. Raising the cap from 4
+/// to 6, 8 and 10 was measured on eight real repositories; 6 recovers most of
+/// the loss, 8 recovers effectively all of it, and 10 adds two rules on one
+/// repository and three on a workspace for the same derivation cost. Eight is
+/// the knee. The cost is
+/// bounded from the other side anyway: a group below `min_files` derives
+/// nothing however deep it sits, so a deeper cap buys groups only where a real
+/// directory holds real files.
+pub(crate) const MAX_GROUP_DEPTH: usize = 8;
 
 /// How far down the tree a group's rule speaks.
 ///

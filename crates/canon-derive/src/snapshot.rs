@@ -25,9 +25,10 @@ use serde::{Deserialize, Serialize};
 /// went on refusing writes after the release that stopped deriving it.
 pub const SNAPSHOT_VERSION: u32 = 15;
 // 15: a directory is counted over its own files as well as over its whole
-//     subtree. A v14 snapshot has no rule at all for a directory that a
-//     subdirectory of another kind outvoted, because the reading it was built
-//     from counted both kinds in one vote.
+//     subtree, and the grouping now reaches eight directories deep instead of
+//     four. A v14 snapshot has no rule for a directory a subdirectory of
+//     another kind outvoted, and none at all below the fourth level — and it
+//     holds the wider rules that were graded while those votes were diluted.
 // 14: `interfaces` now derives a `shape.contract` rule for PHP, TypeScript,
 //     Tsx and Rust, stating what a directory's types implement rather than
 //     what they compose. A v13 snapshot has no rule for such a directory,
