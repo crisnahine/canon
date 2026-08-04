@@ -826,6 +826,14 @@ fn check_type_relations(
 /// by an unordered set for an embed — the same reasoning that lets the
 /// `shape.base` arm accept a match from `interfaces` or `mixins` applies
 /// here.
+///
+/// Claims `shape.base`, not a family of its own. The derivation withholds the
+/// family rule only where the exact one won *at the same scope*, and scopes
+/// nest: a Rails API derives the family rule over `app/controllers` and the
+/// exact base over `app/controllers/api/v1`, and both reach every file below
+/// the narrower one. Two claims let one wrong base produce two lines saying
+/// different things about it; one claim lets the narrower rule win, which is
+/// what the deduplication exists to do.
 fn check_family(
     t: &canon_extract::TypeFacts,
     convention: &Convention,
@@ -843,7 +851,7 @@ fn check_family(
         return None;
     }
     Some((
-        ("shape.family", t.name.clone()),
+        ("shape.base", t.name.clone()),
         Violation {
             convention_id: convention.id.clone(),
             message: format!(
@@ -1420,6 +1428,41 @@ mod tests {
         assert_eq!(found.len(), 1, "one defect, one line: {found:#?}");
         assert!(
             found[0].message.contains("`BillingBase`"),
+            "the wider rule won: {}",
+            found[0].message
+        );
+    }
+
+    #[test]
+    fn a_base_rule_and_a_family_rule_state_one_defect_once() {
+        // `base_family` yields to `base_class` only at the scope it was
+        // derived for, and scopes nest. On a real Rails API `app/controllers`
+        // derives the family rule at 95/102 while `app/controllers/api/v1`
+        // derives the exact base, and both reach every file in `api/v1`: one
+        // wrong base produced two lines telling the author two different
+        // things about it. The narrower rule is the one that describes the
+        // file, which is what keying both on the same claim gets.
+        let mut family =
+            conv("shape.family.app.controllers.rb", "Types here inherit from a `*BaseController`");
+        family.scope = Scope::DirExt("app/controllers".into(), "rb".into());
+        family.agreeing = 95;
+        family.total = 102;
+        let mut base = conv(
+            "shape.base.app.controllers.api.v1.rb",
+            "Types here inherit from `Api::V1::BaseController`",
+        );
+        base.scope = Scope::DirExt("app/controllers/api/v1".into(), "rb".into());
+        base.agreeing = 53;
+        base.total = 53;
+
+        let found = verify_source(
+            "app/controllers/api/v1/orders_controller.rb",
+            "class OrdersController < ActionController::API\n  def index; end\nend\n",
+            &[family, base],
+        );
+        assert_eq!(found.len(), 1, "one defect, one line: {found:#?}");
+        assert!(
+            found[0].message.contains("`Api::V1::BaseController`"),
             "the wider rule won: {}",
             found[0].message
         );
