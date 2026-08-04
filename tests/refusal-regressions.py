@@ -24,6 +24,22 @@ def inject(root, data, rel, content, tool="Write", extra=None):
     assert r.returncode == 0 and not r.stderr.strip(), f"fail-open breach: {r.returncode} {r.stderr[:200]}"
     h = json.loads(r.stdout or "{}").get("hookSpecificOutput", {})
     return h.get("permissionDecision") == "deny", h.get("permissionDecisionReason","")
+def verify(root, data, rel, content, tool="Write"):
+    # verify reads the file from disk rather than the payload, so it has to
+    # exist there first; remove it after so the fixture is left as mk() built it.
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").write(content)
+    try:
+        p = json.dumps({"session_id":"s","cwd":root,"tool_name":tool,
+                        "tool_input":{"file_path": path, "content": content}})
+        r = subprocess.run([BIN,"verify"], input=p, cwd=root, capture_output=True, text=True,
+                           env={**os.environ,"CANON_DATA_DIR":data})
+        assert r.returncode == 0 and not r.stderr.strip(), f"fail-open breach: {r.returncode} {r.stderr[:200]}"
+        h = json.loads(r.stdout or "{}").get("hookSpecificOutput", {})
+        return h.get("additionalContext","")
+    finally:
+        os.remove(path)
 def check(name, ok, detail=""): R.append((name, ok, detail))
 
 # 1. Next.js / Nuxt / SvelteKit route filenames
@@ -323,13 +339,12 @@ files = {f"shop/views/p{i}.py":
          "    def get(self, request):\n        return None\n"
          for i in range(1, 7)}
 root, data = mk(files, "django-view-mixin")
-d, w = inject(root, data, "shop/views/public.py",
-  "from django.views.generic import ListView\n\n\n"
-  "class PublicListView(ListView):\n    def get(self, request):\n        return None\n")
+public_view = ("from django.views.generic import ListView\n\n\n"
+               "class PublicListView(ListView):\n    def get(self, request):\n        return None\n")
+d, w = inject(root, data, "shop/views/public.py", public_view)
 check("a view that keeps the directory's real base without the login mixin is not refused", not d, w[:150])
-d, _ = inject(root, data, "shop/views/odd.py",
-  "class Odd(SomethingElse):\n    def get(self, request):\n        return None\n")
-check("a genuinely unrelated base is still refused", d)
+advisory = verify(root, data, "shop/views/public.py", public_view)
+check("the advisory names the real base, not the access mixin", "LoginRequiredMixin" not in advisory, advisory[:150])
 shutil.rmtree(root); shutil.rmtree(data)
 
 # 2. the same shape on a model directory: a mixin ahead of models.Model
@@ -340,13 +355,24 @@ files = {f"shop/models/p{i}.py":
          "    def clean(self):\n        pass\n"
          for i in range(1, 7)}
 root, data = mk(files, "django-model-mixin")
-d, w = inject(root, data, "shop/models/plain.py",
-  "from django.db import models\n\n\n"
-  "class Plain(models.Model):\n    def clean(self):\n        pass\n")
+plain_model = ("from django.db import models\n\n\n"
+               "class Plain(models.Model):\n    def clean(self):\n        pass\n")
+d, w = inject(root, data, "shop/models/plain.py", plain_model)
 check("a model that keeps the directory's real base without the timestamp mixin is not refused", not d, w[:150])
-d, _ = inject(root, data, "shop/models/odd.py",
-  "class OddModel(SomethingElse):\n    def clean(self):\n        pass\n")
-check("a genuinely unrelated model base is still refused", d)
+advisory = verify(root, data, "shop/models/plain.py", plain_model)
+check("the advisory names the real base, not the timestamp mixin", "TimeStamped" not in advisory, advisory[:150])
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 3. Ruby, single base: shape.base enforcement is not disabled outright, only
+# narrowed for the language where "first base" is ambiguous. A directory that
+# agrees on one base with no ordering question must still refuse a stranger.
+files = {f"app/services/{n}.rb":
+         f"class {n.title().replace('_','')} < ApplicationService\n  def call; end\nend\n"
+         for n in ["charge_card","refund_payment","settle_batch","send_receipt","void_invoice","apply_credit"]}
+root, data = mk(files, "ruby-single-base")
+d, _ = inject(root, data, "app/services/odd_one.rb",
+  "class OddOne < SomethingElse\n  def call; end\nend\n")
+check("a Ruby class with an unrelated base is still refused", d)
 shutil.rmtree(root); shutil.rmtree(data)
 
 ok = sum(1 for _, o, _ in R if o)
