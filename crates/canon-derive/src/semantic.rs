@@ -245,7 +245,7 @@ fn namespace(
 /// The weighted majority of a set of `(value, weight, source)` observations.
 ///
 /// Shared by all four rules below, because they differ only in what they count.
-fn majority<T: std::hash::Hash + Eq + Clone>(
+fn majority<T: std::hash::Hash + Eq + Ord + Clone>(
     observations: &[(T, f32, &FactSet)],
     settings: &Settings,
 ) -> Option<(T, Confidence, usize)> {
@@ -257,9 +257,7 @@ fn majority<T: std::hash::Hash + Eq + Clone>(
     for (value, weight, _) in observations {
         *tally.entry(value.clone()).or_default() += *weight;
     }
-    let (winner, weight) = tally
-        .into_iter()
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    let (winner, weight) = tally_winner(tally)?;
     // The configured floor is not applied here. Applied during the vote it
     // removed the wide rule before `collapse_redundant` could use it, and every
     // narrow rule the wide one would have absorbed survived instead; see
@@ -267,6 +265,25 @@ fn majority<T: std::hash::Hash + Eq + Clone>(
     let confidence = Confidence::derive_counted(weight, total, observations.len())?;
     let agreeing = observations.iter().filter(|(v, _, _)| *v == winner).count();
     Some((winner, confidence, agreeing))
+}
+
+/// The heaviest value in a weight tally, ties broken toward the lowest value.
+///
+/// A plain `max_by` resolves an exact tie to whichever entry a `HashMap`
+/// happens to visit last, and this repository has already shipped one
+/// derivation that changed rule sets between runs of the same tree from
+/// exactly that: iteration order over a `HashMap` is not the same twice.
+/// Breaking every tie the same way regardless of insertion order is what
+/// makes a rebuild of an unchanged tree derive the same set every time.
+///
+/// A tied winner can only reach a caller of [`majority`] once a future change
+/// loosens [`Confidence::FLOOR`] below one half — today the floor sits at 0.8,
+/// so two values splitting a vote can never both clear it — but the tie-break
+/// is written to be correct on its own terms rather than to rely on that.
+fn tally_winner<T: Ord>(tally: HashMap<T, f32>) -> Option<(T, f32)> {
+    tally.into_iter().max_by(|a, b| {
+        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.0.cmp(&a.0))
+    })
 }
 
 fn exemplar<T: PartialEq>(observations: &[(T, f32, &FactSet)], winner: &T) -> Option<String> {
@@ -422,12 +439,24 @@ fn base_class(
 /// Only stated when `base_class` found nothing, so the two never both speak
 /// for one directory. Advisory always: the check is a suffix comparison
 /// against a name the sample never contained.
+///
+/// Withheld from Rust for the same reason [`reads_a_base_from_a_contract`]
+/// withholds `base_class` there: `superclass` is a copy of the type's first
+/// trait impl, so a shared suffix over it is a family of trait names, not of
+/// base types, and "inherit" is not a verb Rust's shapes support at all —
+/// unlike `base_class`, this holds whether or not a `contract` rule also
+/// fires for the same directory, because the family only exists when the
+/// exact names disagree and `contract` is free to pick a different, agreeing
+/// trait from the same type's other impls.
 fn base_family(
     dir: &str,
     ext: &str,
     members: &[&FactSet],
     settings: &Settings,
 ) -> Option<Convention> {
+    if matches!(canon_extract::lang::from_extension(ext), Some(canon_extract::Language::Rust)) {
+        return None;
+    }
     let observations: Vec<(Option<String>, f32, &FactSet)> = members
         .iter()
         .filter_map(|s| s.subject().map(|t| (t.superclass.as_deref().map(family_of), s.weight, *s)))
@@ -578,7 +607,27 @@ fn collaborator(
 /// ties every name at one and resolves the tie to whichever sorts last. The
 /// macro the whole directory shares then loses to whichever of a file's own
 /// calls happened to sort after it.
+///
+/// Withheld from a test or spec directory entirely. Measured on a real Rails
+/// repository: 97 `shape.macros` rules, a majority of them `context`,
+/// `expect`, `it` and `describe` — `RSpec`'s own vocabulary, true of every spec
+/// file in the tree and not a convention the team chose. `tests.suffix` and
+/// `tests.colocation` already say a spec directory holds tests, so this rule
+/// has nothing to add there, and the budget it would spend saying "files here
+/// use `describe`" is budget a real macro elsewhere loses.
+///
+/// Requiring the winning call to carry an argument was measured as the other
+/// lever and rejected: `describe 'x' do`, `it 'x' do` and `context 'x' do`
+/// all carry a string argument, the same shape as `has_many :listings`, so an
+/// argument requirement admits the `RSpec` vocabulary it was meant to exclude.
 fn macros(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
+    // Checked against each member's own directory rather than `dir`: this
+    // group is also derived at every ancestor, and a `__tests__` folder with
+    // nothing else beside it makes every one of those ancestors a group of
+    // test files too, not only the exact directory named `__tests__`.
+    if members.iter().all(|s| crate::tier0::is_test_directory(&s.dir)) {
+        return None;
+    }
     // Only among the receiverless calls a receiver would otherwise have
     // excluded, which is the same set the vote is counted over.
     let per_file: Vec<(&FactSet, Vec<String>)> = members
@@ -1284,6 +1333,22 @@ mod tests {
     }
 
     #[test]
+    fn a_tied_tally_breaks_toward_the_lowest_value_on_every_run() {
+        // A plain `HashMap` iterates in an order this process randomises at
+        // startup, so a `max_by` with no tie-break picks a different winner
+        // from one run to the next. Run several independent tallies rather
+        // than one, so a tie-break that fell back to iteration order would
+        // show it here instead of passing by chance on a single `HashMap`.
+        for _ in 0..50 {
+            let mut tally: HashMap<&str, f32> = HashMap::new();
+            tally.insert("zebra", 5.0);
+            tally.insert("apple", 5.0);
+            tally.insert("mango", 5.0);
+            assert_eq!(tally_winner(tally), Some(("apple", 5.0)));
+        }
+    }
+
+    #[test]
     fn an_unparseable_file_is_skipped_without_losing_the_others() {
         let mut files = fixture::agreeing("app/s", "rb", 6, "class A$N\n  def call; end\nend\n");
         files.push(("app/s/broken.rb".to_string(), "class \u{0}\u{1} def def".to_string()));
@@ -1383,6 +1448,48 @@ mod tests {
     }
 
     #[test]
+    fn a_spec_directory_derives_no_macro_rule_from_the_test_frameworks_own_vocabulary() {
+        // Measured on a real Rails repository: `shape.macros` derived 97
+        // rules, most of them `context`, `expect`, `it` and `describe` —
+        // true of every spec file and not a convention the team chose.
+        let files = fixture::agreeing(
+            "spec/services",
+            "rb",
+            6,
+            "describe Item$N do\n  it 'works' do\n    expect(1).to eq(1)\n  end\nend\n",
+        );
+        let convs = derive_from("sem-spec-macro", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.macros")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_test_directory_named_test_derives_no_macro_rule_either() {
+        let files = fixture::agreeing(
+            "src/components/__tests__",
+            "tsx",
+            6,
+            "describe('Item$N', () => {\n  it('renders', () => {\n    expect(1).toBe(1);\n  });\n});\n",
+        );
+        let convs = derive_from("sem-tests-dir-macro", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.macros")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_model_directory_still_derives_the_association_it_shares() {
+        // The rule a spec directory must not drown out: a real framework
+        // macro that carries information nothing else in the vocabulary
+        // states.
+        let files = fixture::agreeing(
+            "app/models",
+            "rb",
+            6,
+            "class Item$N < ApplicationRecord\n  has_many :listings\nend\n",
+        );
+        let convs = derive_from("sem-model-macro", &files);
+        assert!(joined(&convs).contains("use `has_many`"), "got {}", joined(&convs));
+    }
+
+    #[test]
     fn four_base_controllers_are_one_family() {
         let mut files: Vec<(String, String)> = Vec::new();
         for (i, base) in [
@@ -1453,6 +1560,28 @@ mod tests {
             ));
         }
         let convs = derive_from("sem-family-no-agreement", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.family")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_rust_directory_derives_no_family_rule_even_when_trait_names_share_a_suffix() {
+        // Rust has no inheritance at all, so "Types here inherit from a
+        // `*Handler`" is not a sentence this language's shapes can make
+        // true, however many of its trait names happen to share a suffix.
+        // `base_class` already withholds the exact form for the same reason
+        // `contract` gives it the verb "implement" instead; `base_family` is
+        // the same fact one step blurrier and has to yield the same way.
+        let mut files: Vec<(String, String)> = Vec::new();
+        for (i, module) in ["mod_a", "mod_a", "mod_a", "mod_b", "mod_b", "mod_c"].iter().enumerate()
+        {
+            files.push((
+                format!("src/handlers/item{i}.rs"),
+                format!(
+                    "pub struct Item{i};\n\nimpl {module}::Handler for Item{i} {{\n    fn handle(&self) {{}}\n}}\n"
+                ),
+            ));
+        }
+        let convs = derive_from("sem-rs-no-family", &files);
         assert!(!convs.iter().any(|c| c.id.starts_with("shape.family")), "got {}", joined(&convs));
     }
 

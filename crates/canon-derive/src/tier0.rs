@@ -626,7 +626,18 @@ pub(crate) fn is_test_path(rel: &str) -> bool {
     let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
     test_marker(stem, &ext.to_ascii_lowercase()).is_some()
         || stem.split('.').skip(1).any(|q| TEST_QUALIFIERS.contains(&q))
-        || dir.split('/').any(|s| matches!(s, "spec" | "test" | "tests" | "__tests__"))
+        || is_test_directory(dir)
+}
+
+/// Whether a directory belongs to a test suite by name, wherever it sits in
+/// the tree.
+///
+/// The same segment set [`is_test_path`] checks on a full file path, exposed
+/// on its own: a directory string like `"spec"` has no filename component, and
+/// `is_test_path` reads a bare directory as a name with an empty directory,
+/// answering false about the one case a directory-scoped caller actually asks.
+pub(crate) fn is_test_directory(dir: &str) -> bool {
+    dir.split('/').any(|s| matches!(s, "spec" | "test" | "tests" | "__tests__"))
 }
 
 /// The most recently modified agreeing file.
