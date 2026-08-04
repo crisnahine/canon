@@ -1674,11 +1674,15 @@ mod tests {
     fn the_first_test_written_into_a_directory_is_not_refused_by_its_code_rules() {
         // The sample cannot contain it yet, so the rule is still at total
         // agreement and refused it. A colocated `test_void_invoice.py` was told
-        // it must inherit `BaseService` and expose one public method. A base
-        // read from a Python positional list is never Blocking, so the arity
-        // rule is what the "code beside it" half of this test leans on now; it
-        // only refuses a type with fewer methods than expected, never more, so
-        // its fixture has to fall short rather than run over.
+        // it must inherit `BaseService` and expose one public method.
+        //
+        // A base read from a Python positional list is never Blocking, so the
+        // arity rule is the only one left that can prove the exemption fires:
+        // it refuses a shortfall against the expected count, never a surplus,
+        // so the fixture below has zero public methods against an expected
+        // one. The same content is written to a test path and a code path, so
+        // path is the only variable. If the test-path exemption stopped
+        // working, this same class would be refused there too.
         let settings = canon_core::Settings::default();
         let rules = vec![
             blocking(
@@ -1692,25 +1696,27 @@ mod tests {
                 Scope::DirExt("app".into(), "py".into()),
             ),
         ];
-        let test_file = "class TestVoidInvoice:\n    def test_voids(self): pass\n    def test_rejects(self): pass\n";
+        let code_file = "class VoidInvoice:\n    pass\n";
         for rel in [
             "app/services/test_void_invoice.py",
             "app/services/__tests__/test_void_invoice.py",
             "app/services/void_invoice_test.py",
         ] {
             assert!(
-                blocking_violations(rel, Some(test_file.to_string()), &rules, &settings).is_empty(),
+                blocking_violations(rel, Some(code_file.to_string()), &rules, &settings).is_empty(),
                 "{rel} was refused for not being shaped like the code it tests"
             );
         }
 
-        // The code beside it is still held to the rules. Its arity has to fall
-        // short of the expected one rather than exceed it: a type carrying an
-        // extra method is routinely legitimate, so only the shortfall refuses.
-        let code_file = "class VoidInvoice:\n    pass\n";
+        // The code beside it is still held to the rules.
         assert!(
-            !blocking_violations("app/services/void_invoice.py", Some(code_file.to_string()), &rules, &settings)
-                .is_empty()
+            !blocking_violations(
+                "app/services/void_invoice.py",
+                Some(code_file.to_string()),
+                &rules,
+                &settings
+            )
+            .is_empty()
         );
     }
 
