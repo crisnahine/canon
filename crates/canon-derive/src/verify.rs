@@ -1674,7 +1674,11 @@ mod tests {
     fn the_first_test_written_into_a_directory_is_not_refused_by_its_code_rules() {
         // The sample cannot contain it yet, so the rule is still at total
         // agreement and refused it. A colocated `test_void_invoice.py` was told
-        // it must inherit `BaseService` and expose one public method.
+        // it must inherit `BaseService` and expose one public method. A base
+        // read from a Python positional list is never Blocking, so the arity
+        // rule is what the "code beside it" half of this test leans on now; it
+        // only refuses a type with fewer methods than expected, never more, so
+        // its fixture has to fall short rather than run over.
         let settings = canon_core::Settings::default();
         let rules = vec![
             blocking(
@@ -1700,15 +1704,13 @@ mod tests {
             );
         }
 
-        // The code beside it is still held to the rules.
+        // The code beside it is still held to the rules. Its arity has to fall
+        // short of the expected one rather than exceed it: a type carrying an
+        // extra method is routinely legitimate, so only the shortfall refuses.
+        let code_file = "class VoidInvoice:\n    pass\n";
         assert!(
-            !blocking_violations(
-                "app/services/void_invoice.py",
-                Some(test_file.to_string()),
-                &rules,
-                &settings
-            )
-            .is_empty()
+            !blocking_violations("app/services/void_invoice.py", Some(code_file.to_string()), &rules, &settings)
+                .is_empty()
         );
     }
 
