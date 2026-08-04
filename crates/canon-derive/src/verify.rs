@@ -655,11 +655,14 @@ fn check_shape(
 
     if let Some(expected) = backticked(&convention.statement, "Types here inherit from ") {
         {
-            // A type may declare several contracts, and which one landed in
-            // `superclass` is decided by source order. Accepting any of them
-            // stops a refusal from depending on where the author put a block.
+            // A type may declare several contracts, or embed several types, and
+            // which one landed in `superclass` is decided by source order for
+            // an interface and by an unordered set for an embed. Accepting a
+            // match from either `interfaces` or `mixins` stops a refusal from
+            // depending on where the author put a block or which embedded
+            // field the extractor chose to call the base.
             match &t.superclass {
-                _ if t.interfaces.contains(&expected) => {}
+                _ if t.interfaces.contains(&expected) || t.mixins.contains(&expected) => {}
                 Some(actual) if actual == &expected => {}
                 Some(actual) => out.push((
                     ("shape.base", t.name.clone()),

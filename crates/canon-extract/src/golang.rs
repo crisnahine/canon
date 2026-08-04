@@ -62,27 +62,38 @@ fn is_exported(name: &str) -> bool {
 
 fn type_facts(spec: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts> {
     let name = field_text(spec, "name", src)?;
+    let bases = embedded_types(spec, src);
     Some(TypeFacts {
         name,
         line: line_of(spec),
         public_methods: Vec::new(),
         private_methods: Vec::new(),
-        superclass: embedded_type(spec, src),
+        // Go has no ordering convention among embeds, so the first is as good
+        // a representative as any and the rest are composition the type opts
+        // into rather than the type it is.
+        superclass: bases.first().cloned(),
+        mixins: bases.iter().skip(1).cloned().collect(),
         interfaces: Vec::new(),
+        bases,
     })
 }
 
 /// Go's nearest analogue to a base class is an embedded field: a field
-/// declaration carrying a type and no name.
-fn embedded_type(spec: tree_sitter::Node<'_>, src: &str) -> Option<String> {
-    let body = child_of_kind(spec, "struct_type")
-        .and_then(|s| child_of_kind(s, "field_declaration_list"))?;
+/// declaration carrying a type and no name. A struct routinely embeds several,
+/// and `*Base` is the same shape with an anonymous `*` token beside the type
+/// field rather than a `pointer_type` wrapping it.
+fn embedded_types(spec: tree_sitter::Node<'_>, src: &str) -> Vec<String> {
+    let Some(body) =
+        child_of_kind(spec, "struct_type").and_then(|s| child_of_kind(s, "field_declaration_list"))
+    else {
+        return Vec::new();
+    };
     children_of(body)
         .into_iter()
-        .filter(|f| f.kind() == "field_declaration")
-        .find(|f| f.child_by_field_name("name").is_none())
-        .and_then(|f| f.child_by_field_name("type"))
+        .filter(|f| f.kind() == "field_declaration" && f.child_by_field_name("name").is_none())
+        .filter_map(|f| f.child_by_field_name("type"))
         .map(|t| bare_name(&text(t, src)))
+        .collect()
 }
 
 fn receiver_type(method: tree_sitter::Node<'_>, src: &str) -> Option<String> {
@@ -98,15 +109,19 @@ fn receiver_type(method: tree_sitter::Node<'_>, src: &str) -> Option<String> {
     Some(bare_name(&text(ident, src)))
 }
 
-/// A type name without its pointer marker or its type arguments.
+/// A type name without its pointer marker, its type arguments, or its package
+/// qualifier.
 ///
 /// `type Cache[T any] struct` declares `Cache`, and its methods are written
 /// `func (c *Cache[T]) Get()`. Comparing the receiver text against the declared
 /// name left every generic type with no methods at all: no arity rule, no
-/// entrypoint rule, nothing.
+/// entrypoint rule, nothing. `sync.Mutex` embeds the same type an import of
+/// `sync` names as `Mutex`; the package path is how the file reached it, not
+/// what it is.
 fn bare_name(text: &str) -> String {
     let text = text.trim_start_matches('*');
-    text.split_once('[').map_or(text, |(name, _)| name).trim().to_string()
+    let text = text.split_once('[').map_or(text, |(name, _)| name);
+    text.rsplit('.').next().unwrap_or(text).trim().to_string()
 }
 
 fn collect_imports(node: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
@@ -196,5 +211,24 @@ mod tests {
         for bad in ["package", "func func", "\u{0}", "type S struct {", ""] {
             let _ = f(bad);
         }
+    }
+
+    #[test]
+    fn every_embedded_field_is_recorded_not_only_the_first() {
+        // Composition in Go is embedding, and a struct routinely embeds more than
+        // one type. Keeping only the first made the second invisible to every rule.
+        let f = f("type S struct {\n\tBaseService\n\tsync.Mutex\n\tname string\n}\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("BaseService"));
+        assert_eq!(f.types[0].bases, vec!["BaseService", "Mutex"]);
+        assert_eq!(f.types[0].mixins, vec!["Mutex"]);
+        assert!(f.types[0].interfaces.is_empty());
+    }
+
+    #[test]
+    fn a_pointer_embed_is_an_embed() {
+        // The grammar puts `*` as an anonymous token beside the type field rather
+        // than wrapping it in a pointer_type, so the type field is the bare name.
+        let f = f("type S struct {\n\t*Reader\n\t*Writer\n}\n");
+        assert_eq!(f.types[0].bases, vec!["Reader", "Writer"]);
     }
 }

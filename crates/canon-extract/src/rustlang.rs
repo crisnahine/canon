@@ -27,7 +27,9 @@ pub(crate) fn extract(tree: &tree_sitter::Tree, source: &str) -> FileFacts {
                         public_methods: Vec::new(),
                         private_methods: Vec::new(),
                         superclass: None,
+                        bases: Vec::new(),
                         interfaces: Vec::new(),
+                        mixins: Vec::new(),
                     });
                     modules.push(module.clone());
                 }

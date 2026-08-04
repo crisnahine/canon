@@ -70,21 +70,38 @@ fn visibility(name: &str) -> Vis {
 
 fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts> {
     let name = field_text(class_node, "name", src)?;
-    // The first positional base, whatever node kind it is. Matching only a bare
+    // Positional bases only, in order. A keyword argument is configuration
+    // (`metaclass=`, `total=`), never a parent. Matching only a bare
     // `identifier` read `class X(base.BaseService)` as an `attribute` and
     // `class X(BaseService[Order])` as a `subscript`, so both came out with no
-    // base at all and were then refused for having none. A keyword argument —
-    // `metaclass=`, `total=` — is not a base.
-    let superclass = class_node
+    // base at all and were then refused for having none.
+    let bases: Vec<String> = class_node
         .child_by_field_name("superclasses")
-        .and_then(|a| {
+        .map(|a| {
             children_of(a)
                 .into_iter()
-                .find(|c| !matches!(c.kind(), "(" | ")" | "," | "comment" | "keyword_argument"))
+                .filter(|c| {
+                    !matches!(
+                        c.kind(),
+                        "(" | ")"
+                            | ","
+                            | "comment"
+                            | "keyword_argument"
+                            | "list_splat"
+                            | "dictionary_splat"
+                    )
+                })
+                .map(|n| bare_base(&text(n, src)))
+                .collect()
         })
-        .map(|n| bare_base(&text(n, src)));
-
+        .unwrap_or_default();
+    // The last positional base is the type the class is; anything before it is
+    // a mixin, and a mixin is composition the type opts into rather than its
+    // parent.
+    let superclass = bases.last().cloned();
+    let mixins: Vec<String> = bases.iter().take(bases.len().saturating_sub(1)).cloned().collect();
     let interfaces = Vec::new();
+
     let mut public_methods = Vec::new();
     let mut private_methods = Vec::new();
     if let Some(body) = class_node.child_by_field_name("body") {
@@ -113,7 +130,9 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         public_methods,
         private_methods,
         superclass,
+        bases,
         interfaces,
+        mixins,
     })
 }
 
@@ -195,5 +214,33 @@ mod tests {
         for bad in ["class", "def def", "\u{0}", "class A:\n  def", ""] {
             let _ = f(bad);
         }
+    }
+
+    #[test]
+    fn the_last_positional_base_is_the_base_type() {
+        // Django puts mixins first and the concrete view last, so the first base
+        // names the behaviour bolted on and the last names what the class is.
+        let f = f("class V(LoginRequiredMixin, ListView):\n    def get(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("ListView"));
+        assert_eq!(f.types[0].bases, vec!["LoginRequiredMixin", "ListView"]);
+        assert_eq!(f.types[0].mixins, vec!["LoginRequiredMixin"]);
+        assert!(f.types[0].interfaces.is_empty());
+    }
+
+    #[test]
+    fn a_keyword_argument_in_the_base_list_is_not_a_base() {
+        let f = f("class M(Base, metaclass=ABCMeta):\n    def go(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("Base"));
+        assert_eq!(f.types[0].bases, vec!["Base"]);
+    }
+
+    #[test]
+    fn a_single_base_is_unchanged_by_ordering() {
+        // `bare_base` already reduces a dotted base to its class name; adding
+        // the ordering logic for a multi-base class must not disturb that.
+        let f = f("class P(models.Model):\n    def save(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("Model"));
+        assert!(f.types[0].interfaces.is_empty());
+        assert!(f.types[0].mixins.is_empty());
     }
 }

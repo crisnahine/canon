@@ -73,12 +73,33 @@ pub struct TypeFacts {
     /// Base class, embedded type, or implemented trait, when the language has
     /// such a thing and the declaration names one.
     pub superclass: Option<String>,
+    /// Every type this declaration names as a parent, in source order.
+    ///
+    /// `superclass` is one of these, chosen for the statement a convention
+    /// makes. Which one is language-specific and it is not always the first:
+    /// Python's frameworks order a base list mixins-first, so the last entry
+    /// is the type the class actually is, and Django states that ordering as a
+    /// requirement rather than a preference. Go has no order at all, only a
+    /// set of embedded fields.
+    ///
+    /// Empty for a language with a single base, where `superclass` says
+    /// everything there is to say.
+    pub bases: Vec<String>,
     /// Every contract the type declares, when the language lets it declare more
     /// than one: Rust's trait impls, PHP's `implements`, TypeScript's
     /// `implements`. `superclass` is one of these, chosen for the statement; a
     /// check that only compared against that one refused a file for the order
     /// its `impl` blocks were written in.
     pub interfaces: Vec<String>,
+    /// The entries of `bases` that are not `superclass`, for a language where
+    /// that split is source order rather than a keyword.
+    ///
+    /// Composition a type opts into, not the type it is, which is why it lives
+    /// apart from both `superclass` and `interfaces`: a Django view's leading
+    /// `LoginRequiredMixin` is not a contract the view declares the way
+    /// `implements` is, and folding the two together would tell a later "types
+    /// here implement X" rule that a mixin is an implemented interface.
+    pub mixins: Vec<String>,
 }
 
 impl TypeFacts {
@@ -362,7 +383,9 @@ pub(crate) mod tests {
             public_methods: vec!["call".into()],
             private_methods: vec!["a".into(), "b".into()],
             superclass: None,
+            bases: Vec::new(),
             interfaces: Vec::new(),
+            mixins: Vec::new(),
         };
         assert_eq!(t.public_arity(), 1);
     }

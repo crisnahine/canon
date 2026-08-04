@@ -23,7 +23,13 @@ use serde::{Deserialize, Serialize};
 /// versions refuse to derive. A `kebab-case` rule pinned by a vendored
 /// `jquery-3.4.1.min.js` was graded `Blocking` from the stored snapshot and
 /// went on refusing writes after the release that stopped deriving it.
-pub const SNAPSHOT_VERSION: u32 = 10;
+pub const SNAPSHOT_VERSION: u32 = 11;
+// 11: a type records every base it names, in order, and Python resolves the
+//     last positional one as its base rather than the first, with the earlier
+//     ones landing in a new `mixins` list kept apart from `interfaces`. A v10
+//     snapshot holds Python base rules derived while a mixin was being read as
+//     the parent, and those rules were graded from a different reading of the
+//     same code.
 // 10: `format`, `shape.export` and `shape.namespace` are derived, and a
 //      naming rule pinned by a version-numbered vendor file no longer is. A
 //      v9 snapshot holds that rule, graded `Blocking`, and freshness alone

@@ -142,7 +142,9 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         public_methods,
         private_methods,
         superclass,
+        bases: Vec::new(),
         interfaces,
+        mixins: Vec::new(),
     })
 }
 

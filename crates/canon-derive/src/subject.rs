@@ -98,7 +98,9 @@ mod tests {
             public_methods: public.iter().map(|s| (*s).to_string()).collect(),
             private_methods: vec![],
             superclass: base.map(String::from),
+            bases: vec![],
             interfaces: vec![],
+            mixins: vec![],
         }
     }
 
