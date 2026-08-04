@@ -11,8 +11,14 @@ Two generators, both producing a file that a person would plausibly write:
              that directory, so a refusal is a false positive.
   test     - a test file written into a directory that has blocking shape
              rules, in each of the common naming idioms.
+  mutant   - a tracked file's class header rewritten to keep only its last
+             base, so a directory where every class lists a mixin first
+             (`class V(LoginRequiredMixin, ListView)`) gets a file that
+             inherits the same real base without the mixin. A refusal here
+             means a base-class rule learned the mixin's name instead.
 """
 import os
+import re
 import json, subprocess, sys, os, collections, concurrent.futures as cf
 
 BIN, ROOT = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
@@ -62,6 +68,34 @@ TEST_NAMES = {
     ".rs":  ["{s}_test.rs"],
 }
 
+# Rewrite a class header so the file keeps its directory's shape but varies the
+# part a base-class rule reads. A repository whose views all read
+# `class V(LoginRequiredMixin, ListView)` must not refuse `class V(ListView)`:
+# the mixin is not the base, and the author cannot be told to add one.
+MUTATORS = {
+    ".py":  (re.compile(r"^(class\s+\w+\()([^)]+)(\).*)$", re.M), ", "),
+    ".rb":  (re.compile(r"^(class\s+[\w:]+\s*<\s*)([\w:]+)(.*)$", re.M), None),
+    ".php": (re.compile(r"^(class\s+\w+\s+extends\s+)(\w+)(.*)$", re.M), None),
+    ".ts":  (re.compile(r"^(export class\s+\w+\s+extends\s+)([\w.]+)(.*)$", re.M), None),
+}
+
+def mutate(ext, content):
+    """Drop every base but the last, keeping the file otherwise intact."""
+    entry = MUTATORS.get(ext)
+    if entry is None:
+        return None
+    pattern, sep = entry
+    m = pattern.search(content)
+    if m is None:
+        return None
+    if sep is None:
+        return None                      # single-base language: nothing to reorder
+    bases = [b.strip() for b in m.group(2).split(sep) if b.strip()]
+    if len(bases) < 2:
+        return None
+    kept = bases[-1]
+    return content[:m.start()] + m.group(1) + kept + m.group(3) + content[m.end():]
+
 def cases_for(cwd, files):
     by_dir = collections.defaultdict(list)
     for f in files:
@@ -83,6 +117,16 @@ def cases_for(cwd, files):
             if len(content) > 200_000:
                 continue
             out.append(("sibling", dst, content))
+        for src in group[:6]:
+            try:
+                content = open(os.path.join(cwd, src), encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            if len(content) > 200_000:
+                continue
+            mutated = mutate(ext, content)
+            if mutated is not None:
+                out.append(("mutant", src, mutated))
         if ext in TEST_BODIES:
             base = os.path.basename(group[0]).rsplit(".", 1)[0].split(".")[0]
             cls = "".join(w.capitalize() for w in base.replace("-", "_").split("_")) or "Thing"
@@ -103,12 +147,15 @@ for repo in sorted(os.listdir(os.path.join(ROOT, "realrepos"))):
     cases = cases_for(cwd, files)
     with cf.ThreadPoolExecutor(max_workers=12) as ex:
         results = list(ex.map(lambda c: inject(cwd, c[1], c[2]), cases))
-    bad = [(repo, k, rel, r) for (k, rel, _), r in zip(cases, results) if r]
+    bad = [(repo, k, rel, r) for (k, rel, _), r in zip(cases, results) if r and k != "mutant"]
+    mut = [(repo, k, rel, r) for (k, rel, _), r in zip(cases, results) if r and k == "mutant"]
     grand["cases"] += len(cases)
     grand["bad"] += len(bad)
-    problems += bad
-    print(f"  {repo:<14} {len(cases):>5} new files   {len(bad)} refused/errored")
-print(f"\nTOTAL {grand['cases']} new files written into real directories, {grand['bad']} refused or errored")
+    grand["mutant"] += len(mut)
+    problems += bad + mut
+    print(f"  {repo:<14} {len(cases):>5} new files   {len(bad)} refused/errored   {len(mut)} base-order refusals")
+print(f"\nTOTAL {grand['cases']} new files written into real directories, "
+      f"{grand['bad']} refused or errored, {grand['mutant']} refused for base order")
 seen = set()
 for repo, kind, rel, (verdict, why) in problems:
     key = (repo, why[:60])

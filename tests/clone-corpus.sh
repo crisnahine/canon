@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Clone the seventeen repositories the replay harnesses measure against.
+# Clone the twenty-four repositories the replay harnesses measure against.
 #
 # The numbers in STATUS.md come from real code rather than fixtures, and a
 # fixture cannot produce the defects these found: a naming rule from one name
 # repeated, an extractor blind to a decorated Python class or a generic Rust
-# type, a rule counted in one directory refusing a file in another.
+# type, a rule counted in one directory refusing a file in another. Seven of
+# the twenty-four are applications built on a framework rather than a library
+# or the framework itself: a library's own classes rarely inherit through a
+# chain of mixins, so a corpus of only libraries can't produce the
+# mixin-first base lists that framework applications write everywhere.
 #
-# Shallow clones, because only the working tree is read. About 250 MB.
+# Shallow clones, because only the working tree is read. About 600 MB.
 set -euo pipefail
 
 DEST="${1:?usage: clone-corpus.sh <directory>}"
@@ -30,6 +34,13 @@ vuejs/core             vue-core
 nuxt/nuxt              vue-nuxt
 reduxjs/redux-toolkit  ts-rtk
 axios/axios            js-axios
+wagtail/wagtail                          py-wagtail
+tiangolo/full-stack-fastapi-template     py-fastapi-app
+pixelfed/pixelfed                        php-pixelfed
+nestjs/nest                              ts-nest
+nuxt/ui                                  vue-nuxt-ui
+gohugoio/hugo                            go-hugo
+starship/starship                        rs-starship
 "
 
 echo "${REPOS}" | while read -r slug name; do
