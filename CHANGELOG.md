@@ -106,9 +106,29 @@ class is not how most frameworks say what a file is.
   each has a legitimate exception: the one plain helper class beside the
   decorated ones, the one worker that composes something else.
 
+- **A directory is counted over its own files as well as over its subtree.** A
+  rule was only ever derived by path prefix, so a directory holding a
+  subdirectory of another kind counted both kinds in one vote. `app/models` in
+  the Rails API holds 128 models, 123 of which inherit `ApplicationRecord`,
+  beside 36 concerns, which are modules and inherit nothing: 123 of 164 is
+  under the bar a sample that size has to clear, and all 128 models derived no
+  rule about their base at all. `canon explain app/models/` now answers
+  `` Types here inherit from `ApplicationRecord` `` at 123/128 over
+  `app/models/*.rb`, and `` Files here use `belongs_to` `` at 115/128 beside
+  it, with the concerns keeping every rule they had.
+
+  The new `Scope::DirChildrenExt` reaches one directory and nothing below it,
+  which makes it the narrowest scope canon has and puts it first in the
+  injected block. It is derived only where the subtree scope had no answer of
+  that kind for that directory, so nothing that was stated before is restated,
+  displaced or regraded — the subtree scope is the better answer whenever it
+  exists, because it is the one a folder created after indexing inherits from.
+  A rolled-up rule counts as such an answer, which is why the two passes run in
+  that order.
+
 ### Changed
 
-- `SNAPSHOT_VERSION` 10 to 14. The snapshot is a cache keyed on the commit, its
+- `SNAPSHOT_VERSION` 10 to 15. The snapshot is a cache keyed on the commit, its
   age and the settings, so a new binary at an unchanged commit goes on serving
   the old binary's conventions, including, from a version 10 snapshot, the
   first-positional-base reading that refused a Django view.

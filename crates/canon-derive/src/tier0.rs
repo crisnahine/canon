@@ -13,15 +13,33 @@ use std::collections::HashMap;
 
 use canon_core::{Confidence, Convention, Enforcement, Evidence, Scope, Settings};
 
+use crate::Reach;
 use crate::naming::{self, Style};
 use crate::walk::FileEntry;
-
-/// Ancestor depth past which grouping stops paying for itself.
-const MAX_GROUP_DEPTH: usize = 4;
 
 /// Evidence paths carried per convention. Enough to audit, small enough that a
 /// snapshot of a large repository stays a few hundred kilobytes.
 const MAX_EVIDENCE: usize = 12;
+
+/// One group per `(directory, extension, reach)`, over the files that pass
+/// `wanted`.
+///
+/// Shared by the three rules below, which differ only in which files may vote.
+fn grouped(
+    files: &[FileEntry],
+    wanted: impl Fn(&FileEntry) -> bool,
+) -> HashMap<(String, String, Reach), Vec<&FileEntry>> {
+    let mut groups: HashMap<(String, String, Reach), Vec<&FileEntry>> = HashMap::new();
+    for f in files.iter().filter(|f| wanted(f)) {
+        if f.ext.is_empty() {
+            continue;
+        }
+        for (dir, reach) in crate::group_keys(&f.dir) {
+            groups.entry((dir, f.ext.clone(), reach)).or_default().push(f);
+        }
+    }
+    groups
+}
 
 pub(crate) fn derive(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
     let mut out = Vec::new();
@@ -51,15 +69,10 @@ pub(crate) fn derive(files: &[FileEntry], settings: &Settings) -> Vec<Convention
 /// begin `naming.`, because `enforcement_for` grades that family `Blocking` at
 /// total agreement and this rule has no business refusing anything.
 fn qualifier_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
-    let mut groups: HashMap<(String, String), Vec<&FileEntry>> = HashMap::new();
-    for f in files.iter().filter(|f| !is_test(f) && nameable(f)) {
-        for dir in group_keys(f) {
-            groups.entry((dir, f.ext.clone())).or_default().push(f);
-        }
-    }
+    let groups = grouped(files, |f| !is_test(f) && nameable(f));
 
     let mut out = Vec::new();
-    for ((dir, ext), members) in groups {
+    for ((dir, ext, reach), members) in groups {
         if members.len() < settings.min_files {
             continue;
         }
@@ -80,7 +93,7 @@ fn qualifier_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conven
         out.push(Convention {
             id: format!("format.{}.{ext}", id_fragment(&dir)),
             statement: format!("Files here are named `*.{qualifier}.{ext}`"),
-            scope: scope_for(&dir, &ext),
+            scope: crate::scope_reaching(&dir, &ext, reach),
             confidence,
             agreeing,
             total: members.len(),
@@ -126,15 +139,10 @@ fn colocation(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
         })
         .collect();
 
-    let mut groups: HashMap<(String, String), Vec<&FileEntry>> = HashMap::new();
-    for f in files.iter().filter(|f| !is_test(f) && testable(f)) {
-        for dir in group_keys(f) {
-            groups.entry((dir, f.ext.clone())).or_default().push(f);
-        }
-    }
+    let groups = grouped(files, |f| !is_test(f) && testable(f));
 
     let mut out = Vec::new();
-    for ((dir, ext), members) in groups {
+    for ((dir, ext, reach), members) in groups {
         if members.len() < settings.min_files || dir.is_empty() {
             continue;
         }
@@ -149,7 +157,7 @@ fn colocation(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
         out.push(Convention {
             id: format!("tests.colocation.{}.{ext}", id_fragment(&dir)),
             statement: "Every file here has a test of the same name".to_string(),
-            scope: scope_for(&dir, &ext),
+            scope: crate::scope_reaching(&dir, &ext, reach),
             confidence,
             agreeing,
             total: members.len(),
@@ -329,34 +337,12 @@ pub(crate) fn counts_toward_naming(rel: &str) -> bool {
         && !is_test_path(rel)
 }
 
-/// Every `(directory prefix, extension)` group a file belongs to.
-fn group_keys(entry: &FileEntry) -> Vec<String> {
-    if entry.ext.is_empty() {
-        return Vec::new();
-    }
-    let mut keys = vec![String::new()];
-    let mut acc = String::new();
-    for segment in entry.dir.split('/').filter(|s| !s.is_empty()).take(MAX_GROUP_DEPTH) {
-        if !acc.is_empty() {
-            acc.push('/');
-        }
-        acc.push_str(segment);
-        keys.push(acc.clone());
-    }
-    keys
-}
-
 /// "Files in `app/services/` are named in `snake_case`."
 fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
-    let mut groups: HashMap<(String, String), Vec<&FileEntry>> = HashMap::new();
-    for f in files.iter().filter(|f| !is_test(f) && nameable(f)) {
-        for dir in group_keys(f) {
-            groups.entry((dir, f.ext.clone())).or_default().push(f);
-        }
-    }
+    let groups = grouped(files, |f| !is_test(f) && nameable(f));
 
     let mut out = Vec::new();
-    for ((dir, ext), members) in groups {
+    for ((dir, ext, reach), members) in groups {
         if members.len() < settings.min_files {
             continue;
         }
@@ -382,7 +368,7 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
         let id = format!("naming.{}.{ext}", id_fragment(&dir));
         out.push(Convention {
             statement: format!("Files here are named in {}", style.label()),
-            scope: scope_for(&dir, &ext),
+            scope: crate::scope_reaching(&dir, &ext, reach),
             confidence,
             agreeing,
             total: members.len(),

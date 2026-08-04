@@ -84,6 +84,99 @@ pub fn derive_all(
     (files, conventions)
 }
 
+/// Ancestor depth past which grouping stops paying for itself.
+pub(crate) const MAX_GROUP_DEPTH: usize = 4;
+
+/// How far down the tree a group's rule speaks.
+///
+/// Two groupings over the same directory, and the difference is the whole of
+/// [`Scope::DirChildrenExt`]'s reason for existing: a directory holding a
+/// subdirectory of another kind counts both kinds in one vote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Reach {
+    /// Every file below the directory, which is how a rule reaches a folder
+    /// created after indexing.
+    Subtree,
+    /// The directory's own files and no others.
+    Children,
+}
+
+/// Every `(directory, reach)` group a file in `dir` belongs to.
+///
+/// The ancestor keys carry [`Reach::Subtree`], and the file's own directory
+/// carries a second, [`Reach::Children`] key — but only when the cap did not
+/// stop short of it. Past the cap a file has no group of its own in either
+/// reach, so the two groupings agree about where the tree ends.
+pub(crate) fn group_keys(dir: &str) -> Vec<(String, Reach)> {
+    let mut keys = vec![(String::new(), Reach::Subtree)];
+    let mut acc = String::new();
+    for segment in dir.split('/').filter(|s| !s.is_empty()).take(MAX_GROUP_DEPTH) {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(segment);
+        keys.push((acc.clone(), Reach::Subtree));
+    }
+    if acc == dir && !dir.is_empty() {
+        keys.push((acc, Reach::Children));
+    }
+    keys
+}
+
+/// The scope a group of files speaks through.
+pub(crate) fn scope_reaching(dir: &str, ext: &str, reach: Reach) -> canon_core::Scope {
+    match reach {
+        Reach::Subtree if dir.is_empty() => canon_core::Scope::Ext(ext.to_string()),
+        Reach::Subtree => canon_core::Scope::DirExt(dir.to_string(), ext.to_string()),
+        Reach::Children => canon_core::Scope::DirChildrenExt(dir.to_string(), ext.to_string()),
+    }
+}
+
+/// Drop a directory's own-files rule when its subtree already answered.
+///
+/// The two groupings state the same sentence about overlapping sets of files,
+/// and for a directory with no subdirectories they state it about the *same*
+/// files. Keeping both would double the rules a leaf directory produces, and
+/// where they disagree it would put two contradictory lines in one injected
+/// block — "types here expose exactly 1 public method (900/950)" beside "types
+/// here expose exactly 2 (20/20)" — with nothing to tell a reader which one
+/// their file is.
+///
+/// So the subtree scope wins wherever it has an answer, and the narrower one is
+/// kept only where there was no answer at all. That is what makes this change
+/// monotone: every rule derived before is derived still, with the same counts
+/// and the same grade, and the new ones sit in holes.
+///
+/// The subtree scope wins rather than the narrower one because it reaches a
+/// subdirectory created after indexing, which is the property the whole
+/// ancestor derivation exists for. A direct-children rule cannot: it names one
+/// directory, and a folder added tomorrow inherits nothing from it.
+///
+/// `shape.base` and `shape.family` answer one question between them — what a
+/// type here inherits — and `base_family` already yields to `base_class` inside
+/// a group. Keyed apart they would stop yielding across groupings, and a
+/// directory whose subtree agreed on a suffix while its own files agree on an
+/// exact base would state both about the same file.
+///
+/// A rolled-up rule is a subtree answer like any other, which is why this runs
+/// after [`roll_up_agreeing_siblings`] and keys on the scope rather than on the
+/// id. Run before it, a directory's own files displaced the rule its
+/// subdirectories had unanimously agreed on — trading a rule that reaches a
+/// folder created tomorrow, and is deliberately never enforced, for a narrower
+/// one that refuses writes.
+fn keep_only_gap_filling_children(conventions: &mut Vec<Convention>) {
+    let question = |c: &Convention| {
+        let kind = match family(&c.id) {
+            "shape.family" => "shape.base",
+            other => other,
+        };
+        (kind, scope_dir_of(c).to_string(), scope_ext(c))
+    };
+    let answered: std::collections::HashSet<(&str, String, String)> =
+        conventions.iter().filter(|c| !counted_over_one_directory(c)).map(&question).collect();
+    conventions.retain(|c| !counted_over_one_directory(c) || !answered.contains(&question(c)));
+}
+
 /// Derive from an index someone else assembled.
 ///
 /// Separate from [`derive_all`] so the caller chooses where the file list comes
@@ -100,6 +193,9 @@ pub fn derive_from(
     let facts = semantic::gather(files, root);
     conventions.extend(semantic::derive(&facts, settings));
     roll_up_agreeing_siblings(&mut conventions, settings);
+    // After the roll-up, which is a subtree answer for its parent directory
+    // like any other and so decides whether that directory has a gap left.
+    keep_only_gap_filling_children(&mut conventions);
     collapse_redundant(&mut conventions);
     // Over the finished set, not inside the vote that produces each rule. A
     // wide rule spans more files and so sits at lower agreement than the narrow
@@ -189,7 +285,14 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
         // reappeared as a third rule naming the parent, which is the ancestor
         // derivation `namespace_per_directory` exists to prevent — and it
         // arrived with a statement no file in the parent had voted for.
-        if names_one_directory(c) {
+        //
+        // A rule counted over one directory's own files is excluded for a
+        // second reason on top of that one. It exists only because the
+        // directory's own subtree could not agree; assembling a subtree claim
+        // about the *parent* out of children that each failed to make one about
+        // themselves states at the wider scope exactly what the narrower
+        // evidence refused.
+        if names_one_directory(c) || counted_over_one_directory(c) {
             continue;
         }
         let dir = scope_dir(c);
@@ -223,11 +326,17 @@ fn roll_up_agreeing_siblings(conventions: &mut Vec<Convention>, settings: &Setti
         if holding.len() != all.len() {
             continue; // a child dissents, so the parent has no single answer
         }
-        // Already stated at the parent, by the per-file derivation.
-        if conventions
-            .iter()
-            .any(|c| c.statement == statement && scope_dir(c) == parent && scope_ext(c) == ext)
-        {
+        // Already stated at the parent, by the per-file derivation. A rule
+        // counted over the parent's own files does not count as stating it:
+        // that rule reaches none of the subdirectories this one was assembled
+        // from, and `keep_only_gap_filling_children` drops it in favour of this
+        // one immediately afterwards.
+        if conventions.iter().any(|c| {
+            c.statement == statement
+                && scope_dir(c) == parent
+                && scope_ext(c) == ext
+                && !counted_over_one_directory(c)
+        }) {
             continue;
         }
         // Gate on directories, report on files. The rule is only rolled up
@@ -285,6 +394,8 @@ fn collapse_redundant(conventions: &mut Vec<Convention>) {
         ext: String,
         dir: String,
         rollup: bool,
+        /// Whether the rule was counted over one directory's own files.
+        children: bool,
         /// Whether the rule speaks for its own directory and no other.
         one_directory: bool,
     }
@@ -295,6 +406,7 @@ fn collapse_redundant(conventions: &mut Vec<Convention>) {
             ext: scope_ext(c),
             dir: scope_dir(c),
             rollup: c.id.ends_with(canon_core::ROLLUP_SUFFIX),
+            children: counted_over_one_directory(c),
             one_directory: names_one_directory(c),
         })
         .collect();
@@ -314,6 +426,13 @@ fn collapse_redundant(conventions: &mut Vec<Convention>) {
     // so dropping the child left it with no rule in either half — not injected
     // before the write, not checked after it — while every tracked file in the
     // tree disagreed with what got written.
+    //
+    // A rule counted over one directory's own files absorbs nothing either, for
+    // the same reason the rollup does not: `app/models/*.rb` reaches no file in
+    // `app/models/concerns`, so letting it swallow that directory's own rule
+    // would leave the subdirectory with nothing. It is still absorbed *by* an
+    // ancestor that states the same sentence, which is what keeps the narrower
+    // scope to the holes it was derived to fill.
     let keep: Vec<bool> = keyed
         .iter()
         .map(|k| {
@@ -322,6 +441,7 @@ fn collapse_redundant(conventions: &mut Vec<Convention>) {
                     other.statement == k.statement
                         && other.ext == k.ext
                         && !other.rollup
+                        && !other.children
                         && is_ancestor(&other.dir, &k.dir)
                 })
         })
@@ -333,7 +453,9 @@ fn collapse_redundant(conventions: &mut Vec<Convention>) {
 
 fn scope_ext(c: &Convention) -> String {
     match &c.scope {
-        canon_core::Scope::Ext(e) | canon_core::Scope::DirExt(_, e) => e.clone(),
+        canon_core::Scope::Ext(e)
+        | canon_core::Scope::DirExt(_, e)
+        | canon_core::Scope::DirChildrenExt(_, e) => e.clone(),
         canon_core::Scope::Repo | canon_core::Scope::Dir(_) => String::new(),
     }
 }
@@ -373,9 +495,23 @@ fn names_one_directory(convention: &Convention) -> bool {
 /// The directory a rule names, or the empty string when it names none.
 pub(crate) fn scope_dir_of(c: &Convention) -> &str {
     match &c.scope {
-        canon_core::Scope::Dir(d) | canon_core::Scope::DirExt(d, _) => d,
+        canon_core::Scope::Dir(d)
+        | canon_core::Scope::DirExt(d, _)
+        | canon_core::Scope::DirChildrenExt(d, _) => d,
         canon_core::Scope::Repo | canon_core::Scope::Ext(_) => "",
     }
+}
+
+/// Whether a rule was counted over one directory's own files and reaches no
+/// further down the tree.
+///
+/// Distinct from [`names_one_directory`], which is about a family whose
+/// *statement* cannot be true one level down however it was counted. This one
+/// is about the sample: three places have to know that such a rule speaks for
+/// nothing below itself, and all three read it off the scope rather than off
+/// the id.
+pub(crate) fn counted_over_one_directory(c: &Convention) -> bool {
+    matches!(c.scope, canon_core::Scope::DirChildrenExt(..))
 }
 
 /// Whether `ancestor` strictly contains `descendant`.
@@ -804,6 +940,259 @@ mod tests {
         let (files, convs) = derive_all(&root, &Settings::default());
         assert_eq!(files.len(), 1);
         assert!(convs.is_empty());
+    }
+
+    /// A models directory holding a concerns subdirectory: the shape of
+    /// `app/models` in a real Rails repository, where 123 of 128 models inherit
+    /// `ApplicationRecord` and 36 concerns are modules that inherit nothing.
+    fn models_beside_concerns() -> Vec<(String, String)> {
+        let mut files = fixture::agreeing(
+            "app/models",
+            "rb",
+            16,
+            "class Item$N < ApplicationRecord\n  def to_label; end\nend\n",
+        );
+        files.extend(fixture::agreeing(
+            "app/models/concerns",
+            "rb",
+            10,
+            "module Concern$N\n  def helper; end\nend\n",
+        ));
+        files
+    }
+
+    #[test]
+    fn a_subdirectory_of_another_kind_no_longer_dilutes_its_parent() {
+        // 16 of 26 over the subtree is a coin flip with a lean; 16 of 16 over
+        // the directory's own files is the rule the models actually hold. On a
+        // real Rails repository this is 123 of 164 against 123 of 128, and all
+        // 128 models derived nothing about their base at all.
+        let root = fixture::build("models-concerns", &refs(&models_beside_concerns()));
+        let (_, convs) = derive_all(&root, &Settings::default());
+        let base = convs
+            .iter()
+            .filter(|c| c.id.starts_with("shape.base"))
+            .find(|c| c.statement.contains("ApplicationRecord"))
+            .unwrap_or_else(|| panic!("no base rule for the models in {:?}", ids(&convs)));
+        assert_eq!(
+            base.scope,
+            canon_core::Scope::DirChildrenExt("app/models".into(), "rb".into()),
+            "the rule was counted over the subtree that outvoted it"
+        );
+        assert_eq!((base.agreeing, base.total), (16, 16));
+        assert!(base.scope.matches("app/models/new_thing.rb"));
+        assert!(!base.scope.matches("app/models/concerns/new_validator.rb"));
+    }
+
+    #[test]
+    fn the_subdirectory_keeps_its_own_rules_beside_the_narrower_parent_rule() {
+        // The concerns are not displaced by the rule their exclusion made
+        // possible: they are a different kind of file with their own scope.
+        let root = fixture::build("models-concerns-keep", &refs(&models_beside_concerns()));
+        let (_, convs) = derive_all(&root, &Settings::default());
+        assert!(
+            convs.iter().any(|c| scope_dir_of(c) == "app/models/concerns"),
+            "the subdirectory lost its own rules: {:?}",
+            ids(&convs)
+        );
+        assert!(
+            convs.iter().any(|c| c.scope.matches("app/models/concerns/new_validator.rb")),
+            "the subdirectory lost its coverage: {:?}",
+            ids(&convs)
+        );
+    }
+
+    #[test]
+    fn a_directory_with_no_subdirectories_states_its_rule_once() {
+        // The two groupings hold the same files there, so keeping both would
+        // double every rule a leaf directory produces. The subtree scope is the
+        // one kept: it reaches a subdirectory created after indexing, which is
+        // what the whole ancestor derivation exists for.
+        let files = fixture::agreeing(
+            "app/services",
+            "rb",
+            6,
+            "class Item$N < ApplicationService\n  def call; end\nend\n",
+        );
+        let root = fixture::build("leaf-once", &refs(&files));
+        let (_, convs) = derive_all(&root, &Settings::default());
+        let bases: Vec<&canon_core::Scope> =
+            convs.iter().filter(|c| c.id.starts_with("shape.base")).map(|c| &c.scope).collect();
+        // One, and it reaches the subtree. `collapse_redundant` then keeps
+        // whichever ancestor states it, which here is `app` itself.
+        assert_eq!(bases.len(), 1, "got {bases:?}");
+        assert!(matches!(bases[0], canon_core::Scope::DirExt(..)), "got {bases:?}");
+    }
+
+    #[test]
+    fn every_derived_rule_has_an_id_no_other_rule_shares() {
+        // The two groupings build the same id for the same directory and
+        // extension, because they answer the same question about the same
+        // place. Only one of them is ever kept, and a user suppressing
+        // `shape.base.app.models.rb` has to reach whichever it is.
+        let mut files = models_beside_concerns();
+        files.extend(fixture::agreeing(
+            "app/services",
+            "rb",
+            6,
+            "class Svc$N < ApplicationService\n  def call; end\nend\n",
+        ));
+        files.extend(fixture::agreeing(
+            "src/components",
+            "tsx",
+            6,
+            "export const Item$N = () => <div/>;\n",
+        ));
+        let root = fixture::build("unique-ids", &refs(&files));
+        let (_, convs) = derive_all(&root, &Settings::default());
+        let mut seen = std::collections::HashSet::new();
+        for c in &convs {
+            assert!(seen.insert(c.id.clone()), "`{}` is derived twice", c.id);
+        }
+    }
+
+    #[test]
+    fn a_narrow_rule_does_not_absorb_the_subdirectory_it_cannot_reach() {
+        // `collapse_redundant` drops a rule an ancestor states in the same
+        // words, and `app/models/*.rb` is an ancestor of `app/models/concerns`
+        // by directory while reaching not one file in it. Absorbing the child
+        // would leave that subdirectory with no rule in either half: not
+        // injected before the write, not checked after it.
+        let mut files = fixture::agreeing(
+            "app/models",
+            "rb",
+            16,
+            "class Item$N < ApplicationRecord\n  def to_label; end\nend\n",
+        );
+        // Concerns that keep the parent's own vote split while agreeing with
+        // each other on the same sentence the parent's own files hold.
+        files.extend(fixture::agreeing(
+            "app/models/concerns",
+            "rb",
+            10,
+            "module Concern$N\n  def helper; end\nend\n",
+        ));
+        let root = fixture::build("no-narrow-absorb", &refs(&files));
+        let (_, convs) = derive_all(&root, &Settings::default());
+        let narrow: Vec<&Convention> =
+            convs.iter().filter(|c| counted_over_one_directory(c)).collect();
+        assert!(!narrow.is_empty(), "the fixture derived no narrow rule to test");
+        for c in &narrow {
+            let dir = scope_dir_of(c);
+            assert!(
+                !convs.iter().any(|other| other.statement == c.statement
+                    && scope_dir_of(other).starts_with(&format!("{dir}/"))
+                    && counted_over_one_directory(other)),
+                "`{}` may have absorbed a subdirectory it cannot reach",
+                c.id
+            );
+        }
+        assert!(convs.iter().any(|c| c.scope.matches("app/models/concerns/other.rb")));
+    }
+
+    #[test]
+    fn a_narrow_rule_is_never_assembled_into_a_claim_about_a_parent_subtree() {
+        // A rule counted over one directory's own files exists because that
+        // directory's subtree could not agree. Rolling several of them up
+        // states at the parent's subtree exactly what the children's own
+        // subtrees refused.
+        let mut files: Vec<(String, String)> = Vec::new();
+        for child in ["alpha", "beta"] {
+            files.extend(fixture::agreeing(
+                &format!("app/{child}"),
+                "rb",
+                16,
+                &format!("class Item{child}$N < ApplicationRecord\n  def to_label; end\nend\n"),
+            ));
+            files.extend(fixture::agreeing(
+                &format!("app/{child}/concerns"),
+                "rb",
+                10,
+                &format!("module Concern{child}$N\n  def helper; end\nend\n"),
+            ));
+        }
+        let root = fixture::build("no-narrow-rollup", &refs(&files));
+        let (_, convs) = derive_all(&root, &Settings::default());
+        assert!(
+            convs.iter().any(counted_over_one_directory),
+            "the fixture derived no narrow rule to roll up"
+        );
+        assert!(
+            !convs.iter().any(|c| c.id.ends_with(canon_core::ROLLUP_SUFFIX)
+                && c.statement.contains("ApplicationRecord")),
+            "a subtree claim was assembled from directories whose subtrees refused it: {:?}",
+            ids(&convs)
+        );
+    }
+
+    fn ids(convs: &[Convention]) -> Vec<&str> {
+        convs.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_rule_the_subdirectories_agree_on_is_not_displaced_by_the_parents_own_files() {
+        // A rolled-up rule is a subtree answer for its parent, and the parent's
+        // own files must not take its place: measured on a real PHP repository,
+        // an advisory rule counted over 76 files in three subdirectories was
+        // replaced by an enforced one counted over the 27 in the parent, which
+        // is a refusal appearing where a piece of advice used to be and a
+        // subdirectory added tomorrow inheriting nothing.
+        let body = "export const Thing = () => <div/>;\n";
+        let mut files: Vec<(String, String)> = Vec::new();
+        // Two subdirectories that agree, and the parent's own files agreeing
+        // with them, all in PascalCase.
+        for dir in ["src/components/alpha", "src/components/beta", "src/components"] {
+            for name in [
+                "UserCard",
+                "OrderList",
+                "PayoutForm",
+                "LoginPanel",
+                "NavBar",
+                "SideMenu",
+                "TopBanner",
+                "FooterLinks",
+            ] {
+                files.push((format!("{dir}/{name}.tsx"), body.to_string()));
+            }
+        }
+        // A third subdirectory whose own names witness no single style, so it
+        // derives no rule and is not counted as a dissenter — while its files
+        // still sink the parent's per-file vote below the floor. This is what
+        // makes the rollup the only way the parent states the rule at all.
+        for name in [
+            "create_thing",
+            "update_thing",
+            "cancel_thing",
+            "refundThing",
+            "approveThing",
+            "rejectThing",
+            "settle-batch",
+            "send-receipt",
+            "void-invoice",
+            "ChargeCard",
+            "SplitPayout",
+            "VoidRefund",
+        ] {
+            files.push((format!("src/components/gamma/{name}.tsx"), body.to_string()));
+        }
+
+        let root = fixture::build("rollup-not-displaced", &refs(&files));
+        let (_, convs) = derive_all(&root, &Settings::default());
+        let at_parent: Vec<&Convention> = convs
+            .iter()
+            .filter(|c| c.id.starts_with("naming.") && scope_dir_of(c) == "src/components")
+            .collect();
+        assert_eq!(at_parent.len(), 1, "got {at_parent:#?}");
+        assert!(
+            at_parent[0].id.ends_with(canon_core::ROLLUP_SUFFIX),
+            "the parent's own files displaced what its subdirectories agreed on: `{}`",
+            at_parent[0].id
+        );
+        assert_eq!(at_parent[0].enforcement, canon_core::Enforcement::Advisory);
+        assert!(
+            at_parent[0].scope.matches("src/components/delta/BrandNew.tsx"),
+            "a subdirectory added after indexing inherits nothing"
+        );
     }
 
     #[test]

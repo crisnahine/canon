@@ -329,6 +329,11 @@ fn sample_covers(rel: &str, convention: &Convention) -> bool {
             convention.sample_roots.iter().any(below_a_sample)
                 && (dir == prefix || is_below(dir, prefix))
         }
+        // A scope naming one directory's own files was counted over exactly
+        // the files it can reach, so there is nothing left for the sample to
+        // narrow. `Scope::matches` has already established that the file sits
+        // in that directory and no other.
+        canon_core::Scope::DirChildrenExt(prefix, _) => dir == prefix,
         // A scope with no directory has the repository root as the ancestor of
         // every sample it took, so the ancestor reading would admit every file
         // in the repository. A `**/*.md` rule counted in `docs/` has to go on
@@ -2277,6 +2282,49 @@ mod tests {
         assert!(
             blocking_violations("src/globals.css", Some(".a{}".into()), &[modules], &settings)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_rule_counted_over_one_directorys_own_files_judges_nothing_below_it() {
+        // The narrower scope exists because the subtree could not agree, so the
+        // one thing it must never do is reach back into the subtree that
+        // outvoted it. `app/models/concerns` is full of modules that inherit
+        // nothing, and the rule the models produced is exactly wrong about
+        // every one of them.
+        let settings = canon_core::Settings::default();
+        let mut rule = blocking(
+            "shape.base.app.models.rb",
+            "Types here inherit from `ApplicationRecord`",
+            Scope::DirChildrenExt("app/models".into(), "rb".into()),
+        );
+        rule.sample_roots = vec!["app/models".to_string()];
+        let concern = "module Auditable\n  def audit; end\nend\n";
+        assert!(
+            blocking_violations(
+                "app/models/concerns/auditable.rb",
+                Some(concern.into()),
+                std::slice::from_ref(&rule),
+                &settings
+            )
+            .is_empty(),
+            "the models' rule was applied to a subdirectory that never voted on it"
+        );
+        assert!(
+            verify_source("app/models/concerns/auditable.rb", concern, std::slice::from_ref(&rule))
+                .is_empty(),
+            "and it must not advise there either, or the report contradicts the block"
+        );
+        // And it still holds for the directory whose files produced it.
+        assert_eq!(
+            blocking_violations(
+                "app/models/widget.rb",
+                Some("class Widget < SomethingElse\nend\n".into()),
+                &[rule],
+                &settings
+            )
+            .len(),
+            1
         );
     }
 

@@ -32,8 +32,6 @@ impl FactSet {
     }
 }
 
-/// Ancestor depth past which grouping stops paying for itself.
-const MAX_GROUP_DEPTH: usize = 4;
 const MAX_EVIDENCE: usize = 12;
 
 /// Parse every file canon has an extractor for.
@@ -66,24 +64,15 @@ pub(crate) fn gather(files: &[FileEntry], root: &std::path::Path) -> Vec<FactSet
 
 /// Derive every Tier 1 convention.
 pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
-    let mut groups: HashMap<(String, String), Vec<&FactSet>> = HashMap::new();
+    let mut groups: HashMap<(String, String, crate::Reach), Vec<&FactSet>> = HashMap::new();
     for s in sets {
-        let mut acc = String::new();
-        let mut keys = vec![String::new()];
-        for segment in s.dir.split('/').filter(|x| !x.is_empty()).take(MAX_GROUP_DEPTH) {
-            if !acc.is_empty() {
-                acc.push('/');
-            }
-            acc.push_str(segment);
-            keys.push(acc.clone());
-        }
-        for dir in keys {
-            groups.entry((dir, s.ext.clone())).or_default().push(s);
+        for (dir, reach) in crate::group_keys(&s.dir) {
+            groups.entry((dir, s.ext.clone(), reach)).or_default().push(s);
         }
     }
 
     let mut out = Vec::new();
-    for ((dir, ext), members) in groups {
+    for ((dir, ext, reach), members) in groups {
         // Shape is a property of a place in the tree, never of a whole
         // repository. Derived repository-wide on a Rails codebase the
         // migrations outnumber everything else, producing "the public method
@@ -91,32 +80,53 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         if dir.is_empty() {
             continue;
         }
-        out.extend(public_arity(&dir, &ext, &members, settings));
-        out.extend(entrypoint_name(&dir, &ext, &members, settings));
-        let base = base_class(&dir, &ext, &members, settings);
-        if base.is_none() {
-            out.extend(base_family(&dir, &ext, &members, settings));
-        }
-        let contract = contract(&dir, &ext, &members, settings);
-        // A Rust type's `superclass` is its first trait impl, so both rules
-        // read one fact and would state it twice — "Types here inherit from
-        // `Loggable`" beside "Types here implement `Loggable`", two lines of
-        // the injected budget and two claims the checker cannot collapse. A
-        // trait impl is not a base class, and `contract` is the sentence that
-        // says so, the same way `base_family` yields to `base_class` above.
-        if !(contract.is_some() && reads_a_base_from_a_contract(&ext)) {
-            out.extend(base);
-        }
-        out.extend(contract);
-        out.extend(module_arity(&dir, &ext, &members, settings));
-        out.extend(collaborator(&dir, &ext, &members, settings));
-        out.extend(macros(&dir, &ext, &members, settings));
-        out.extend(import_source(&dir, &ext, &members, settings));
-        out.extend(export_style(&dir, &ext, &members, settings));
-        out.extend(annotation(&dir, &ext, &members, settings));
-        out.extend(mixin(&dir, &ext, &members, settings));
+        out.extend(rules_for(&dir, &ext, reach, &members, settings));
     }
     out.extend(namespace_per_directory(sets, settings));
+    out
+}
+
+/// Every rule one group of files supports.
+///
+/// The scope is written last, from `reach`, rather than threaded through
+/// thirteen rule functions that each build the same one: the two groupings
+/// count different files and produce identical sentences about them, and the
+/// only thing that differs is which files the sentence speaks for.
+fn rules_for(
+    dir: &str,
+    ext: &str,
+    reach: crate::Reach,
+    members: &[&FactSet],
+    settings: &Settings,
+) -> Vec<Convention> {
+    let mut out = Vec::new();
+    out.extend(public_arity(dir, ext, members, settings));
+    out.extend(entrypoint_name(dir, ext, members, settings));
+    let base = base_class(dir, ext, members, settings);
+    if base.is_none() {
+        out.extend(base_family(dir, ext, members, settings));
+    }
+    let contract = contract(dir, ext, members, settings);
+    // A Rust type's `superclass` is its first trait impl, so both rules
+    // read one fact and would state it twice — "Types here inherit from
+    // `Loggable`" beside "Types here implement `Loggable`", two lines of
+    // the injected budget and two claims the checker cannot collapse. A
+    // trait impl is not a base class, and `contract` is the sentence that
+    // says so, the same way `base_family` yields to `base_class` above.
+    if !(contract.is_some() && reads_a_base_from_a_contract(ext)) {
+        out.extend(base);
+    }
+    out.extend(contract);
+    out.extend(module_arity(dir, ext, members, settings));
+    out.extend(collaborator(dir, ext, members, settings));
+    out.extend(macros(dir, ext, members, settings));
+    out.extend(import_source(dir, ext, members, settings));
+    out.extend(export_style(dir, ext, members, settings));
+    out.extend(annotation(dir, ext, members, settings));
+    out.extend(mixin(dir, ext, members, settings));
+    for c in &mut out {
+        c.scope = crate::scope_reaching(dir, ext, reach);
+    }
     out
 }
 

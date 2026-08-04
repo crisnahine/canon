@@ -149,6 +149,37 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_counted_over_a_directorys_own_files_leads_the_block_there() {
+        // The files literally beside the one being written, against the same
+        // directory's whole subtree. Both are true and the narrower one is the
+        // one that describes this file.
+        let convs = vec![
+            conv(
+                "shape.base.app.rb",
+                "Types here inherit from `ApplicationRecord`",
+                Scope::DirChildrenExt("app/models".into(), "rb".into()),
+                123,
+                128,
+            ),
+            conv(
+                "naming.app.rb",
+                "Files here are named in snake_case",
+                Scope::DirExt("app".into(), "rb".into()),
+                2407,
+                2407,
+            ),
+        ];
+        let got = for_path(&convs, "app/models/user.rb", 1_500);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].id, "shape.base.app.rb", "the narrower rule leads");
+        // And it reaches no file in a subdirectory, so the block there is the
+        // wider rule alone.
+        let below = for_path(&convs, "app/models/concerns/auditable.rb", 1_500);
+        assert_eq!(below.len(), 1);
+        assert_eq!(below[0].id, "naming.app.rb");
+    }
+
+    #[test]
     fn only_conventions_whose_scope_matches_are_returned() {
         let convs = vec![
             conv("a", "Ruby rule", Scope::DirExt("app".into(), "rb".into()), 10, 10),

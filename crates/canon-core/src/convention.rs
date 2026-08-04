@@ -11,6 +11,15 @@ use crate::{Confidence, Settings};
 /// directory that did not exist at index time still inherits the rules of the
 /// nearest ancestor that has any, which is the common case when a developer
 /// adds a new domain folder.
+///
+/// [`Scope::DirChildrenExt`] is the exception, and it exists because the prefix
+/// reading has a cost the ancestor derivation cannot pay off. A directory whose
+/// subtree holds a second kind of file counts both kinds in one vote:
+/// `app/models` in a real Rails repository holds 128 models, 123 of which
+/// inherit `ApplicationRecord`, beside 36 concerns, which are modules and
+/// inherit nothing. Counted over the subtree that is 123 of 164, under the bar
+/// [`Confidence::required_for`] sets, and all 128 models derive no rule about
+/// their base at all. Counted over the directory's own files it is 123 of 128.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scope {
     /// Every file in the repository.
@@ -21,6 +30,13 @@ pub enum Scope {
     Dir(String),
     /// Every file with this extension under this directory prefix.
     DirExt(String, String),
+    /// Every file with this extension directly in this directory, and none in
+    /// a subdirectory of it.
+    ///
+    /// Extension-qualified only. The derivation never produces an unqualified
+    /// directory scope either, and a second variant nothing constructs would
+    /// have to be handled at every match site for no reader's benefit.
+    DirChildrenExt(String, String),
 }
 
 impl Scope {
@@ -33,24 +49,36 @@ impl Scope {
             Self::Ext(ext) => has_ext(rel, ext),
             Self::Dir(dir) => under(rel, dir),
             Self::DirExt(dir, ext) => under(rel, dir) && has_ext(rel, ext),
+            Self::DirChildrenExt(dir, ext) => directly_in(rel, dir) && has_ext(rel, ext),
         }
     }
 
     /// How narrowly this scope speaks, for ranking two conventions that both
     /// match the same file.
     ///
-    /// Deeper directories win, and at equal depth an extension-qualified scope
-    /// wins over a bare one. A rule derived from the twelve files beside the
-    /// one being written describes it better than a rule derived from four
-    /// thousand files across the repository.
+    /// Deeper directories win; at equal depth a scope naming only a directory's
+    /// own files wins over one reaching its whole subtree; and at equal depth
+    /// and reach an extension-qualified scope wins over a bare one. A rule
+    /// derived from the twelve files beside the one being written describes it
+    /// better than a rule derived from four thousand files across the
+    /// repository.
+    ///
+    /// Depth is scaled by four rather than by two so that reach and
+    /// qualification both fit inside one level: a direct-children scope at
+    /// `app/models` has to outrank the subtree of `app/models` and still lose
+    /// to anything naming `app/models/concerns`.
     #[must_use]
     pub fn specificity(&self) -> usize {
         let depth = match self {
             Self::Repo | Self::Ext(_) => 0,
-            Self::Dir(d) | Self::DirExt(d, _) => d.split('/').filter(|s| !s.is_empty()).count() * 2,
+            Self::Dir(d) | Self::DirExt(d, _) | Self::DirChildrenExt(d, _) => {
+                d.split('/').filter(|s| !s.is_empty()).count() * 4
+            }
         };
-        let qualified = usize::from(matches!(self, Self::Ext(_) | Self::DirExt(..)));
-        depth + qualified
+        let direct = usize::from(matches!(self, Self::DirChildrenExt(..))) * 2;
+        let qualified =
+            usize::from(matches!(self, Self::Ext(_) | Self::DirExt(..) | Self::DirChildrenExt(..)));
+        depth + direct + qualified
     }
 
     /// Human-facing description of the file set, for the header of an injected
@@ -62,6 +90,7 @@ impl Scope {
             Self::Ext(ext) => format!("**/*.{ext}"),
             Self::Dir(dir) => format!("{dir}/**"),
             Self::DirExt(dir, ext) => format!("{dir}/**/*.{ext}"),
+            Self::DirChildrenExt(dir, ext) => format!("{dir}/*.{ext}"),
         }
     }
 }
@@ -75,6 +104,11 @@ fn under(rel: &str, dir: &str) -> bool {
         return true;
     }
     rel.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether `rel` sits in `dir` itself rather than anywhere below it.
+fn directly_in(rel: &str, dir: &str) -> bool {
+    rel.rsplit_once('/').map_or(dir.is_empty(), |(parent, _)| parent == dir)
 }
 
 /// How far a convention may go when the code disagrees with it.
@@ -303,6 +337,36 @@ mod tests {
         assert!(deep.rank() > shallow.rank());
         assert!(shallow.rank() > ext.rank());
         assert!(ext.rank() > repo.rank());
+    }
+
+    #[test]
+    fn a_direct_children_scope_reaches_its_own_directory_and_no_deeper() {
+        let s = Scope::DirChildrenExt("app/models".into(), "rb".into());
+        assert!(s.matches("app/models/user.rb"));
+        assert!(!s.matches("app/models/concerns/validator.rb"), "a subdirectory is another kind");
+        assert!(!s.matches("app/models/user.rake"), "the extension still applies");
+        assert!(!s.matches("app/services/create.rb"));
+        assert!(!s.matches("app/modelsx/user.rb"), "`models` must not capture `modelsx`");
+    }
+
+    #[test]
+    fn a_direct_children_scope_outranks_the_subtree_of_the_same_directory() {
+        // The files literally beside the one being written describe it better
+        // than the same directory's whole subtree, which is what the narrower
+        // scope was derived to say. A deeper directory still wins over both.
+        let subtree = conv(Scope::DirExt("app/models".into(), "rb".into()));
+        let direct = conv(Scope::DirChildrenExt("app/models".into(), "rb".into()));
+        let deeper = conv(Scope::DirExt("app/models/concerns".into(), "rb".into()));
+        assert!(direct.rank() > subtree.rank());
+        assert!(deeper.rank() > direct.rank());
+    }
+
+    #[test]
+    fn a_direct_children_scope_renders_as_a_single_star() {
+        assert_eq!(
+            Scope::DirChildrenExt("app/models".into(), "rb".into()).render(),
+            "app/models/*.rb"
+        );
     }
 
     #[test]

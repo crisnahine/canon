@@ -549,6 +549,14 @@ fn relevant_to(
         canon_core::Scope::Ext(ext) => evidence
             .iter()
             .any(|e| e.rel.starts_with(&format!("{query}/")) && has_extension(&e.rel, ext)),
+        // A rule counted over one directory's own files is relevant to that
+        // directory and to anyone asking about something above it. It is not
+        // relevant downwards, unlike the prefix scopes: it says nothing about a
+        // subdirectory, and an audit surface that showed it there would name a
+        // rule the injected block withholds.
+        canon_core::Scope::DirChildrenExt(d, _) => {
+            d == query || d.starts_with(&format!("{query}/"))
+        }
         canon_core::Scope::Dir(d) | canon_core::Scope::DirExt(d, _) => {
             d.is_empty()
                 || d == query
@@ -740,7 +748,9 @@ fn languages_in(conventions: &[canon_core::Convention]) -> Vec<String> {
     let mut seen: Vec<String> = conventions
         .iter()
         .filter_map(|c| match &c.scope {
-            canon_core::Scope::Ext(ext) | canon_core::Scope::DirExt(_, ext) => Some(ext),
+            canon_core::Scope::Ext(ext)
+            | canon_core::Scope::DirExt(_, ext)
+            | canon_core::Scope::DirChildrenExt(_, ext) => Some(ext),
             canon_core::Scope::Repo | canon_core::Scope::Dir(_) => None,
         })
         .filter_map(|ext| canon_extract::lang::from_extension(ext))

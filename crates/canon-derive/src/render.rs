@@ -42,8 +42,12 @@ pub fn render_block(rel: &str, selected: &[&Convention]) -> Option<String> {
     // Excluding it left a Go repository whose only naming rule was unanimous
     // across all 58 files saying nothing at all before a write.
     let anything_about_this_file = selected.iter().any(|c| {
-        matches!(c.scope, canon_core::Scope::Dir(_) | canon_core::Scope::DirExt(..))
-            || c.id.starts_with("naming.")
+        matches!(
+            c.scope,
+            canon_core::Scope::Dir(_)
+                | canon_core::Scope::DirExt(..)
+                | canon_core::Scope::DirChildrenExt(..)
+        ) || c.id.starts_with("naming.")
     });
     if !anything_about_this_file {
         return None;
