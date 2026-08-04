@@ -10,12 +10,22 @@
 
 ; helper(1) — a call with no receiver.
 ;
+; `!receiver` is load-bearing, and Ruby is the only language here that needs
+; it. Everywhere else a receiver changes the shape of the node in the function
+; position, so the two patterns cannot both match; Ruby keeps `receiver` and
+; `method` as sibling fields of one `call`, so without the negation
+; `Payment.charge(1)` matched both and was recorded twice — once correctly,
+; once as a receiverless call it never was. Every rule that reads a
+; receiverless call then saw `find`, `create` and `new` as macros a directory
+; agreed on.
+;
 ; Only where the source makes it a call. A bare `notify_customer` with no
 ; parentheses and no arguments parses as a plain `identifier`, because Ruby
 ; cannot tell a method call from a local variable read without resolving
 ; scope. Capturing those would report every variable as a call and inflate
 ; every coupling count in the repository.
 (call
+  !receiver
   method: (identifier) @call
   arguments: (argument_list))
 

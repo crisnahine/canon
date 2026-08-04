@@ -242,6 +242,34 @@ mod tests {
     }
 
     #[test]
+    fn a_call_with_a_receiver_is_recorded_once() {
+        // Ruby keeps `receiver` and `method` as sibling fields of one `call`,
+        // so the receiverless pattern matched a receiver call too and
+        // `Payment.charge(1)` arrived twice — once correctly, once as a
+        // receiverless call it never was. Every rule reading a receiverless
+        // call then saw `find`, `create` and `new` as macros a directory
+        // agreed on. Every other language distinguishes the two by the shape
+        // of the node in the function position and never had the problem, so
+        // they are asserted here beside Ruby to keep it that way.
+        for (language, source) in [
+            (Language::Ruby, "class A\n  def call\n    Payment.charge(1)\n  end\nend\n"),
+            (Language::Python, "class A:\n    def call(self):\n        Payment.charge(1)\n"),
+            (Language::TypeScript, "class A { call() { Payment.charge(1); } }"),
+            (Language::Php, "<?php function call() { Payment::charge(1); }"),
+            (Language::Go, "package a\nfunc Call() { payment.Charge(1) }\n"),
+        ] {
+            let f = facts(language, source);
+            let bare: Vec<&Call> = f.calls.iter().filter(|c| c.receiver.is_none()).collect();
+            assert!(
+                bare.is_empty(),
+                "{}: a receiver call was also recorded as receiverless: {:?}",
+                language.name(),
+                called(&f)
+            );
+        }
+    }
+
+    #[test]
     fn a_call_without_a_receiver_has_none() {
         let f = facts(Language::Ruby, "class A\n  def call\n    notify_customer(1)\n  end\nend\n");
         let bare = f.calls.iter().find(|c| c.name == "notify_customer");
