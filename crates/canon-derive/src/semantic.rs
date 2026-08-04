@@ -538,43 +538,46 @@ fn collaborator(
 /// Counted by presence per file. One file calling `useState` nine times is
 /// one vote, or a single large component would decide the rule for its
 /// directory.
+///
+/// The name stated is the one [`presence_winner`] finds, for the reason its
+/// doc comment gives: a `<script setup>` block calls each of its compiler
+/// macros exactly once, so a per-file pick keyed on within-file repetition
+/// ties every name at one and resolves the tie to whichever sorts last. The
+/// macro the whole directory shares then loses to whichever of a file's own
+/// calls happened to sort after it.
 fn macros(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
-    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+    // Only among the receiverless calls a receiver would otherwise have
+    // excluded, which is the same set the vote is counted over.
+    let per_file: Vec<(&FactSet, Vec<String>)> = members
         .iter()
         .map(|s| {
-            let mut names: Vec<&String> = s
+            let names = s
                 .facts
                 .calls
                 .iter()
                 .filter(|c| c.receiver.is_none() && is_macro(&c.name))
-                .map(|c| &c.name)
+                .map(|c| c.name.clone())
                 .collect();
-            names.sort_unstable();
-            names.dedup();
-            // The macro this file leans on most, once per file, counted the
-            // same way the names above were selected: only among the
-            // receiverless calls a receiver would otherwise have excluded.
-            let dominant = names
-                .into_iter()
-                .max_by_key(|n| {
-                    s.facts.calls.iter().filter(|c| c.receiver.is_none() && &c.name == *n).count()
-                })
-                .cloned();
-            (dominant, s.weight, *s)
+            (*s, names)
         })
         .collect();
+    let winner = presence_winner(per_file.iter().map(|(s, names)| (names.as_slice(), s.weight)))?;
 
-    let (winner, confidence, agreeing) = majority(&observations, settings)?;
-    let name = winner.clone()?;
+    let observations: Vec<(bool, f32, &FactSet)> =
+        per_file.iter().map(|(s, names)| (names.contains(&winner), s.weight, *s)).collect();
+    let (agrees, confidence, agreeing) = majority(&observations, settings)?;
+    if !agrees {
+        return None;
+    }
     Some(Convention {
         id: format!("shape.macros.{}.{ext}", id_fragment(dir)),
-        statement: format!("Files here use `{name}`"),
+        statement: format!("Files here use `{winner}`"),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
         total: observations.len(),
-        exemplar: exemplar(&observations, &winner),
-        evidence: evidence(&observations, &winner),
+        exemplar: exemplar(&observations, &true),
+        evidence: evidence(&observations, &true),
         sample_roots: Vec::new(),
         enforcement: Enforcement::Advisory,
     })
@@ -676,37 +679,40 @@ fn import_source(
 /// One rule per directory, naming the single most widely carried annotation.
 /// A `NestJS` controller carries four or five, and stating all of them turns a
 /// four-line block into a wall of text the reader stops reading.
+///
+/// Carrying four or five is also why the name stated is the one
+/// [`presence_winner`] finds. A controller carries `@Controller` once and
+/// `@Get`, `@Post` and `@Delete` once each, so every within-file count ties at
+/// one; a per-file pick keyed on that repetition resolves every tie to
+/// whichever name sorts last, and the one annotation every file in the
+/// directory shares loses to a method decorator only some of them carry.
 fn annotation(
     dir: &str,
     ext: &str,
     members: &[&FactSet],
     settings: &Settings,
 ) -> Option<Convention> {
-    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+    let per_file: Vec<(&FactSet, Vec<String>)> = members
         .iter()
-        .map(|s| {
-            let mut names: Vec<&String> = s.facts.annotations.iter().map(|a| &a.name).collect();
-            names.sort_unstable();
-            names.dedup();
-            let dominant = names
-                .into_iter()
-                .max_by_key(|n| s.facts.annotations.iter().filter(|a| &&a.name == n).count())
-                .cloned();
-            (dominant, s.weight, *s)
-        })
+        .map(|s| (*s, s.facts.annotations.iter().map(|a| a.name.clone()).collect()))
         .collect();
+    let winner = presence_winner(per_file.iter().map(|(s, names)| (names.as_slice(), s.weight)))?;
 
-    let (winner, confidence, agreeing) = majority(&observations, settings)?;
-    let name = winner.clone()?;
+    let observations: Vec<(bool, f32, &FactSet)> =
+        per_file.iter().map(|(s, names)| (names.contains(&winner), s.weight, *s)).collect();
+    let (agrees, confidence, agreeing) = majority(&observations, settings)?;
+    if !agrees {
+        return None;
+    }
     Some(Convention {
         id: format!("shape.annotation.{}.{ext}", id_fragment(dir)),
-        statement: format!("Files here carry `@{name}`"),
+        statement: format!("Files here carry `@{winner}`"),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
         total: observations.len(),
-        exemplar: exemplar(&observations, &winner),
-        evidence: evidence(&observations, &winner),
+        exemplar: exemplar(&observations, &true),
+        evidence: evidence(&observations, &true),
         sample_roots: Vec::new(),
         // Advisory. A directory of decorated classes can still legitimately
         // gain the one plain helper class that carries nothing.
@@ -718,17 +724,22 @@ fn annotation(
 /// vote and with ties broken toward the lowest name, so a rebuild is
 /// byte-identical.
 ///
-/// Shared by [`mixin`] and [`contract`], neither of whose facts records how
-/// many times a type repeated a name — a type essentially never includes the
-/// same module twice or implements the same interface twice. A per-file pick
-/// keyed on that repetition therefore ties every name in a file's list at
-/// one, and `max_by_key` resolves every tie by returning the name that sorts
-/// last: four files pairing an interface every file in the directory shares
-/// with one only they declare would bury the shared, unanimous one behind
-/// whichever of the two happened to sort later — a defect in the tie-break,
-/// not in the data. Counting a name once per file that declares it at all,
-/// regardless of how many others that file names beside it, is the fact a
-/// directory's agreement is actually about.
+/// Shared by every rule whose facts tie at one occurrence per file. A type
+/// essentially never includes the same module twice or implements the same
+/// interface twice; a `NestJS` controller carries each of its decorators
+/// once; a Vue `<script setup>` block calls each compiler macro once. A
+/// per-file pick keyed on that repetition therefore ties every name in a
+/// file's list at one, and `max_by_key` resolves every tie by returning the
+/// name that sorts last: four files pairing an interface every file in the
+/// directory shares with one only they declare would bury the shared,
+/// unanimous one behind whichever of the two happened to sort later — a
+/// defect in the tie-break, not in the data. Counting a name once per file
+/// that declares it at all, regardless of how many others that file names
+/// beside it, is the fact a directory's agreement is actually about.
+///
+/// [`collaborator`] and [`import_source`] keep their own within-file pick,
+/// because a receiver a file calls forty times really is the file's
+/// collaborator and repetition there is signal rather than a tie.
 fn presence_winner<'a>(lists: impl Iterator<Item = (&'a [String], f32)>) -> Option<String> {
     let mut tally: HashMap<&str, f32> = HashMap::new();
     for (names, weight) in lists {
@@ -1611,17 +1622,99 @@ mod tests {
 
     #[test]
     fn an_annotation_only_a_minority_carries_is_not_a_convention() {
-        let mut files =
-            fixture::agreeing("src/x", "ts", 6, "export class A$N {\n  go(): void {}\n}\n");
-        files.push((
-            "src/x/odd.ts".to_string(),
-            "@Injectable()\nexport class Odd {\n  go(): void {}\n}\n".to_string(),
-        ));
+        // Six carrying it against six that do not, so the sample clears
+        // `min_files` on both sides and the abstention is the agreement gate
+        // refusing a half-and-half split rather than arithmetic about a
+        // sample too small to count.
+        let mut files: Vec<(String, String)> = (0..6)
+            .map(|i| {
+                (
+                    format!("src/x/plain{i}.ts"),
+                    format!("export class Plain{i} {{\n  go(): void {{}}\n}}\n"),
+                )
+            })
+            .collect();
+        files.extend((0..6).map(|i| {
+            (
+                format!("src/x/decorated{i}.ts"),
+                format!("@Injectable()\nexport class Decorated{i} {{\n  go(): void {{}}\n}}\n"),
+            )
+        }));
         let convs = derive_from("sem-annot-minority", &files);
         assert!(
             !convs.iter().any(|c| c.id.starts_with("shape.annotation")),
             "got {}",
             joined(&convs)
         );
+    }
+
+    #[test]
+    fn the_annotation_every_file_shares_beats_the_one_that_sorts_last() {
+        // The shape the rule was written for. A `NestJS` controller carries
+        // `@Controller` once and a different mix of `@Get`, `@Post` and
+        // `@Delete` beside it, so every within-file count ties at one. A
+        // per-file pick keyed on that repetition resolves every tie to
+        // whichever name sorts last, so each file votes for a method
+        // decorator only some of them carry and the one decorator all six
+        // share is never counted at all.
+        let bodies = [
+            "  @Get()\n  findAll(): void {}\n",
+            "  @Post()\n  create(): void {}\n",
+            "  @Delete()\n  remove(): void {}\n",
+            "  @Get()\n  findAll(): void {}\n\n  @Post()\n  create(): void {}\n",
+            "  @Post()\n  create(): void {}\n\n  @Delete()\n  remove(): void {}\n",
+            "  @Get()\n  findAll(): void {}\n\n  @Delete()\n  remove(): void {}\n",
+        ];
+        let files: Vec<(String, String)> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                (
+                    format!("src/orders/c{i}.controller.ts"),
+                    format!("@Controller('orders')\nexport class C{i}Controller {{\n{body}}}\n"),
+                )
+            })
+            .collect();
+        let convs = derive_from("sem-nest-controller", &files);
+        let rule = convs
+            .iter()
+            .find(|c| c.id.starts_with("shape.annotation"))
+            .unwrap_or_else(|| panic!("no annotation rule in {}", joined(&convs)));
+        assert!(rule.statement.contains("`@Controller`"), "got {}", rule.statement);
+        assert_eq!(rule.agreeing, 6, "the shared decorator was not counted in every file");
+    }
+
+    #[test]
+    fn the_macro_every_file_shares_beats_the_one_that_sorts_last() {
+        // The same tie-break, for the sibling family. A `<script setup>`
+        // block calls each compiler macro once, so every within-file count
+        // ties at one and the pick fell to whichever name sorted last.
+        let bodies = [
+            "const open = ref(false)\n",
+            "const items = reactive([])\n",
+            "const total = computed(() => 1)\n",
+            "const open = ref(false)\nconst items = reactive([])\n",
+            "const items = reactive([])\nconst total = computed(() => 1)\n",
+            "const open = ref(false)\nconst total = computed(() => 1)\n",
+        ];
+        let files: Vec<(String, String)> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                (
+                    format!("src/components/C{i}.vue"),
+                    format!(
+                        "<template><div/></template>\n<script setup lang=\"ts\">\nconst props = defineProps<{{ title: string }}>()\n{body}</script>\n"
+                    ),
+                )
+            })
+            .collect();
+        let convs = derive_from("sem-vue-shared-macro", &files);
+        let rule = convs
+            .iter()
+            .find(|c| c.id.starts_with("shape.macros"))
+            .unwrap_or_else(|| panic!("no macro rule in {}", joined(&convs)));
+        assert!(rule.statement.contains("`defineProps`"), "got {}", rule.statement);
+        assert_eq!(rule.agreeing, 6, "the shared macro was not counted in every file");
     }
 }
