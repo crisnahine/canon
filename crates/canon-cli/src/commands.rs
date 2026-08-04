@@ -305,7 +305,7 @@ pub(crate) fn reconcile(input: &HookInput) -> HookOutput {
     // and therefore invisible to it. Four similar services written in one turn
     // is exactly the case worth catching, and it was the one case that could
     // not be seen; copying an already-tracked file was the only one that could.
-    let mut index = index_files(&root, &settings);
+    let mut index = index_files(&root, &settings, History::Recent);
     let known: std::collections::HashSet<&str> = index.iter().map(|f| f.rel.as_str()).collect();
     let fresh: Vec<String> =
         touched.iter().filter(|r| !known.contains(r.as_str())).cloned().collect();
@@ -627,7 +627,7 @@ fn refresh(root: &Path, settings: &Settings, force: bool) -> Snapshot {
         return existing;
     }
 
-    let files = index_files(root, settings);
+    let files = index_files(root, settings, History::Full);
     let conventions = canon_derive::derive_from(root, settings, &files);
     let languages = languages_in(&conventions);
     let snapshot = Snapshot::new(sha, settings, files.len(), languages, conventions);
@@ -687,19 +687,42 @@ fn snapshot_root(start: &Path) -> Option<(std::path::PathBuf, Snapshot)> {
     None
 }
 
+/// How much history an index reads commit times from.
+///
+/// [`refresh`] derives every convention, and a file's commit time becomes the
+/// recency weight behind each vote and the exemplar the block points at, so it
+/// reads the whole log — once per snapshot, on the cold path.
+///
+/// [`reconcile`] runs at the end of every turn that touched a file, and does
+/// one thing with the answer: order a directory's files before truncating them
+/// to a shortlist of siblings. Paying an unbounded history walk for that
+/// ordering is the wrong trade, and it was bounded only by a twenty-second
+/// timeout. A file older than the cap is simply absent and falls back to its
+/// mtime, which is what every file did before commit times existed — and the
+/// files an ordering by recency actually promotes are all inside the cap.
+#[derive(Clone, Copy)]
+enum History {
+    Full,
+    Recent,
+}
+
 /// The files canon considers, from git when there is a git.
 ///
 /// Falls back to walking the filesystem for a plain directory. The fallback
 /// leans on an exclude list, which is why it is the fallback: on a real
 /// repository that list missed a cache directory holding 909,661 files.
-fn index_files(root: &Path, settings: &Settings) -> Vec<FileEntry> {
+fn index_files(root: &Path, settings: &Settings, history: History) -> Vec<FileEntry> {
     if let Some(tracked) = git::tracked_files(root) {
         logging::debug(&format!("{} files tracked by git", tracked.len()));
         // `unwrap_or_default` rather than propagating `None`: a repository too
         // large to walk in time, or one git can't answer for at all, still has
         // its tracked files and their mtimes, so it degrades to those instead
         // of losing the index entirely.
-        let commit_times = git::commit_times(root).unwrap_or_default();
+        let commit_times = match history {
+            History::Full => git::commit_times(root),
+            History::Recent => git::recent_commit_times(root),
+        }
+        .unwrap_or_default();
         return canon_derive::entries_for(root, settings, &tracked, &commit_times);
     }
     logging::debug("not a git repository; walking the filesystem");

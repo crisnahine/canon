@@ -103,8 +103,8 @@ fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
     output.status.success().then_some(output.stdout)
 }
 
-/// How long the commit-time walk may run before this process stops waiting
-/// on it and the caller falls back to the filesystem mtime.
+/// How long a commit-time walk may run before this process stops waiting on
+/// it and the caller falls back to the filesystem mtime.
 ///
 /// A `git log` over the whole history is the one call in this module whose
 /// cost scales with how long a repository has existed rather than how big it
@@ -155,39 +155,106 @@ fn bounded_output(cmd: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
 /// One `git log` walk for the whole repository rather than one call per file:
 /// the per-file form is a process per file and takes minutes on a large tree.
 ///
+/// For a directory of repositories the children are asked instead and their
+/// paths prefixed with their directory names, exactly as [`tracked_files`]
+/// does — the two have to agree, or the entries the index is keyed by could
+/// never find their own time.
+///
 /// `None` when git is unavailable, the repository has no commits yet, or the
 /// walk does not finish inside [`COMMIT_TIMES_TIMEOUT`]. The caller falls
 /// back to mtime in every case, so a repository whose history is too large to
 /// walk degrades rather than hanging a session.
 #[must_use]
 pub(crate) fn commit_times(root: &Path) -> Option<HashMap<String, u64>> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(root).args(["log", "--no-renames", "--format=%ct", "--name-only"]);
-    let out = bounded_output(&mut cmd, COMMIT_TIMES_TIMEOUT)?;
-    let text = String::from_utf8_lossy(&out);
-    Some(parse_commit_times(&text))
+    walk_commit_times(root, None)
 }
 
-/// Turn `git log --no-renames --format=%ct --name-only` output into each
+/// The same, reading only the most recent [`RECENT_COMMITS`] commits.
+///
+/// For a caller that orders files by recency rather than weighting every one
+/// of them. A file older than the cap is absent and falls back to its mtime,
+/// which is what every file did before commit times existed.
+#[must_use]
+pub(crate) fn recent_commit_times(root: &Path) -> Option<HashMap<String, u64>> {
+    walk_commit_times(root, Some(RECENT_COMMITS))
+}
+
+/// How many commits a capped walk reads.
+///
+/// Large enough that everything touched in the last few months of an active
+/// repository is inside it, small enough that the walk is a bounded cost
+/// rather than one that grows with the repository's age.
+const RECENT_COMMITS: usize = 2_000;
+
+fn walk_commit_times(root: &Path, limit: Option<usize>) -> Option<HashMap<String, u64>> {
+    if let Some(times) = log_times(root, limit) {
+        return Some(times);
+    }
+    let mut combined: HashMap<String, u64> = HashMap::new();
+    for (name, path) in child_repos(root) {
+        if let Some(times) = log_times(&path, limit) {
+            combined.extend(times.into_iter().map(|(rel, at)| (format!("{name}/{rel}"), at)));
+        }
+    }
+    (!combined.is_empty()).then_some(combined)
+}
+
+/// The walk for one repository, over the whole log or the newest `limit`
+/// commits.
+///
+/// `-z` matters for the same reason it does in [`ls_files`]: a path containing
+/// a newline is legal on every platform canon runs on, and splitting the log
+/// on newlines records two paths that do not exist and loses the one that
+/// does.
+///
+/// Empty is `None`, so a root that is a repository with nothing to say hands
+/// the question to its children rather than answering for them.
+fn log_times(root: &Path, limit: Option<usize>) -> Option<HashMap<String, u64>> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).args(["log", "--no-renames", "-z", "--format=%ct", "--name-only"]);
+    if let Some(n) = limit {
+        cmd.arg(format!("-n{n}"));
+    }
+    let out = bounded_output(&mut cmd, COMMIT_TIMES_TIMEOUT)?;
+    let times = parse_commit_times(&String::from_utf8_lossy(&out));
+    (!times.is_empty()).then_some(times)
+}
+
+/// Turn `git log -z --no-renames --format=%ct --name-only` output into each
 /// path's most recent commit time.
 ///
 /// The log walks newest first, so the first time a path appears is its most
 /// recent commit. `entry().or_insert()` is load-bearing here: a plain
-/// `insert` would let a later, older line overwrite the newer one and
+/// `insert` would let a later, older record overwrite the newer one and
 /// backdate every file to its oldest commit, which is worse than the mtime
 /// this replaces.
+///
+/// A record that reads as an integer is a commit stamp. A file whose entire
+/// name is a decimal integer would be read as one; the alternative is
+/// trusting the newline git writes between a commit's header and its name
+/// list, and that newline is exactly what `-z` exists to stop this from
+/// trusting.
 fn parse_commit_times(text: &str) -> HashMap<String, u64> {
     let mut times: HashMap<String, u64> = HashMap::new();
     let mut current: u64 = 0;
-    for line in text.lines() {
-        if line.is_empty() {
+    let mut after_stamp = false;
+    for record in text.split('\0') {
+        // `-z` makes NUL the separator, but git still writes the newline that
+        // divides a commit's header from its name list, and it arrives glued
+        // to the first path. It belongs to the separator, and it is stripped
+        // only there: a path may legitimately begin with a newline, which is
+        // the whole reason this reads NUL-separated output.
+        let record = if after_stamp { record.strip_prefix('\n').unwrap_or(record) } else { record };
+        after_stamp = false;
+        if record.is_empty() {
             continue;
         }
-        if let Ok(stamp) = line.parse::<u64>() {
+        if let Ok(stamp) = record.parse::<u64>() {
             current = stamp;
+            after_stamp = true;
             continue;
         }
-        times.entry(line.to_string()).or_insert(current);
+        times.entry(record.to_string()).or_insert(current);
     }
     times
 }
@@ -363,23 +430,35 @@ mod tests {
     }
 
     #[test]
-    fn the_first_line_for_a_path_wins_because_the_log_walks_newest_first() {
+    fn the_first_record_for_a_path_wins_because_the_log_walks_newest_first() {
         // git log walks newest first, so a's first appearance below is its most
         // recent commit. An `insert` here instead of `entry().or_insert()`
-        // would let the second, older line overwrite it and backdate a.rb to
+        // would let the second, older record overwrite it and backdate a.rb to
         // its oldest commit, which is worse than the mtime this replaces.
-        let text = "1700000000\na.rb\n\n1000000000\na.rb\nb.rb\n";
+        let text = "1700000000\0\na.rb\0\u{0}1000000000\0\na.rb\0b.rb\0";
         let times = parse_commit_times(text);
         assert_eq!(times.get("a.rb"), Some(&1_700_000_000));
         assert_eq!(times.get("b.rb"), Some(&1_000_000_000));
     }
 
     #[test]
-    fn blank_lines_between_commits_are_not_mistaken_for_paths() {
-        let text = "1700000000\n\na.rb\n\n";
+    fn empty_records_between_commits_are_not_mistaken_for_paths() {
+        let text = "1700000000\0\na.rb\0\0";
         let times = parse_commit_times(text);
         assert_eq!(times.len(), 1);
         assert_eq!(times.get("a.rb"), Some(&1_700_000_000));
+    }
+
+    #[test]
+    fn a_path_containing_a_newline_survives_the_walk() {
+        // Why the walk is NUL-separated, the same reason `ls_files` is: a path
+        // with a newline in it is legal on every platform canon runs on, and
+        // splitting the log on newlines recorded two paths that do not exist
+        // and lost the one that does.
+        let text = "1700000000\0\nweird\nname.rb\0plain.rb\0";
+        let times = parse_commit_times(text);
+        assert_eq!(times.get("weird\nname.rb"), Some(&1_700_000_000));
+        assert_eq!(times.get("plain.rb"), Some(&1_700_000_000));
     }
 
     #[test]
@@ -388,6 +467,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(commit_times(&dir).is_none());
+    }
+
+    #[test]
+    fn a_directory_of_repositories_has_commit_times_from_its_children() {
+        // The workspace layout again. `head_sha` and `tracked_files` both
+        // answer for it through its children, and this answered `None`, so
+        // every file in every checkout silently fell back to its mtime — one
+        // distinct value across a fresh clone.
+        let root = std::env::temp_dir().join("canon-git-mono-times");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let built = child_repo(&root, "api", &[("app/services/create.rb", "class A; end\n")])
+            && child_repo(&root, "client", &[("src/App.tsx", "export const A = () => 1;\n")]);
+        if !built {
+            return; // no usable git here
+        }
+        assert!(rev_parse(&root).is_none(), "precondition: the root is not a repository");
+
+        let times = commit_times(&root).expect("the children answer for it");
+        // Prefixed the way `tracked_files` prefixes them, or the entries the
+        // index is keyed by would never find their own time.
+        assert!(times.contains_key("api/app/services/create.rb"), "got {times:?}");
+        assert!(times.contains_key("client/src/App.tsx"), "got {times:?}");
+    }
+
+    #[test]
+    fn a_capped_walk_reads_only_the_commits_it_asked_for() {
+        // What the write path pays for. The full walk's cost scales with how
+        // long a repository has existed, and `reconcile` runs at the end of
+        // every turn that touched a file.
+        let root = std::env::temp_dir().join("canon-git-capped");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        if !child_repo(&root, "api", &[("old.rb", "class A; end\n")]) {
+            return;
+        }
+        let repo = root.join("api");
+        std::fs::write(repo.join("new.rb"), "class B; end\n").unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !(run(&["add", "-A"]) && run(&["commit", "-m", "second"])) {
+            return;
+        }
+
+        let full = log_times(&repo, None).expect("a full walk");
+        assert!(full.contains_key("old.rb") && full.contains_key("new.rb"), "got {full:?}");
+
+        let capped = log_times(&repo, Some(1)).expect("a capped walk");
+        assert!(capped.contains_key("new.rb"), "got {capped:?}");
+        assert!(!capped.contains_key("old.rb"), "the cap read more than it asked for: {capped:?}");
     }
 
     #[test]
