@@ -313,6 +313,42 @@ os.makedirs(os.path.join(data,"sessions"), exist_ok=True)
 for f in os.listdir(os.path.join(data,"sessions")): os.remove(os.path.join(data,"sessions",f))
 shutil.rmtree(root); shutil.rmtree(data)
 
+# --- round four: the base-order bug, Django mixin-first inheritance --------
+
+# 1. a directory where every view lists its access mixin before the real base
+files = {f"shop/views/p{i}.py":
+         "from django.contrib.auth.mixins import LoginRequiredMixin\n"
+         "from django.views.generic import ListView\n\n\n"
+         f"class P{i}ListView(LoginRequiredMixin, ListView):\n"
+         "    def get(self, request):\n        return None\n"
+         for i in range(1, 7)}
+root, data = mk(files, "django-view-mixin")
+d, w = inject(root, data, "shop/views/public.py",
+  "from django.views.generic import ListView\n\n\n"
+  "class PublicListView(ListView):\n    def get(self, request):\n        return None\n")
+check("a view that keeps the directory's real base without the login mixin is not refused", not d, w[:150])
+d, _ = inject(root, data, "shop/views/odd.py",
+  "class Odd(SomethingElse):\n    def get(self, request):\n        return None\n")
+check("a genuinely unrelated base is still refused", d)
+shutil.rmtree(root); shutil.rmtree(data)
+
+# 2. the same shape on a model directory: a mixin ahead of models.Model
+files = {f"shop/models/p{i}.py":
+         "from shop.models.base import TimeStamped\n"
+         "from django.db import models\n\n\n"
+         f"class P{i}(TimeStamped, models.Model):\n"
+         "    def clean(self):\n        pass\n"
+         for i in range(1, 7)}
+root, data = mk(files, "django-model-mixin")
+d, w = inject(root, data, "shop/models/plain.py",
+  "from django.db import models\n\n\n"
+  "class Plain(models.Model):\n    def clean(self):\n        pass\n")
+check("a model that keeps the directory's real base without the timestamp mixin is not refused", not d, w[:150])
+d, _ = inject(root, data, "shop/models/odd.py",
+  "class OddModel(SomethingElse):\n    def clean(self):\n        pass\n")
+check("a genuinely unrelated model base is still refused", d)
+shutil.rmtree(root); shutil.rmtree(data)
+
 ok = sum(1 for _, o, _ in R if o)
 for n, o, d in R:
     if not o: print(f"  FAIL {n}\n       {d}")
