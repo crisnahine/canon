@@ -16,8 +16,13 @@
 //! minute. So when the root is not a repository, its immediate children are
 //! asked instead and their answers are combined under their directory names.
 
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 /// Child directories consulted when the root is not itself a repository.
 ///
@@ -96,6 +101,95 @@ fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
         .output()
         .ok()?;
     output.status.success().then_some(output.stdout)
+}
+
+/// How long the commit-time walk may run before this process stops waiting
+/// on it and the caller falls back to the filesystem mtime.
+///
+/// A `git log` over the whole history is the one call in this module whose
+/// cost scales with how long a repository has existed rather than how big it
+/// is today, and nothing here may block a session on it.
+const COMMIT_TIMES_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Run `cmd` and collect its stdout, killing it if it is still running once
+/// `timeout` has passed.
+///
+/// `Command::output` blocks until the child exits with no bound of its own,
+/// so this is what stands between a slow subprocess and a session that never
+/// returns. Stdout is drained on its own thread rather than read after the
+/// child exits: a child that fills the pipe buffer before this process gets
+/// around to reading it is not slow, it is deadlocked against a parent that
+/// is waiting for it to finish before reading anything it has written.
+fn bounded_output(cmd: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
+    let mut child =
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let read_ok = stdout.read_to_end(&mut buf).is_ok();
+        let _ = tx.send(read_ok.then_some(buf));
+    });
+
+    let collected = rx.recv_timeout(timeout).ok().flatten();
+    if collected.is_none() {
+        // Either the timeout fired or the reading thread never sent, and
+        // either way the child may still be running. Killing an already-dead
+        // process just errors, which is discarded: there is nothing useful to
+        // do about it here.
+        let _ = child.kill();
+    }
+    let status = child.wait().ok()?;
+    collected.filter(|_| status.success())
+}
+
+/// When each tracked file was last committed, seconds since the epoch.
+///
+/// The filesystem mtime records when the working tree was last written, not
+/// when a file last changed. Measured: a fresh clone shows one distinct mtime
+/// across 400 files, and a real working checkout does better only by
+/// accident, at 31 distinct values across several thousand. A recency half
+/// life computed from either number weighs almost nothing, and exemplar
+/// selection falls through to whichever path sorts first alphabetically.
+///
+/// One `git log` walk for the whole repository rather than one call per file:
+/// the per-file form is a process per file and takes minutes on a large tree.
+///
+/// `None` when git is unavailable, the repository has no commits yet, or the
+/// walk does not finish inside [`COMMIT_TIMES_TIMEOUT`]. The caller falls
+/// back to mtime in every case, so a repository whose history is too large to
+/// walk degrades rather than hanging a session.
+#[must_use]
+pub(crate) fn commit_times(root: &Path) -> Option<HashMap<String, u64>> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).args(["log", "--no-renames", "--format=%ct", "--name-only"]);
+    let out = bounded_output(&mut cmd, COMMIT_TIMES_TIMEOUT)?;
+    let text = String::from_utf8_lossy(&out);
+    Some(parse_commit_times(&text))
+}
+
+/// Turn `git log --no-renames --format=%ct --name-only` output into each
+/// path's most recent commit time.
+///
+/// The log walks newest first, so the first time a path appears is its most
+/// recent commit. `entry().or_insert()` is load-bearing here: a plain
+/// `insert` would let a later, older line overwrite the newer one and
+/// backdate every file to its oldest commit, which is worse than the mtime
+/// this replaces.
+fn parse_commit_times(text: &str) -> HashMap<String, u64> {
+    let mut times: HashMap<String, u64> = HashMap::new();
+    let mut current: u64 = 0;
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(stamp) = line.parse::<u64>() {
+            current = stamp;
+            continue;
+        }
+        times.entry(line.to_string()).or_insert(current);
+    }
+    times
 }
 
 /// Immediate child directories that are themselves repositories.
@@ -266,5 +360,74 @@ mod tests {
             assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "got {sha}");
             assert!(sha.len() >= 7);
         }
+    }
+
+    #[test]
+    fn the_first_line_for_a_path_wins_because_the_log_walks_newest_first() {
+        // git log walks newest first, so a's first appearance below is its most
+        // recent commit. An `insert` here instead of `entry().or_insert()`
+        // would let the second, older line overwrite it and backdate a.rb to
+        // its oldest commit, which is worse than the mtime this replaces.
+        let text = "1700000000\na.rb\n\n1000000000\na.rb\nb.rb\n";
+        let times = parse_commit_times(text);
+        assert_eq!(times.get("a.rb"), Some(&1_700_000_000));
+        assert_eq!(times.get("b.rb"), Some(&1_000_000_000));
+    }
+
+    #[test]
+    fn blank_lines_between_commits_are_not_mistaken_for_paths() {
+        let text = "1700000000\n\na.rb\n\n";
+        let times = parse_commit_times(text);
+        assert_eq!(times.len(), 1);
+        assert_eq!(times.get("a.rb"), Some(&1_700_000_000));
+    }
+
+    #[test]
+    fn commit_times_of_a_non_repository_is_none() {
+        let dir = std::env::temp_dir().join("canon-git-commit-times-none");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(commit_times(&dir).is_none());
+    }
+
+    #[test]
+    fn commit_times_of_a_real_repository_names_a_tracked_file_with_a_plausible_stamp() {
+        // This workspace is one. Skipped rather than failed where it is not.
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if let Some(times) = commit_times(here) {
+            let cargo_toml =
+                times.iter().find(|(rel, _)| rel.ends_with("Cargo.toml")).map(|(_, t)| *t);
+            if let Some(stamp) = cargo_toml {
+                // Newer than git's own 2005 origin, older than the moment this
+                // assertion runs: a sanity bound, not a precise one.
+                assert!(stamp > 1_100_000_000, "got {stamp}");
+                assert!(stamp <= now_unix(), "got {stamp}");
+            }
+        }
+    }
+
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap()
+    }
+
+    #[test]
+    fn bounded_output_gives_up_rather_than_waiting_out_a_slow_child() {
+        let start = std::time::Instant::now();
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("5");
+        let result = bounded_output(&mut cmd, Duration::from_millis(200));
+        assert!(result.is_none(), "a killed child must not report success output");
+        assert!(start.elapsed() < Duration::from_secs(3), "took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn bounded_output_returns_a_fast_childs_stdout() {
+        let mut cmd = std::process::Command::new("printf");
+        cmd.arg("hello");
+        let result = bounded_output(&mut cmd, Duration::from_secs(5));
+        assert_eq!(result.as_deref(), Some(b"hello".as_slice()));
     }
 }

@@ -310,7 +310,11 @@ pub(crate) fn reconcile(input: &HookInput) -> HookOutput {
     let fresh: Vec<String> =
         touched.iter().filter(|r| !known.contains(r.as_str())).cloned().collect();
     if !fresh.is_empty() {
-        let entries = canon_derive::entries_for(&root, &settings, &fresh);
+        // `fresh` is exactly the touched paths git does not know about yet, so
+        // no commit time in the tree could apply to any of them; asking git
+        // again here would only pay for a lookup that always misses.
+        let commit_times = std::collections::HashMap::new();
+        let entries = canon_derive::entries_for(&root, &settings, &fresh, &commit_times);
         index.extend(entries);
     }
 
@@ -691,7 +695,12 @@ fn snapshot_root(start: &Path) -> Option<(std::path::PathBuf, Snapshot)> {
 fn index_files(root: &Path, settings: &Settings) -> Vec<FileEntry> {
     if let Some(tracked) = git::tracked_files(root) {
         logging::debug(&format!("{} files tracked by git", tracked.len()));
-        return canon_derive::entries_for(root, settings, &tracked);
+        // `unwrap_or_default` rather than propagating `None`: a repository too
+        // large to walk in time, or one git can't answer for at all, still has
+        // its tracked files and their mtimes, so it degrades to those instead
+        // of losing the index entirely.
+        let commit_times = git::commit_times(root).unwrap_or_default();
+        return canon_derive::entries_for(root, settings, &tracked, &commit_times);
     }
     logging::debug("not a git repository; walking the filesystem");
     canon_derive::walk(root, settings)

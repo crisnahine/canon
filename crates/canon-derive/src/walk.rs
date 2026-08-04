@@ -1,5 +1,6 @@
 //! Walking the repository, and deciding how much each file's vote is worth.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,8 +85,27 @@ pub struct FileEntry {
 /// single tool's cache directory held 909,661 of them. No hand-maintained
 /// exclude list keeps up with that; the ignore rules the team already wrote
 /// do.
+///
+/// `commit_times` is why this takes a fourth argument the filesystem walk
+/// does not need. The filesystem mtime records when the working tree was last
+/// written, not when a file last changed: a fresh clone showed one distinct
+/// mtime across 400 files, and a real working checkout did better only by
+/// accident, at 31 distinct values across several thousand files. A recency
+/// half life computed from either number is close to inert, and exemplar
+/// selection falls through to whichever path sorts first. A file with a
+/// commit time uses it in place of its mtime; a file with none — untracked,
+/// or git unavailable — keeps its mtime, which is then the honest answer.
+// The map always comes from `git::commit_times`, built with the standard
+// hasher, so generalising the parameter over `BuildHasher` buys callers
+// nothing and only adds a type parameter to a public signature.
+#[allow(clippy::implicit_hasher)]
 #[must_use]
-pub fn entries_for(root: &Path, settings: &Settings, rels: &[String]) -> Vec<FileEntry> {
+pub fn entries_for(
+    root: &Path,
+    settings: &Settings,
+    rels: &[String],
+    commit_times: &HashMap<String, u64>,
+) -> Vec<FileEntry> {
     let now = unix_now();
     let mut out: Vec<FileEntry> = rels
         .iter()
@@ -95,7 +115,12 @@ pub fn entries_for(root: &Path, settings: &Settings, rels: &[String]) -> Vec<Fil
             if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
                 return None;
             }
-            Some(entry_from(rel, &meta, now, settings))
+            let mut entry = entry_from(rel, &meta, now, settings);
+            if let Some(&committed) = commit_times.get(rel) {
+                entry.modified_unix = committed;
+                entry.weight = recency_weight(now, committed, settings.recency_half_life_days);
+            }
+            Some(entry)
         })
         .collect();
     out.sort_by(|a, b| a.rel.cmp(&b.rel));
@@ -343,5 +368,37 @@ mod tests {
     fn a_file_dated_in_the_future_is_not_given_extra_weight() {
         let now = 1_000_000_000;
         assert!(recency_weight(now, now + 86_400 * 30, 365.0) <= 1.0);
+    }
+
+    #[test]
+    fn a_commit_time_outranks_the_filesystem_mtime() {
+        // Every file in a fresh clone shares one mtime, so a weight derived from
+        // it is the same for all of them and the exemplar falls through to the
+        // lexicographic tiebreak. Measured on a shallow clone: 400 files, one
+        // distinct mtime.
+        let root = fixture::build(
+            "walk-commit-times",
+            &[("a.rb", "class A; end\n"), ("b.rb", "class B; end\n")],
+        );
+        let now = unix_now();
+        let mut times = HashMap::new();
+        times.insert("a.rb".to_string(), now - 400 * 86_400);
+        times.insert("b.rb".to_string(), now);
+        let settings = Settings::default();
+        let rels = vec!["a.rb".to_string(), "b.rb".to_string()];
+        let files = entries_for(&root, &settings, &rels, &times);
+        let a = files.iter().find(|f| f.rel == "a.rb").expect("a");
+        let b = files.iter().find(|f| f.rel == "b.rb").expect("b");
+        assert!(b.weight > a.weight, "a: {}, b: {}", a.weight, b.weight);
+        assert_eq!(b.modified_unix, now);
+    }
+
+    #[test]
+    fn a_file_git_has_no_time_for_falls_back_to_its_mtime() {
+        let root = fixture::build("walk-untracked-time", &[("a.rb", "class A; end\n")]);
+        let files =
+            entries_for(&root, &Settings::default(), &["a.rb".to_string()], &HashMap::new());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].modified_unix > 0);
     }
 }
