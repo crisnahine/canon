@@ -24,10 +24,10 @@ use serde::{Deserialize, Serialize};
 /// `jquery-3.4.1.min.js` was graded `Blocking` from the stored snapshot and
 /// went on refusing writes after the release that stopped deriving it.
 pub const SNAPSHOT_VERSION: u32 = 14;
-// 14: `interfaces` now derives a `shape.contract` rule for PHP, TypeScript
-//     and Rust, stating what a directory's types implement rather than what
-//     they compose. A v13 snapshot has no rule for such a directory, because
-//     the reading it was built from never asked the question.
+// 14: `interfaces` now derives a `shape.contract` rule for PHP, TypeScript,
+//     Tsx and Rust, stating what a directory's types implement rather than
+//     what they compose. A v13 snapshot has no rule for such a directory,
+//     because the reading it was built from never asked the question.
 // 13: Ruby class-body `include`/`extend`/`prepend` and PHP in-class trait
 //     `use` are read into `mixins`, and a directory that agrees on one now
 //     derives a `shape.mixin` rule. A v12 snapshot has no rule for such a

@@ -371,8 +371,8 @@ const FAMILY_PREFIX: &str = "Types here inherit from a ";
 // and returning `None` for every file.
 const MIXIN_PREFIX: &str = "Types here include ";
 // Same reasoning again: no trailing backtick, so `backticked` has one left to
-// strip from what follows instead of finding none and returning `None` for
-// every file — the defect that shipped, unnoticed, twice already.
+// strip from what follows the prefix instead of finding none and returning
+// `None` for every file.
 const CONTRACT_PREFIX: &str = "Types here implement ";
 
 /// "Views here are named `*.html.erb`."
@@ -788,7 +788,7 @@ fn check_shape(
         }
     }
 
-    out.extend(check_composition(t, convention, &evidence));
+    out.extend(check_type_relations(t, convention, &evidence));
 
     out
 }
@@ -797,8 +797,12 @@ fn check_shape(
 ///
 /// [`check_shape`] already sits at the length `clippy::pedantic` allows, so a
 /// third arm calling each check in turn would grow it past that limit; this
-/// exists only to keep the addition to a single line there.
-fn check_composition(
+/// exists only to keep the addition to a single line there. Named for what
+/// the three have in common — every one of them checks a type against
+/// something it relates to beyond its own body — rather than "composition",
+/// which `TypeFacts::mixins`'s own doc comment already gives a narrower
+/// meaning.
+fn check_type_relations(
     t: &canon_extract::TypeFacts,
     convention: &Convention,
     evidence: &str,
