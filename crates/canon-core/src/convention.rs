@@ -188,15 +188,15 @@ pub fn enforcement_for(id: &str, confidence: Confidence, settings: &Settings) ->
     if id.ends_with(ROLLUP_SUFFIX) {
         return Enforcement::Advisory;
     }
-    // A Rust trait implementation is not a base class. Every other language
-    // canon reads has one structural parent a type either declares or does
-    // not; Rust has a set of contracts a type opts into one at a time, and a
-    // type that does not implement the trait its neighbours do is ordinary
-    // Rust rather than a departure. It is recorded as the closest analogue and
-    // stated as advice, which is honest; refusing on it is not.
+    // A base type read from a language that allows several is not a base type,
+    // it is whichever one the author wrote first. Rust has a set of traits a
+    // type opts into one at a time; Python has a positional base list whose
+    // frameworks put mixins at the front and the concrete parent at the back.
+    // Both are recorded as the closest analogue and stated as advice, which is
+    // honest; refusing on either is not.
     // The id ends in the extension the rule was derived for; canon builds it,
     // and it is always lowercase.
-    if id.starts_with("shape.base") && id.rsplit('.').next() == Some("rs") {
+    if id.starts_with("shape.base") && matches!(id.rsplit('.').next(), Some("rs" | "py")) {
         return Enforcement::Advisory;
     }
     if settings.enforce
@@ -332,5 +332,24 @@ mod tests {
         let c = conv(Scope::DirExt("app/services".into(), "rb".into()));
         let back: Convention = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn a_python_base_rule_never_refuses_a_write() {
+        // Python allows several positional bases and its frameworks put the mixins
+        // first, so whichever one this reads is decided by a convention about
+        // ordering rather than by which type is the base. Measured on a Django
+        // codebase, the first base ends in `Mixin` in 337 of 754 declarations.
+        let total = Confidence::derive(8, 8).expect("total agreement");
+        let settings = Settings::default();
+        assert_eq!(
+            enforcement_for("shape.base.shop.views.py", total, &settings),
+            Enforcement::Advisory
+        );
+        // Every other language keeps its base rule enforceable.
+        assert_eq!(
+            enforcement_for("shape.base.app.services.rb", total, &settings),
+            Enforcement::Blocking
+        );
     }
 }
