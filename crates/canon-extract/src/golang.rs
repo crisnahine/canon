@@ -109,19 +109,19 @@ fn receiver_type(method: tree_sitter::Node<'_>, src: &str) -> Option<String> {
     Some(bare_name(&text(ident, src)))
 }
 
-/// A type name without its pointer marker, its type arguments, or its package
-/// qualifier.
+/// A type name without its pointer marker or its type arguments.
 ///
 /// `type Cache[T any] struct` declares `Cache`, and its methods are written
 /// `func (c *Cache[T]) Get()`. Comparing the receiver text against the declared
 /// name left every generic type with no methods at all: no arity rule, no
-/// entrypoint rule, nothing. `sync.Mutex` embeds the same type an import of
-/// `sync` names as `Mutex`; the package path is how the file reached it, not
-/// what it is.
+/// entrypoint rule, nothing.
+///
+/// The package a type is qualified with stays: an embedded `sync.Mutex` is a
+/// statement telling the author what to write, and they write `sync.Mutex`,
+/// not `Mutex`. A method receiver never carries one to strip — it always names
+/// a type declared in the same package.
 fn bare_name(text: &str) -> String {
-    let text = text.trim_start_matches('*');
-    let text = text.split_once('[').map_or(text, |(name, _)| name);
-    text.rsplit('.').next().unwrap_or(text).trim().to_string()
+    crate::util::bare_type(text.trim_start_matches('*'))
 }
 
 fn collect_imports(node: tree_sitter::Node<'_>, src: &str, facts: &mut FileFacts) {
@@ -219,9 +219,18 @@ mod tests {
         // one type. Keeping only the first made the second invisible to every rule.
         let f = f("type S struct {\n\tBaseService\n\tsync.Mutex\n\tname string\n}\n");
         assert_eq!(f.types[0].superclass.as_deref(), Some("BaseService"));
-        assert_eq!(f.types[0].bases, vec!["BaseService", "Mutex"]);
-        assert_eq!(f.types[0].mixins, vec!["Mutex"]);
+        assert_eq!(f.types[0].bases, vec!["BaseService", "sync.Mutex"]);
+        assert_eq!(f.types[0].mixins, vec!["sync.Mutex"]);
         assert!(f.types[0].interfaces.is_empty());
+    }
+
+    #[test]
+    fn a_qualified_embed_keeps_its_package() {
+        // The statement is an instruction: an author writes `sync.Mutex`, not
+        // `Mutex`. Stripping the package made the statement name a type
+        // nobody qualifies when they write it.
+        let f = f("package a\ntype S struct {\n\tsync.Mutex\n}\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("sync.Mutex"));
     }
 
     #[test]

@@ -86,7 +86,11 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         // constant — the `::` only forces top-level lookup, and inside a
         // namespaced module it is the only way to reach one. Compared as
         // written, the rooted form was refused by a rule stating the same class.
-        .map(|n| text(n, src).trim_start_matches("::").to_string());
+        //
+        // `ActiveRecord::Migration[7.2]` and `ActiveRecord::Migration[5.2]` name
+        // the same base too — the version in brackets is the schema a migration
+        // was written against, not what it inherits from.
+        .map(|n| crate::util::bare_type(text(n, src).trim_start_matches("::")));
 
     let interfaces = Vec::new();
     let mut public_methods = Vec::new();
@@ -293,5 +297,18 @@ mod tests {
         let facts = f("class A\n  def call; end\nend\ndef top_level; end\n");
         assert_eq!(facts.free_functions, vec!["top_level"]);
         assert_eq!(facts.types[0].public_methods, vec!["call"]);
+    }
+
+    #[test]
+    fn a_versioned_base_is_the_same_base_at_every_version() {
+        // A Rails migration names its base with the schema version it was
+        // written against. Compared as written, one directory holds six
+        // different bases and agrees on none of them.
+        for src in [
+            "class M < ActiveRecord::Migration[7.2]\n  def change; end\nend\n",
+            "class M < ActiveRecord::Migration[5.2]\n  def change; end\nend\n",
+        ] {
+            assert_eq!(f(src).types[0].superclass.as_deref(), Some("ActiveRecord::Migration"));
+        }
     }
 }

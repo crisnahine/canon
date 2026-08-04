@@ -136,14 +136,14 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
     })
 }
 
-/// A base as written, reduced to the name a convention states.
+/// A base as written, minus its type parameters.
 ///
-/// `base.BaseService` and `BaseService[Order]` name the same class as
-/// `BaseService`; the module path and the type parameters are how the file
-/// reached it, not what it is.
+/// `BaseService[Order]` and `BaseService` name the same class; the type
+/// parameter is how the file reached it, not what it is. The module a base is
+/// qualified with stays: the statement tells the author what to write, and an
+/// author writes `models.Model`, not `Model`.
 fn bare_base(raw: &str) -> String {
-    let head = raw.split_once('[').map_or(raw, |(name, _)| name);
-    head.rsplit('.').next().unwrap_or(head).trim().to_string()
+    crate::util::bare_type(raw)
 }
 
 #[cfg(test)]
@@ -236,11 +236,20 @@ mod tests {
 
     #[test]
     fn a_single_base_is_unchanged_by_ordering() {
-        // `bare_base` already reduces a dotted base to its class name; adding
-        // the ordering logic for a multi-base class must not disturb that.
+        // `bare_base` already strips a trailing `[...]`; adding the ordering
+        // logic for a multi-base class must not disturb that.
         let f = f("class P(models.Model):\n    def save(self): pass\n");
-        assert_eq!(f.types[0].superclass.as_deref(), Some("Model"));
+        assert_eq!(f.types[0].superclass.as_deref(), Some("models.Model"));
         assert!(f.types[0].interfaces.is_empty());
         assert!(f.types[0].mixins.is_empty());
+    }
+
+    #[test]
+    fn a_qualified_base_keeps_its_module_path() {
+        // The statement is an instruction: an author writes `models.Model`,
+        // not `Model`. Stripping the module made the statement name a class
+        // nobody types.
+        let f = f("class P(models.Model):\n    def save(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("models.Model"));
     }
 }

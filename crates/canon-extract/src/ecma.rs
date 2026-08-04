@@ -167,7 +167,10 @@ fn heritage_name(heritage: tree_sitter::Node<'_>, src: &str) -> Option<String> {
     // wraps it in an extends_clause alongside any implements_clause.
     let scope = child_of_kind(heritage, "extends_clause").unwrap_or(heritage);
     child_of_any(scope, &["identifier", "type_identifier", "member_expression", "generic_type"])
-        .map(|n| text(n, src))
+        // A `generic_type` node's own text carries its type arguments, e.g.
+        // `Base<Order>`; the grammar usually splits those into a sibling field
+        // instead, but not on every expression form that can appear here.
+        .map(|n| crate::util::bare_type(&text(n, src)))
 }
 
 #[cfg(test)]
@@ -264,6 +267,14 @@ mod tests {
     fn implements_is_not_mistaken_for_extends() {
         let f = ts("export class A extends Base implements Iface {}");
         assert_eq!(f.types[0].superclass.as_deref(), Some("Base"));
+    }
+
+    #[test]
+    fn a_generic_base_is_the_same_base_at_every_parameter() {
+        assert_eq!(
+            ts("export class A extends Base<Order> {}").types[0].superclass.as_deref(),
+            Some("Base")
+        );
     }
 
     #[test]

@@ -94,6 +94,20 @@ pub(crate) fn unquote(raw: &str) -> String {
     raw.trim_matches(['"', '\'', '`']).to_string()
 }
 
+/// A base type without the parameters attached to it.
+///
+/// `ActiveRecord::Migration[7.2]`, `Base<Order>`, `Repository(Item)` all name
+/// one type. Compared as written, a Rails migrations directory holds six
+/// different bases across the versions its migrations were written against and
+/// agrees on none of them; the largest single spelling was 445 files of 1,518.
+///
+/// Applied in the extractor so deriving and checking read the same value
+/// without either knowing the rule exists.
+#[must_use]
+pub(crate) fn bare_type(raw: &str) -> String {
+    raw.split(['[', '<', '(']).next().unwrap_or(raw).trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +162,17 @@ mod tests {
         let t = tree("\n\nclass A\nend\n");
         let class = child_of_kind(t.root_node(), "class").unwrap();
         assert_eq!(line_of(class), 3);
+    }
+
+    #[test]
+    fn a_name_with_no_parameters_is_untouched() {
+        assert_eq!(bare_type("ApplicationService"), "ApplicationService");
+    }
+
+    #[test]
+    fn each_parameter_delimiter_is_stripped() {
+        assert_eq!(bare_type("ActiveRecord::Migration[7.2]"), "ActiveRecord::Migration");
+        assert_eq!(bare_type("Base<Order>"), "Base");
+        assert_eq!(bare_type("Repository(Item)"), "Repository");
     }
 }
