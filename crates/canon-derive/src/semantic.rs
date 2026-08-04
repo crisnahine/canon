@@ -98,6 +98,7 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(collaborator(&dir, &ext, &members, settings));
         out.extend(import_source(&dir, &ext, &members, settings));
         out.extend(export_style(&dir, &ext, &members, settings));
+        out.extend(annotation(&dir, &ext, &members, settings));
     }
     out.extend(namespace_per_directory(sets, settings));
     out
@@ -521,6 +522,53 @@ fn import_source(
     })
 }
 
+/// "Files here carry `@Injectable`."
+///
+/// Counted by presence per file rather than by occurrence: a controller with
+/// nine `@Get` methods is one vote for `@Get`, or one large file would decide
+/// the rule for its directory.
+///
+/// One rule per directory, naming the single most widely carried annotation.
+/// A `NestJS` controller carries four or five, and stating all of them turns a
+/// four-line block into a wall of text the reader stops reading.
+fn annotation(
+    dir: &str,
+    ext: &str,
+    members: &[&FactSet],
+    settings: &Settings,
+) -> Option<Convention> {
+    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+        .iter()
+        .map(|s| {
+            let mut names: Vec<&String> = s.facts.annotations.iter().map(|a| &a.name).collect();
+            names.sort_unstable();
+            names.dedup();
+            let dominant = names
+                .into_iter()
+                .max_by_key(|n| s.facts.annotations.iter().filter(|a| &&a.name == n).count())
+                .cloned();
+            (dominant, s.weight, *s)
+        })
+        .collect();
+
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let name = winner.clone()?;
+    Some(Convention {
+        id: format!("shape.annotation.{}.{ext}", id_fragment(dir)),
+        statement: format!("Files here carry `@{name}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
+        // Advisory. A directory of decorated classes can still legitimately
+        // gain the one plain helper class that carries nothing.
+        enforcement: Enforcement::Advisory,
+    })
+}
+
 /// Whether an import names something the whole repository can agree about.
 ///
 /// A relative path resolves differently from every directory, so counting the
@@ -893,5 +941,34 @@ mod tests {
         let arity = convs.iter().find(|c| c.id.starts_with("shape.public-arity")).expect("a rule");
         let exemplar = arity.exemplar.as_deref().expect("an exemplar");
         assert!(exemplar.starts_with("app/s/item"), "got {exemplar}");
+    }
+
+    #[test]
+    fn a_nest_service_directory_derives_its_decorator() {
+        let files = fixture::agreeing(
+            "src/orders",
+            "ts",
+            6,
+            "import { Injectable } from '@nestjs/common';\n\n@Injectable()\nexport class Svc$N {\n  findAll(): void {}\n}\n",
+        );
+        let convs = derive_from("sem-nest", &files);
+        let text = joined(&convs);
+        assert!(text.contains("carry `@Injectable`"), "got {text}");
+    }
+
+    #[test]
+    fn an_annotation_only_a_minority_carries_is_not_a_convention() {
+        let mut files =
+            fixture::agreeing("src/x", "ts", 6, "export class A$N {\n  go(): void {}\n}\n");
+        files.push((
+            "src/x/odd.ts".to_string(),
+            "@Injectable()\nexport class Odd {\n  go(): void {}\n}\n".to_string(),
+        ));
+        let convs = derive_from("sem-annot-minority", &files);
+        assert!(
+            !convs.iter().any(|c| c.id.starts_with("shape.annotation")),
+            "got {}",
+            joined(&convs)
+        );
     }
 }

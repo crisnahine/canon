@@ -95,16 +95,23 @@ fn verify_with(
     }
 
     // Structure is enough for every check that reads declarations, and skipping
-    // the query pass is most of what makes a write cheap. An import rule is the
-    // exception: it was derived from the query's import list where the language
-    // has one, so checking it against the structural list would compare two
-    // different readings of the same file. Enforcement never needs this — no
-    // import rule is ever Blocking — so the hot path keeps the cheap pass and
-    // only `PostToolUse`, after the write has already landed, pays for it.
-    let wants_imports =
-        applicable.iter().any(|c| c.id.starts_with("shape.import") && has_import_statement(c));
+    // the query pass is most of what makes a write cheap. Import and annotation
+    // rules are the exception: both are derived from the query pass, so
+    // checking them against the structural facts would compare two different
+    // readings of the same file. Enforcement never needs this — neither family
+    // is ever Blocking — so the hot path keeps the cheap pass and only
+    // `PostToolUse`, after the write has already landed, pays for it.
+    //
+    // Annotations and calls come from the query pass, which `extract_structure`
+    // skips because compiling a query dominates the cost of a single write.
+    // Paying it only when a rule in scope actually asks about those facts keeps
+    // the hot path at structure-only for the files that need nothing more.
+    let wants_query_pass = applicable.iter().any(|c| {
+        (c.id.starts_with("shape.import") && has_import_statement(c))
+            || c.id.starts_with("shape.annotation")
+    });
     let facts = extension_of(rel).and_then(canon_extract::lang::from_extension).and_then(|l| {
-        if wants_imports {
+        if wants_query_pass {
             canon_extract::extract(l, source, rel).ok()
         } else {
             canon_extract::extract_structure(l, source, rel).ok()
@@ -120,6 +127,9 @@ fn verify_with(
             out.push((claim, convention, v));
         }
         if let Some((claim, v)) = check_namespace(rel, &facts, convention) {
+            out.push((claim, convention, v));
+        }
+        if let Some((claim, v)) = check_annotation(&facts, convention) {
             out.push((claim, convention, v));
         }
     }
@@ -433,9 +443,40 @@ fn check_import(facts: &FileFacts, convention: &Convention) -> Option<(Claim, Vi
     ))
 }
 
+/// A file that carries none of the annotation its directory agrees on.
+///
+/// Reported only when the file declares something. A module of pure type
+/// aliases carries no annotation and has made no choice, and saying so spends
+/// a line describing an absence nobody decided.
+///
+/// Parsed without the shared [`backticked`]: every other prefix stops short of
+/// the opening backtick and lets that helper strip it, but `ANNOTATION_PREFIX`
+/// carries its own through so the derived statement reads `` `@Injectable` ``
+/// rather than `` `Injectable` ``. Handed to `backticked` anyway, the prefix
+/// match consumes that backtick too, the helper then finds no leading backtick
+/// left to strip, and returns `None` for every file — the rule derives and is
+/// never checked, with nothing to say so.
+fn check_annotation(facts: &FileFacts, convention: &Convention) -> Option<(Claim, Violation)> {
+    let expected = convention.statement.strip_prefix(ANNOTATION_PREFIX)?.strip_suffix('`')?;
+    if declares_nothing(facts) || facts.annotations.iter().any(|a| a.name == expected) {
+        return None;
+    }
+    Some((
+        ("shape.annotation", expected.to_string()),
+        Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "this file carries no `@{expected}`; files here carry it ({}/{})",
+                convention.agreeing, convention.total
+            ),
+        },
+    ))
+}
+
 const DEFAULT_EXPORT: &str = "Files here export a default";
 const NAMED_EXPORTS: &str = "Files here use named exports";
 const NAMESPACE_PREFIX: &str = "Files here declare namespace ";
+const ANNOTATION_PREFIX: &str = "Files here carry `@";
 
 /// "Files here export a default."
 ///
@@ -1289,24 +1330,65 @@ mod tests {
     #[test]
     fn whether_a_file_is_judged_does_not_depend_on_which_other_rules_apply() {
         // `verify_with` reads a file two ways: the cheap structural pass, and
-        // the full one when an import rule is in scope. Only the second
-        // records calls, so a predicate that consults them answers differently
-        // depending on a rule that has nothing to do with the question.
+        // the full one when an import or annotation rule is in scope. Only the
+        // second records calls, so a predicate that consults them answers
+        // differently depending on a rule that has nothing to do with the
+        // question.
         let mut ns = conv("shape.namespace.src.php", "Files here declare namespace `App`");
         ns.scope = Scope::DirExt("src".into(), "php".into());
         let mut import = conv("shape.import.src.php", "Files here import from `App\\Kernel`");
         import.scope = Scope::DirExt("src".into(), "php".into());
+        let mut annotation = conv("shape.annotation.src.php", "Files here carry `@Entity`");
+        annotation.scope = Scope::DirExt("src".into(), "php".into());
 
         let procedural = "<?php\nadd_action('init', 'setup');\n";
         let alone = verify_source("src/plugin.php", procedural, std::slice::from_ref(&ns));
-        let beside = verify_source("src/plugin.php", procedural, &[ns, import]);
+        let beside_import = verify_source("src/plugin.php", procedural, &[ns.clone(), import]);
+        let beside_annotation = verify_source("src/plugin.php", procedural, &[ns, annotation]);
         let namespace_lines = |vs: &[Violation]| {
             vs.iter().filter(|v| v.convention_id.starts_with("shape.namespace")).count()
         };
         assert_eq!(
             namespace_lines(&alone),
-            namespace_lines(&beside),
-            "an unrelated import rule changed the namespace answer:\n{alone:#?}\n{beside:#?}"
+            namespace_lines(&beside_import),
+            "an unrelated import rule changed the namespace answer:\n{alone:#?}\n{beside_import:#?}"
+        );
+        assert_eq!(
+            namespace_lines(&alone),
+            namespace_lines(&beside_annotation),
+            "an unrelated annotation rule changed the namespace answer:\n{alone:#?}\n{beside_annotation:#?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_annotation_rule_is_checked_against_the_same_prefix_it_was_stated_with() {
+        // The derive side writes the statement and the check side parses it
+        // back out, so the two have to agree on exactly where the name sits
+        // inside it. A mismatch here fails silently: the rule still derives,
+        // `check_annotation` just never matches it, and nothing catches a
+        // decorated file drifting away from it.
+        let files = crate::fixture::agreeing(
+            "src/orders",
+            "ts",
+            6,
+            "import { Injectable } from '@nestjs/common';\n\n@Injectable()\nexport class Svc$N {\n  findAll(): void {}\n}\n",
+        );
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let root = crate::fixture::build("verify-annotation-roundtrip", &refs);
+        let settings = canon_core::Settings::default();
+        let entries = crate::walk::walk(&root, &settings);
+        let convs = crate::derive_from(&root, &settings, &entries);
+        assert!(
+            convs.iter().any(|c| c.id.starts_with("shape.annotation")),
+            "no annotation rule derived: {:?}",
+            convs.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+
+        let violating = "export class Plain {\n  findAll(): void {}\n}\n";
+        let violations = verify_source("src/orders/plain.ts", violating, &convs);
+        assert!(
+            violations.iter().any(|v| v.message.contains("carries no `@Injectable`")),
+            "the derived statement and the check disagreed on the prefix: {violations:#?}"
         );
     }
 
