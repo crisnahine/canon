@@ -81,6 +81,18 @@ impl Scope {
         depth + direct + qualified
     }
 
+    /// How many directory levels down this scope sits. Zero for a scope that
+    /// names no directory.
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        match self {
+            Self::Repo | Self::Ext(_) => 0,
+            Self::Dir(d) | Self::DirExt(d, _) | Self::DirChildrenExt(d, _) => {
+                d.split('/').filter(|s| !s.is_empty()).count()
+            }
+        }
+    }
+
     /// Human-facing description of the file set, for the header of an injected
     /// block.
     #[must_use]
@@ -206,7 +218,12 @@ pub struct Convention {
 /// `.canon.toml` written in response to a refusal takes effect on the next
 /// write rather than on the next session.
 #[must_use]
-pub fn enforcement_for(id: &str, confidence: Confidence, settings: &Settings) -> Enforcement {
+pub fn enforcement_for(
+    id: &str,
+    scope: &Scope,
+    confidence: Confidence,
+    settings: &Settings,
+) -> Enforcement {
     /// Checks that cannot be wrong about a legitimate file.
     ///
     /// `naming` is a string comparison on the path, with no parsing and no
@@ -220,6 +237,28 @@ pub fn enforcement_for(id: &str, confidence: Confidence, settings: &Settings) ->
     // real, but it generalises to sibling directories that never voted, and a
     // directory with no files yet is exactly where a refusal would be wrong.
     if id.ends_with(ROLLUP_SUFFIX) {
+        return Enforcement::Advisory;
+    }
+    // A rule counted over a directory's own files states itself and never
+    // refuses. It is the only scope that reaches nothing, and the only one
+    // whose vote *excludes* files inside the directory it names: it survives
+    // only where the subtree could not agree, so the disagreement is what
+    // qualified it, and the files that disagreed are invisible to every check
+    // downstream. Measured on a React repository, `src/components/base/*.tsx`
+    // agreed 83 of 83 and refused a camelCase name its own subtree uses.
+    if matches!(scope, Scope::DirChildrenExt(..)) {
+        return Enforcement::Advisory;
+    }
+    // A naming rule from deep in the tree does the same thing a level at a
+    // time. `cypress/fixtures/**` holds 114 snake_case JSON fixtures beside 5
+    // kebab-case ones, and eleven per-resource folders five levels down each
+    // reached total agreement by seeing only their own slice — then refused
+    // `exists-false.json`, a name the fixture tree already uses one directory
+    // over. A folder that deep is not a naming domain, it is one slice of one.
+    //
+    // Only naming. A shape rule reads the code rather than the path, so a deep
+    // directory's types are genuinely its own.
+    if id.starts_with("naming") && scope.depth() > MAX_BLOCKING_NAMING_DEPTH {
         return Enforcement::Advisory;
     }
     // A base type read from a language that allows several is not a base type,
@@ -248,6 +287,16 @@ pub fn enforcement_for(id: &str, confidence: Confidence, settings: &Settings) ->
 /// Marks an id as having been assembled from the rules of child directories.
 pub const ROLLUP_SUFFIX: &str = ".rollup";
 
+/// Deepest directory a naming rule may refuse from.
+///
+/// Grouping reaches eight levels so a deep tree gets advice about itself, and
+/// the raise from four was measured to recover rules a workspace layout had
+/// lost. Refusing from down there is a different claim, and the raise made
+/// forty-six new ones on one React repository against the eight that were
+/// reachable before, every one of them naming. Advice deeper than this is
+/// kept; the refusals are the ones that were already reachable.
+const MAX_BLOCKING_NAMING_DEPTH: usize = 4;
+
 impl Convention {
     /// Whether this convention may refuse a write *under these settings*.
     ///
@@ -260,7 +309,7 @@ impl Convention {
         if settings.is_suppressed(&self.id) {
             return Enforcement::Advisory;
         }
-        enforcement_for(&self.id, self.confidence, settings)
+        enforcement_for(&self.id, &self.scope, self.confidence, settings)
     }
 
     /// Render as one line of an injected block: the statement, the count, and
@@ -409,12 +458,98 @@ mod tests {
         let total = Confidence::derive(8, 8).expect("total agreement");
         let settings = Settings::default();
         assert_eq!(
-            enforcement_for("shape.base.shop.views.py", total, &settings),
+            enforcement_for(
+                "shape.base.shop.views.py",
+                &Scope::DirExt("shop/views".into(), "py".into()),
+                total,
+                &settings
+            ),
             Enforcement::Advisory
         );
         // Every other language keeps its base rule enforceable.
         assert_eq!(
-            enforcement_for("shape.base.app.services.rb", total, &settings),
+            enforcement_for(
+                "shape.base.app.services.rb",
+                &Scope::DirExt("app/services".into(), "rb".into()),
+                total,
+                &settings
+            ),
+            Enforcement::Blocking
+        );
+    }
+
+    #[test]
+    fn a_rule_counted_over_a_directorys_own_files_never_refuses_a_write() {
+        // It is the one scope whose vote *excludes* files inside the directory
+        // it names, and it only exists where the subtree disagreed — so the
+        // disagreement is what qualified it, and the files that disagreed are
+        // invisible to everything downstream. Measured on a React repository:
+        // `src/components/base/*.tsx` agreed 83/83 and refused a camelCase
+        // name its own subtree already uses.
+        let total = Confidence::derive(83, 83).expect("total agreement");
+        let settings = Settings::default();
+        let dir = "src/components/base";
+        assert_eq!(
+            enforcement_for(
+                "naming.src.components.base.tsx",
+                &Scope::DirChildrenExt(dir.into(), "tsx".into()),
+                total,
+                &settings
+            ),
+            Enforcement::Advisory
+        );
+        // The same statement counted over the subtree still refuses: it saw
+        // every file it speaks for.
+        assert_eq!(
+            enforcement_for(
+                "naming.src.components.base.tsx",
+                &Scope::DirExt(dir.into(), "tsx".into()),
+                total,
+                &settings
+            ),
+            Enforcement::Blocking
+        );
+    }
+
+    #[test]
+    fn a_naming_rule_from_deep_in_the_tree_never_refuses_a_write() {
+        // A per-resource fixture folder five levels down is not a naming
+        // domain, it is one slice of one, and the slices disagree:
+        // `cypress/fixtures/**` holds 114 snake_case beside 5 kebab-case JSON
+        // files, and eleven slices of it each refused `exists-false.json` — a
+        // name the same fixture tree already uses one directory over.
+        let total = Confidence::derive(8, 8).expect("total agreement");
+        let settings = Settings::default();
+        assert_eq!(
+            enforcement_for(
+                "naming.cypress.fixtures.api.v1.listing.json",
+                &Scope::DirExt("cypress/fixtures/api/v1/listing".into(), "json".into()),
+                total,
+                &settings
+            ),
+            Enforcement::Advisory
+        );
+        assert_eq!(
+            enforcement_for(
+                "naming.src.components.UniversalOnboarding.components.tsx",
+                &Scope::DirExt(
+                    "src/components/UniversalOnboarding/components".into(),
+                    "tsx".into()
+                ),
+                total,
+                &settings
+            ),
+            Enforcement::Blocking
+        );
+        // The depth bar is naming's alone. A shape rule reads the code rather
+        // than the path, and a deep directory's types are still its own.
+        assert_eq!(
+            enforcement_for(
+                "shape.base.src.pages.Listing.Controller.Section.more.tsx",
+                &Scope::DirExt("src/pages/Listing/Controller/Section/more".into(), "tsx".into()),
+                total,
+                &settings
+            ),
             Enforcement::Blocking
         );
     }
@@ -428,6 +563,14 @@ mod tests {
         // denied.
         let total = Confidence::derive(6, 6).expect("total agreement");
         let settings = Settings::default();
-        assert_eq!(enforcement_for("shape.base.svc.go", total, &settings), Enforcement::Advisory);
+        assert_eq!(
+            enforcement_for(
+                "shape.base.svc.go",
+                &Scope::DirExt("svc".into(), "go".into()),
+                total,
+                &settings
+            ),
+            Enforcement::Advisory
+        );
     }
 }

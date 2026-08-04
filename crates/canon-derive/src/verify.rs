@@ -2315,16 +2315,28 @@ mod tests {
                 .is_empty(),
             "and it must not advise there either, or the report contradicts the block"
         );
-        // And it still holds for the directory whose files produced it.
+        // And it still holds for the directory whose files produced it — as
+        // advice. A rule counted over one directory's own files never refuses:
+        // it survives only where the subtree outvoted it, so the evidence that
+        // qualified it is the evidence against it.
         assert_eq!(
+            verify_source(
+                "app/models/widget.rb",
+                "class Widget < SomethingElse\nend\n",
+                std::slice::from_ref(&rule)
+            )
+            .len(),
+            1
+        );
+        assert!(
             blocking_violations(
                 "app/models/widget.rb",
                 Some("class Widget < SomethingElse\nend\n".into()),
                 &[rule],
                 &settings
             )
-            .len(),
-            1
+            .is_empty(),
+            "a direct-children rule refused a write"
         );
     }
 

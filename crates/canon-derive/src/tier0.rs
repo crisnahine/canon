@@ -431,9 +431,9 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
         // grade stored in the snapshot could disagree with the one the write
         // path recomputes from the same id.
         let id = format!("naming.{}.{ext}", id_fragment(&dir));
+        let scope = crate::scope_reaching(&dir, &ext, reach);
         out.push(Convention {
             statement: format!("Files here are named in {}", style.label()),
-            scope: crate::scope_reaching(&dir, &ext, reach),
             confidence,
             agreeing,
             total: members.len(),
@@ -442,7 +442,8 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
             // The complete set, not the capped evidence: a repository-wide rule
             // may only refuse a file in a directory that actually voted on it.
             sample_roots: roots_of(&members),
-            enforcement: canon_core::enforcement_for(&id, confidence, settings),
+            enforcement: canon_core::enforcement_for(&id, &scope, confidence, settings),
+            scope,
             id,
         });
     }

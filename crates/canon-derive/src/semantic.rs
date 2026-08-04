@@ -346,19 +346,20 @@ fn public_arity(
     // stored in the snapshot disagreed with the one the write path recomputes
     // from the same id.
     let id = format!("shape.public-arity.{}.{ext}", id_fragment(dir));
+    let scope = scope_for(dir, ext);
     Some(Convention {
         statement: format!(
             "Types here expose exactly {arity} public method{}",
             if arity == 1 { "" } else { "s" }
         ),
-        scope: scope_for(dir, ext),
         confidence,
         agreeing,
         total: observations.len(),
         exemplar: exemplar(&observations, &arity),
         evidence: evidence(&observations, &arity),
         sample_roots: Vec::new(),
-        enforcement: canon_core::enforcement_for(&id, confidence, settings),
+        enforcement: canon_core::enforcement_for(&id, &scope, confidence, settings),
+        scope,
         id,
     })
 }
@@ -388,16 +389,17 @@ fn entrypoint_name(
     let (name, confidence, agreeing) = majority(&observations, settings)?;
     // The whole id; see `public_arity`.
     let id = format!("shape.entrypoint.{}.{ext}", id_fragment(dir));
+    let scope = scope_for(dir, ext);
     Some(Convention {
         statement: format!("That public method is named `{name}`"),
-        scope: scope_for(dir, ext),
         confidence,
         agreeing,
         total: observations.len(),
         exemplar: exemplar(&observations, &name),
         evidence: evidence(&observations, &name),
         sample_roots: Vec::new(),
-        enforcement: canon_core::enforcement_for(&id, confidence, settings),
+        enforcement: canon_core::enforcement_for(&id, &scope, confidence, settings),
+        scope,
         id,
     })
 }
@@ -425,16 +427,17 @@ fn base_class(
     // `shape.base` hides that extension, so a Python rule was stored
     // `Blocking` and recomputed `Advisory` on every write.
     let id = format!("shape.base.{}.{ext}", id_fragment(dir));
+    let scope = scope_for(dir, ext);
     Some(Convention {
         statement: format!("Types here inherit from `{base}`"),
-        scope: scope_for(dir, ext),
         confidence,
         agreeing,
         total: observations.len(),
         exemplar: exemplar(&observations, &winner),
         evidence: evidence(&observations, &winner),
         sample_roots: Vec::new(),
-        enforcement: canon_core::enforcement_for(&id, confidence, settings),
+        enforcement: canon_core::enforcement_for(&id, &scope, confidence, settings),
+        scope,
         id,
     })
 }
@@ -1531,7 +1534,12 @@ mod tests {
         let settings = canon_core::Settings::default();
         let total = canon_core::Confidence::derive(6, 6).expect("total");
         assert_eq!(
-            canon_core::enforcement_for("shape.family.app.controllers.rb", total, &settings),
+            canon_core::enforcement_for(
+                "shape.family.app.controllers.rb",
+                &canon_core::Scope::DirExt("app/controllers".into(), "rb".into()),
+                total,
+                &settings
+            ),
             canon_core::Enforcement::Advisory
         );
     }
