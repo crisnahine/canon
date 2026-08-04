@@ -93,7 +93,11 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         }
         out.extend(public_arity(&dir, &ext, &members, settings));
         out.extend(entrypoint_name(&dir, &ext, &members, settings));
-        out.extend(base_class(&dir, &ext, &members, settings));
+        let base = base_class(&dir, &ext, &members, settings);
+        if base.is_none() {
+            out.extend(base_family(&dir, &ext, &members, settings));
+        }
+        out.extend(base);
         out.extend(module_arity(&dir, &ext, &members, settings));
         out.extend(collaborator(&dir, &ext, &members, settings));
         out.extend(macros(&dir, &ext, &members, settings));
@@ -381,6 +385,52 @@ fn base_class(
         sample_roots: Vec::new(),
         enforcement: canon_core::enforcement_for("shape.base", confidence, settings),
     })
+}
+
+/// "Types here inherit from a `*BaseController`."
+///
+/// The fallback when a directory agrees on a kind of base but not on one base.
+/// A Rails API namespaces its controllers, so 95 of 102 files inherit
+/// something ending `BaseController` while the largest single spelling is 53:
+/// the exact vote finds no winner and the directory derives nothing.
+///
+/// Only stated when `base_class` found nothing, so the two never both speak
+/// for one directory. Advisory always: the check is a suffix comparison
+/// against a name the sample never contained.
+fn base_family(
+    dir: &str,
+    ext: &str,
+    members: &[&FactSet],
+    settings: &Settings,
+) -> Option<Convention> {
+    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+        .iter()
+        .filter_map(|s| s.subject().map(|t| (t.superclass.as_deref().map(family_of), s.weight, *s)))
+        .collect();
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let family = winner.clone()?;
+    Some(Convention {
+        id: format!("shape.family.{}.{ext}", id_fragment(dir)),
+        statement: format!("Types here inherit from a `*{family}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
+        enforcement: Enforcement::Advisory,
+    })
+}
+
+/// The last path segment of a base type, which is the part a family shares.
+///
+/// `Api::V1::Admin::BaseController` and `Api::V1::BaseController` are two
+/// namespaces of one family, and the namespace is exactly what differs.
+/// Handles every separator canon's languages spell a qualified name with —
+/// `::`, `\` and `.` — and a bare name with none of them is returned whole.
+pub(crate) fn family_of(base: &str) -> String {
+    base.rsplit([':', '\\', '.']).next().unwrap_or(base).to_string()
 }
 
 /// "Files here export exactly one function."
@@ -1093,6 +1143,58 @@ mod tests {
         );
         let convs = derive_from("sem-no-macro", &files);
         assert!(!convs.iter().any(|c| c.id.starts_with("shape.macros")), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn four_base_controllers_are_one_family() {
+        let mut files: Vec<(String, String)> = Vec::new();
+        for (i, base) in [
+            "Api::V1::BaseController",
+            "Api::V1::BaseController",
+            "Api::V1::BaseController",
+            "Api::V1::Admin::BaseController",
+            "Api::V1::Admin::BaseController",
+            "Api::V1::ChromeExtension::BaseController",
+        ]
+        .iter()
+        .enumerate()
+        {
+            files.push((
+                format!("app/controllers/c{i}_controller.rb"),
+                format!("class C{i}Controller < {base}\n  def index; end\nend\n"),
+            ));
+        }
+        let convs = derive_from("sem-family", &files);
+        let text = joined(&convs);
+        assert!(text.contains("inherit from a `*BaseController`"), "got {text}");
+    }
+
+    #[test]
+    fn a_family_rule_never_refuses_a_write() {
+        // The check is a suffix comparison against a name the sample never
+        // contained, which is exactly the check that can be wrong about a
+        // legitimate file.
+        let settings = canon_core::Settings::default();
+        let total = canon_core::Confidence::derive(6, 6).expect("total");
+        assert_eq!(
+            canon_core::enforcement_for("shape.family.app.controllers.rb", total, &settings),
+            canon_core::Enforcement::Advisory
+        );
+    }
+
+    #[test]
+    fn a_family_rule_yields_to_a_directory_where_one_base_already_won() {
+        // The family fallback only ever speaks when `base_class` found no
+        // winner; a directory that already agrees on one exact base must not
+        // gain a second, redundant rule about the same thing.
+        let files = fixture::agreeing(
+            "app/services",
+            "rb",
+            6,
+            "class Item$N < ApplicationService\n  def call; end\nend\n",
+        );
+        let convs = derive_from("sem-family-yields", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.family")), "got {}", joined(&convs));
     }
 
     #[test]

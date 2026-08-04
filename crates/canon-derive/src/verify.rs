@@ -12,6 +12,7 @@ use canon_core::Convention;
 use canon_extract::FileFacts;
 
 use crate::naming;
+use crate::semantic::family_of;
 
 /// What a violation claims, independent of which rule noticed it.
 ///
@@ -358,6 +359,13 @@ fn is_below(dir: &str, ancestor: &str) -> bool {
 const IMPORT_PREFIX: &str = "Files here import from ";
 const SUFFIX_PREFIX: &str = "Test files are named ";
 const FORMAT_PREFIX: &str = "Files here are named ";
+// Deliberately without a trailing backtick, unlike `NAMESPACE_PREFIX` and its
+// neighbours. `backticked` splits on the prefix and only then strips a
+// leading backtick from what remains; a prefix that already ends in one
+// leaves nothing left to strip and returns `None` for every file, deriving
+// the rule and never checking it — the same defect `check_annotation`'s doc
+// comment describes, on the arm derived for this task.
+const FAMILY_PREFIX: &str = "Types here inherit from a ";
 
 /// "Views here are named `*.html.erb`."
 ///
@@ -772,7 +780,49 @@ fn check_shape(
         }
     }
 
+    out.extend(check_family(t, convention, &evidence));
+
     out
+}
+
+/// "Types here inherit from a `*BaseController`."
+///
+/// Split out of [`check_shape`] rather than inlined beside the `shape.base`
+/// arm it sits next to in the derivation, because the two together pushed
+/// that function past the length `clippy::pedantic` allows.
+///
+/// A type may declare several contracts, or embed several types, and which
+/// one landed in `superclass` is decided by source order for an interface and
+/// by an unordered set for an embed — the same reasoning that lets the
+/// `shape.base` arm accept a match from `interfaces` or `mixins` applies
+/// here.
+fn check_family(
+    t: &canon_extract::TypeFacts,
+    convention: &Convention,
+    evidence: &str,
+) -> Option<(Claim, Violation)> {
+    let expected = backticked(&convention.statement, FAMILY_PREFIX)?;
+    // The statement names a suffix, spelled `*Suffix`, because the family is
+    // what several namespaced bases share and the namespace is exactly what
+    // differs between them.
+    let suffix = expected.trim_start_matches('*');
+    let matches_family = t.superclass.as_deref().is_some_and(|actual| family_of(actual) == suffix)
+        || t.mixins.iter().any(|m| family_of(m) == suffix)
+        || t.interfaces.iter().any(|i| family_of(i) == suffix);
+    if matches_family {
+        return None;
+    }
+    Some((
+        ("shape.family", t.name.clone()),
+        Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "`{}` inherits from `{}`; types here inherit from a `*{suffix}` ({evidence})",
+                t.name,
+                t.superclass.as_deref().unwrap_or("nothing")
+            ),
+        },
+    ))
 }
 
 /// The arity a statement asks for, or zero when it asks for none.
@@ -1322,10 +1372,14 @@ mod tests {
 
     #[test]
     fn the_families_added_for_templates_and_modules_can_never_refuse_a_write() {
-        // All four are advisory by construction: none of their id prefixes is
+        // All five are advisory by construction: none of their id prefixes is
         // in the enforceable set, and `blocking_violations` recomputes the
         // grade from the id rather than trusting the stored decision. Pinned
-        // here because renaming one under `naming.` would silently promote it.
+        // here because renaming one under `naming.` or `shape.base` would
+        // silently promote it — `shape.family` in particular has to keep its
+        // id spelled that way rather than `shape.base-family`, or
+        // `enforcement_for`'s `starts_with("shape.base")` check would catch
+        // it too.
         let settings = canon_core::Settings::default();
         for (id, statement, scope) in [
             (
@@ -1347,6 +1401,11 @@ mod tests {
                 "shape.macros.src.vue",
                 "Files here use `defineProps`",
                 Scope::DirExt("src".into(), "vue".into()),
+            ),
+            (
+                "shape.family.app.controllers.rb",
+                "Types here inherit from a `*BaseController`",
+                Scope::DirExt("app/controllers".into(), "rb".into()),
             ),
         ] {
             let rule = blocking(id, statement, scope);
@@ -1512,6 +1571,61 @@ mod tests {
         assert!(
             !conforming.iter().any(|v| v.message.contains("does not use")),
             "a conforming component was reported: {conforming:#?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_family_rule_is_checked_against_the_same_prefix_it_was_stated_with() {
+        // `FAMILY_PREFIX` carries no trailing backtick unlike its neighbours,
+        // because `backticked` splits on the prefix first and only then
+        // strips one leading backtick from what remains — a prefix that
+        // already ends in one leaves nothing to strip and returns `None` for
+        // every file, the same silent defect `check_annotation`'s doc comment
+        // describes. Driven through the real fixture pipeline rather than two
+        // literals, so a mismatch here would have to survive both derivation
+        // and the check disagreeing about where the name sits.
+        let mut files: Vec<(String, String)> = Vec::new();
+        for (i, base) in [
+            "Api::V1::BaseController",
+            "Api::V1::BaseController",
+            "Api::V1::BaseController",
+            "Api::V1::Admin::BaseController",
+            "Api::V1::Admin::BaseController",
+            "Api::V1::ChromeExtension::BaseController",
+        ]
+        .iter()
+        .enumerate()
+        {
+            files.push((
+                format!("app/controllers/c{i}_controller.rb"),
+                format!("class C{i}Controller < {base}\n  def index; end\nend\n"),
+            ));
+        }
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let root = crate::fixture::build("verify-family-roundtrip", &refs);
+        let settings = canon_core::Settings::default();
+        let entries = crate::walk::walk(&root, &settings);
+        let convs = crate::derive_from(&root, &settings, &entries);
+        let rule = convs.iter().find(|c| c.id.starts_with("shape.family")).unwrap_or_else(|| {
+            panic!("no family rule derived: {:?}", convs.iter().map(|c| &c.id).collect::<Vec<_>>())
+        });
+        assert!(rule.statement.contains("`*BaseController`"), "got {}", rule.statement);
+
+        // A controller that inherits nothing ending `BaseController` at all.
+        let violating = "class Rogue < ActionController::API\n  def index; end\nend\n";
+        let violations = verify_source("app/controllers/rogue_controller.rb", violating, &convs);
+        assert!(
+            violations.iter().any(|v| v.message.contains("inherit from a `*BaseController`")),
+            "the derived statement and the check disagreed on the prefix: {violations:#?}"
+        );
+
+        // A namespace the fixture never saw is still a member of the family.
+        let conforming =
+            "class Fresh < Api::V1::PartnerToolkit::BaseController\n  def index; end\nend\n";
+        let no_violation = verify_source("app/controllers/fresh_controller.rb", conforming, &convs);
+        assert!(
+            !no_violation.iter().any(|v| v.message.contains("inherit from a")),
+            "a legitimate namespace was refused: {no_violation:#?}"
         );
     }
 

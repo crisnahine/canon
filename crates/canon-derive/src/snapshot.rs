@@ -23,7 +23,11 @@ use serde::{Deserialize, Serialize};
 /// versions refuse to derive. A `kebab-case` rule pinned by a vendored
 /// `jquery-3.4.1.min.js` was graded `Blocking` from the stored snapshot and
 /// went on refusing writes after the release that stopped deriving it.
-pub const SNAPSHOT_VERSION: u32 = 11;
+pub const SNAPSHOT_VERSION: u32 = 12;
+// 12: a directory that agrees on a kind of base but not on one exact spelling
+//     now derives a `shape.family` rule instead of nothing at all. A v11
+//     snapshot has no rule for such a directory, because the reading it was
+//     built from never asked the question.
 // 11: a type records every base it names, in order, and Python resolves the
 //     last positional one as its base rather than the first, with the earlier
 //     ones landing in a new `mixins` list kept apart from `interfaces`. A v10
