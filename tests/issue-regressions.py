@@ -39,7 +39,19 @@ RESULTS = []
 def check(issue, name, ok, detail=""):
     RESULTS.append((issue, name, ok, detail))
 
-BAD_PY = "class VoidSubscription:\n    def perform(self): pass\n\n    def rollback(self): pass\n"
+# A file breaking exactly one rule the repository still refuses on.
+#
+# It used to break three, and stopped refusing when each of those three was
+# deliberately narrowed: a base rule derived for Python is graded Advisory
+# because a Python base is whichever of several the author wrote first, and
+# neither the arity nor the entrypoint rule refuses a type carrying *more*
+# public methods than the sample, because `up`/`down` and `to_s` are ordinary.
+# A fixture that breaks only rules the tool has decided not to enforce tests
+# nothing, and this one silently did.
+BAD_PY = (
+    "from app.services.base import BaseService\n\n\n"
+    "class VoidSubscription(BaseService):\n    def perform(self): pass\n"
+)
 
 # ---- #9 Edit reaches file states Write refuses -------------------------------
 root = index("services")
