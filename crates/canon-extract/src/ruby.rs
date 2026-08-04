@@ -95,6 +95,7 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
     let interfaces = Vec::new();
     let mut public_methods = Vec::new();
     let mut private_methods = Vec::new();
+    let mut mixins = Vec::new();
     let mut section = Section::Public;
 
     if let Some(body) = child_of_kind(class_node, "body_statement") {
@@ -106,12 +107,24 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
                         section = Section::Private;
                     }
                 }
-                // `private :foo` names one method and leaves the section alone.
+                // `private :foo` names one method and leaves the section
+                // alone; `include`/`extend`/`prepend` name a module the type
+                // composes. Both read from the same node kind, so they share
+                // this arm rather than a second pass over the body.
+                //
+                // This loop visits only the direct children of the class's
+                // own `body_statement`, never descending into a `method`
+                // node's body, so a call written inside a method is already
+                // excluded: an `include` there is ordinary code, not part of
+                // what composes the class.
                 "call" => {
                     if let Some((kw, target)) = visibility_call(child, src)
                         && matches!(kw.as_str(), "private" | "protected")
                     {
                         private_methods.push(target);
+                    }
+                    if let Some(target) = mixin_call(child, src) {
+                        mixins.push(target);
                     }
                 }
                 // `def self.call` is a `singleton_method`, and it is the shape a
@@ -157,8 +170,25 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         superclass,
         bases: Vec::new(),
         interfaces,
-        mixins: Vec::new(),
+        mixins,
     })
+}
+
+/// `include Sidekiq::Worker`, `extend Forwardable`, `prepend Loggable`: the
+/// module or class the target names, for a call whose keyword is one of the
+/// three that compose a type rather than declare a contract. A bare name
+/// parses as `constant`; a namespaced one like `Sidekiq::Worker` parses as
+/// `scope_resolution`.
+fn mixin_call(node: tree_sitter::Node<'_>, src: &str) -> Option<String> {
+    let kw = child_of_kind(node, "identifier").map(|n| text(n, src))?;
+    if !matches!(kw.as_str(), "include" | "extend" | "prepend") {
+        return None;
+    }
+    let args = child_of_kind(node, "argument_list")?;
+    children_of(args)
+        .into_iter()
+        .find(|c| matches!(c.kind(), "constant" | "scope_resolution"))
+        .map(|c| text(c, src))
 }
 
 fn visibility_call(node: tree_sitter::Node<'_>, src: &str) -> Option<(String, String)> {
@@ -187,6 +217,23 @@ mod tests {
 
     fn f(src: &str) -> FileFacts {
         crate::tests::facts_of(crate::Language::Ruby, src)
+    }
+
+    #[test]
+    fn a_class_body_include_is_a_mixin() {
+        let f = f(
+            "class W\n  include Sidekiq::Worker\n  extend Forwardable\n  def perform; end\nend\n",
+        );
+        assert_eq!(f.types[0].mixins, vec!["Sidekiq::Worker", "Forwardable"]);
+    }
+
+    #[test]
+    fn an_include_inside_a_method_is_not_a_mixin() {
+        // Only a class-body include composes the type. One inside a method is
+        // ordinary code, and counting it would attribute a helper's behaviour
+        // to the class.
+        let f = f("class W\n  def perform\n    include Kernel\n  end\nend\n");
+        assert!(f.types[0].mixins.is_empty());
     }
 
     #[test]

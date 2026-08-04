@@ -104,6 +104,7 @@ pub(crate) fn derive(sets: &[FactSet], settings: &Settings) -> Vec<Convention> {
         out.extend(import_source(&dir, &ext, &members, settings));
         out.extend(export_style(&dir, &ext, &members, settings));
         out.extend(annotation(&dir, &ext, &members, settings));
+        out.extend(mixin(&dir, &ext, &members, settings));
     }
     out.extend(namespace_per_directory(sets, settings));
     out
@@ -690,6 +691,53 @@ fn annotation(
     })
 }
 
+/// "Types here include `Sidekiq::Worker`."
+///
+/// A Sidekiq worker declares no superclass at all and composes its behaviour
+/// with `include Sidekiq::Worker` instead; a Laravel job does the same with a
+/// trait `use`. Both are invisible to every base-class rule above, which asks
+/// what a type inherits and not what it opts into: measured on a real Rails
+/// repository, 485 of 490 files in `app/workers` include `Sidekiq::Worker`
+/// and derive nothing at all.
+///
+/// Counted only over files with a resolvable subject, the same restriction
+/// [`base_class`] applies: a namespace module or an unrelated nested type
+/// composes nothing and must not vote about what one does.
+fn mixin(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
+    let observations: Vec<(Option<String>, f32, &FactSet)> = members
+        .iter()
+        .filter_map(|s| {
+            let t = s.subject()?;
+            let mut names: Vec<&String> = t.mixins.iter().collect();
+            names.sort_unstable();
+            names.dedup();
+            let dominant = names
+                .into_iter()
+                .max_by_key(|n| t.mixins.iter().filter(|m| m == n).count())
+                .cloned();
+            Some((dominant, s.weight, *s))
+        })
+        .collect();
+
+    let (winner, confidence, agreeing) = majority(&observations, settings)?;
+    let name = winner.clone()?;
+    Some(Convention {
+        id: format!("shape.mixin.{}.{ext}", id_fragment(dir)),
+        statement: format!("Types here include `{name}`"),
+        scope: scope_for(dir, ext),
+        confidence,
+        agreeing,
+        total: observations.len(),
+        exemplar: exemplar(&observations, &winner),
+        evidence: evidence(&observations, &winner),
+        sample_roots: Vec::new(),
+        // Advisory. A directory that mostly composes one module can still
+        // legitimately hold the one type that opts into another, or into
+        // none at all.
+        enforcement: Enforcement::Advisory,
+    })
+}
+
 /// Whether an import names something the whole repository can agree about.
 ///
 /// A relative path resolves differently from every directory, so counting the
@@ -1225,6 +1273,30 @@ mod tests {
         assert_eq!(family_of("App\\Http\\Controllers\\BaseController"), "BaseController");
         assert_eq!(family_of("controllers.base.BaseController"), "BaseController");
         assert_eq!(family_of("BaseController"), "BaseController");
+    }
+
+    #[test]
+    fn a_sidekiq_worker_derives_the_module_it_includes() {
+        // Measured on a real Rails repository: 485 of 490 files in
+        // `app/workers` declare no superclass at all and compose their
+        // behaviour with `include Sidekiq::Worker` instead, so `base_class`
+        // above sees nothing about any of them.
+        let files = fixture::agreeing(
+            "app/workers",
+            "rb",
+            6,
+            "class Item$N\n  include Sidekiq::Worker\n\n  def perform; end\nend\n",
+        );
+        let convs = derive_from("sem-mixin", &files);
+        assert!(joined(&convs).contains("include `Sidekiq::Worker`"), "got {}", joined(&convs));
+    }
+
+    #[test]
+    fn a_type_with_no_mixins_derives_no_mixin_rule() {
+        let files =
+            fixture::agreeing("app/models", "rb", 6, "class Item$N < ApplicationRecord\nend\n");
+        let convs = derive_from("sem-no-mixin", &files);
+        assert!(!convs.iter().any(|c| c.id.starts_with("shape.mixin")), "got {}", joined(&convs));
     }
 
     #[test]

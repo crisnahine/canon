@@ -57,17 +57,38 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
 
     let mut public_methods = Vec::new();
     let mut private_methods = Vec::new();
+    let mut mixins = Vec::new();
     if let Some(body) = child_of_kind(class_node, "declaration_list") {
-        for member in children_of(body).into_iter().filter(|c| c.kind() == "method_declaration") {
-            let Some(n) = field_text(member, "name", src) else { continue };
-            // Constructors and the magic methods are not deliberate surface.
-            if n == "__construct" || n.starts_with("__") {
-                continue;
-            }
-            if is_hidden(member, src) {
-                private_methods.push(n);
-            } else {
-                public_methods.push(n);
+        for member in children_of(body) {
+            match member.kind() {
+                "method_declaration" => {
+                    let Some(n) = field_text(member, "name", src) else { continue };
+                    // Constructors and the magic methods are not deliberate
+                    // surface.
+                    if n == "__construct" || n.starts_with("__") {
+                        continue;
+                    }
+                    if is_hidden(member, src) {
+                        private_methods.push(n);
+                    } else {
+                        public_methods.push(n);
+                    }
+                }
+                // A trait `use` inside the class body, not the top-level
+                // `namespace_use_declaration` that imports a name: the node
+                // kind alone tells the two apart, and only this one composes
+                // the type. `use HasFactory, SoftDeletes;` is one declaration
+                // naming two traits, so every `name`/`qualified_name` child
+                // is collected, not just the first.
+                "use_declaration" => {
+                    mixins.extend(
+                        children_of(member)
+                            .into_iter()
+                            .filter(|n| matches!(n.kind(), "name" | "qualified_name"))
+                            .map(|n| text(n, src)),
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -80,7 +101,7 @@ fn type_facts(class_node: tree_sitter::Node<'_>, src: &str) -> Option<TypeFacts>
         superclass,
         bases: Vec::new(),
         interfaces,
-        mixins: Vec::new(),
+        mixins,
     })
 }
 
@@ -131,6 +152,19 @@ mod tests {
     fn extends_is_captured() {
         let f = f("<?php class A extends BaseService {}");
         assert_eq!(f.types[0].superclass.as_deref(), Some("BaseService"));
+    }
+
+    #[test]
+    fn an_in_class_use_is_a_trait_not_an_import() {
+        // A top-level `use` imports a namespace; a `use` inside the class
+        // body composes the type. Laravel's whole mixin mechanism is the
+        // second.
+        let f = f(
+            "<?php\nclass M extends Model\n{\n    use HasFactory, SoftDeletes;\n    public function go() {}\n}\n",
+        );
+        assert_eq!(f.types[0].superclass.as_deref(), Some("Model"));
+        assert_eq!(f.types[0].mixins, vec!["HasFactory", "SoftDeletes"]);
+        assert!(f.types[0].interfaces.is_empty());
     }
 
     #[test]

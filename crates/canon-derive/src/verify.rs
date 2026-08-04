@@ -366,6 +366,10 @@ const FORMAT_PREFIX: &str = "Files here are named ";
 // the rule and never checking it — the same defect `check_annotation`'s doc
 // comment describes.
 const FAMILY_PREFIX: &str = "Types here inherit from a ";
+// Same reasoning as `FAMILY_PREFIX`: no trailing backtick, so `backticked`
+// has one left to strip from what follows the prefix instead of finding none
+// and returning `None` for every file.
+const MIXIN_PREFIX: &str = "Types here include ";
 
 /// "Views here are named `*.html.erb`."
 ///
@@ -781,6 +785,7 @@ fn check_shape(
     }
 
     out.extend(check_family(t, convention, &evidence));
+    out.extend(check_mixin(t, convention, &evidence));
 
     out
 }
@@ -821,6 +826,37 @@ fn check_family(
                 "`{}` inherits from `{}`; types here inherit from a `*{suffix}` ({evidence})",
                 t.name,
                 t.superclass.as_deref().unwrap_or("nothing")
+            ),
+        },
+    ))
+}
+
+/// "Types here include `Sidekiq::Worker`."
+///
+/// A dedicated function rather than another arm of [`check_shape`], for the
+/// same reason [`check_family`] is: that function already carries the
+/// `shape.base` arm this sits beside in the derivation, and folding every
+/// arm into one body reads past the length `clippy::pedantic` allows.
+///
+/// A Sidekiq worker or a Laravel job declares no superclass at all, so this
+/// asks about `mixins` on its own rather than falling back to `superclass`
+/// the way [`check_family`] does: there is nothing there to fall back to.
+fn check_mixin(
+    t: &canon_extract::TypeFacts,
+    convention: &Convention,
+    evidence: &str,
+) -> Option<(Claim, Violation)> {
+    let expected = backticked(&convention.statement, MIXIN_PREFIX)?;
+    if t.mixins.contains(&expected) {
+        return None;
+    }
+    Some((
+        ("shape.mixin", t.name.clone()),
+        Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "`{}` does not include `{expected}`; types here do ({evidence})",
+                t.name
             ),
         },
     ))
@@ -1627,6 +1663,50 @@ mod tests {
         assert!(
             !no_violation.iter().any(|v| v.message.contains("inherit from a")),
             "a legitimate namespace was refused: {no_violation:#?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_mixin_rule_is_checked_against_the_same_prefix_it_was_stated_with() {
+        // `MIXIN_PREFIX` carries no trailing backtick, the same reasoning
+        // `FAMILY_PREFIX`'s doc comment gives: `backticked` splits on the
+        // prefix first and only then strips one leading backtick from what
+        // remains, so a prefix that already ends in one leaves nothing to
+        // strip and returns `None` for every file, and the rule derives,
+        // injects, and is never checked. Driven through the real fixture
+        // pipeline rather than two literals, so a mismatch here would have
+        // to survive both derivation and the check disagreeing about where
+        // the name sits.
+        let files = crate::fixture::agreeing(
+            "app/workers",
+            "rb",
+            6,
+            "class Item$N\n  include Sidekiq::Worker\n\n  def perform; end\nend\n",
+        );
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let root = crate::fixture::build("verify-mixin-roundtrip", &refs);
+        let settings = canon_core::Settings::default();
+        let entries = crate::walk::walk(&root, &settings);
+        let convs = crate::derive_from(&root, &settings, &entries);
+        let rule = convs.iter().find(|c| c.id.starts_with("shape.mixin")).unwrap_or_else(|| {
+            panic!("no mixin rule derived: {:?}", convs.iter().map(|c| &c.id).collect::<Vec<_>>())
+        });
+        assert!(rule.statement.contains("`Sidekiq::Worker`"), "got {}", rule.statement);
+
+        // A worker that declares no include at all.
+        let violating = "class Rogue\n  def perform; end\nend\n";
+        let violations = verify_source("app/workers/rogue.rb", violating, &convs);
+        assert!(
+            violations.iter().any(|v| v.message.contains("does not include `Sidekiq::Worker`")),
+            "the derived statement and the check disagreed on the prefix: {violations:#?}"
+        );
+
+        // A worker that already includes it is not reported.
+        let conforming = "class Fresh\n  include Sidekiq::Worker\n\n  def perform; end\nend\n";
+        let no_violation = verify_source("app/workers/fresh.rb", conforming, &convs);
+        assert!(
+            !no_violation.iter().any(|v| v.message.contains("does not include")),
+            "a conforming worker was reported: {no_violation:#?}"
         );
     }
 
