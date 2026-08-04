@@ -13,6 +13,12 @@ use canon_extract::FileFacts;
 
 use crate::naming;
 use crate::semantic::family_of;
+use crate::vocabulary::{
+    ANNOTATION_PREFIX, BASE_PREFIX, CONTRACT_PREFIX, DEFAULT_EXPORT, ENTRYPOINT_PREFIX,
+    FAMILY_PREFIX, FORMAT_PREFIX, IMPORT_PREFIX, MACRO_PREFIX, MIXIN_PREFIX, MODULE_ARITY_PREFIX,
+    NAMED_EXPORTS, NAMESPACE_PREFIX, NAMING_PREFIX, PUBLIC_ARITY_PREFIX, Reads, SUFFIX_PREFIX,
+    backticked, family_of as family_by_id, trailing_count,
+};
 
 /// What a violation claims, independent of which rule noticed it.
 ///
@@ -96,22 +102,20 @@ fn verify_with(
     }
 
     // Structure is enough for every check that reads declarations, and skipping
-    // the query pass is most of what makes a write cheap. Import, annotation
-    // and macro rules are the exception: all three are derived from the query
-    // pass, so checking them against the structural facts would compare two
-    // different readings of the same file. Enforcement never needs this —
-    // none of the three families is ever Blocking — so the hot path keeps the
-    // cheap pass and only `PostToolUse`, after the write has already landed,
-    // pays for it.
+    // the query pass is most of what makes a write cheap: compiling a
+    // tree-sitter query dominates the cost of a single write. A family derived
+    // from the query pass is the exception, because checking one against the
+    // structural facts compares two different readings of the same file — and
+    // does not go quiet about it, since the field it wants is empty in the
+    // cheap pass and the check then reports a violation against every file.
     //
-    // Annotations and calls come from the query pass, which `extract_structure`
-    // skips because compiling a query dominates the cost of a single write.
-    // Paying it only when a rule in scope actually asks about those facts keeps
-    // the hot path at structure-only for the files that need nothing more.
+    // Read off [`FAMILIES`] rather than listed here. A family that needed the
+    // query pass and was left off a list in this function had nothing to say
+    // so; declaring it beside the family is the same knowledge in the one
+    // place a new family is already being written.
     let wants_query_pass = applicable.iter().any(|c| {
-        (c.id.starts_with("shape.import") && has_import_statement(c))
-            || c.id.starts_with("shape.annotation")
-            || c.id.starts_with("shape.macros")
+        family_by_id(&c.id)
+            .is_some_and(|f| f.reads == Reads::Query && f.spelling.parses(&c.statement))
     });
     let facts = extension_of(rel).and_then(canon_extract::lang::from_extension).and_then(|l| {
         if wants_query_pass {
@@ -217,7 +221,12 @@ fn extension_of(rel: &str) -> Option<&str> {
 
 fn check_naming(rel: &str, convention: &Convention) -> Option<(Claim, Violation)> {
     let expected = convention.id.starts_with("naming.").then(|| {
-        naming::Style::ALL.iter().copied().find(|s| convention.statement.contains(s.label()))
+        // Read off the words the derivation wrote, not looked for anywhere in
+        // the sentence: `Files here are named ` is a strict prefix of this
+        // one, so a `format.` statement naming `*.snake_case.erb` would
+        // otherwise answer as a style rule too.
+        let label = convention.statement.strip_prefix(NAMING_PREFIX)?;
+        naming::Style::ALL.iter().copied().find(|s| s.label() == label)
     })??;
     // The same root the rule was derived from. Reading up to the last dot here
     // and up to the first dot there would report `Button.module.css` as
@@ -361,30 +370,6 @@ fn is_below(dir: &str, ancestor: &str) -> bool {
     dir.strip_prefix(ancestor).is_some_and(|rest| rest.starts_with('/'))
 }
 
-const IMPORT_PREFIX: &str = "Files here import from ";
-const SUFFIX_PREFIX: &str = "Test files are named ";
-const FORMAT_PREFIX: &str = "Files here are named ";
-// Deliberately without a trailing backtick, unlike `NAMESPACE_PREFIX` and its
-// neighbours. `backticked` splits on the prefix and only then strips a
-// leading backtick from what remains; a prefix that already ends in one
-// leaves nothing left to strip and returns `None` for every file, deriving
-// the rule and never checking it — the same defect `check_annotation`'s doc
-// comment describes.
-const FAMILY_PREFIX: &str = "Types here inherit from a ";
-// Same reasoning as `FAMILY_PREFIX`: no trailing backtick, so `backticked`
-// has one left to strip from what follows the prefix instead of finding none
-// and returning `None` for every file.
-const MIXIN_PREFIX: &str = "Types here include ";
-// Same reasoning again: no trailing backtick, so `backticked` has one left to
-// strip from what follows the prefix instead of finding none and returning
-// `None` for every file.
-const CONTRACT_PREFIX: &str = "Types here implement ";
-// A strict prefix of `FAMILY_PREFIX`. Safe only because `backticked` requires
-// a backtick immediately after whatever it split on, so the family statement's
-// `a ` stops it; see `no_statement_parses_under_another_familys_prefix`.
-const BASE_PREFIX: &str = "Types here inherit from ";
-const ENTRYPOINT_PREFIX: &str = "That public method is named ";
-
 /// "Views here are named `*.html.erb`."
 ///
 /// Path-only, like the rule it checks. `show.erb` is not a template Rails will
@@ -432,10 +417,6 @@ fn check_qualifier(rel: &str, convention: &Convention) -> Option<(Claim, Violati
             ),
         },
     ))
-}
-
-fn has_import_statement(convention: &Convention) -> bool {
-    backticked(&convention.statement, IMPORT_PREFIX).is_some()
 }
 
 /// "Files here import from `rails_helper`."
@@ -557,12 +538,6 @@ fn check_macro(facts: &FileFacts, convention: &Convention) -> Option<(Claim, Vio
     ))
 }
 
-const DEFAULT_EXPORT: &str = "Files here export a default";
-const NAMED_EXPORTS: &str = "Files here use named exports";
-const NAMESPACE_PREFIX: &str = "Files here declare namespace ";
-const ANNOTATION_PREFIX: &str = "Files here carry `@";
-const MACRO_PREFIX: &str = "Files here use ";
-
 /// "Files here export a default."
 ///
 /// Checked against what the module actually exports, which is how the rule was
@@ -674,184 +649,198 @@ fn check_test_suffix(rel: &str, convention: &Convention) -> Option<(Claim, Viola
     ))
 }
 
+/// One file, read as far as a shape rule needs it.
+struct Shaped<'a> {
+    facts: &'a FileFacts,
+    /// The file's primary type, when it has one. Every check below but
+    /// `shape.module-arity` is about that type and not about the others
+    /// beside it: a namespace module and a small error class are not what the
+    /// convention was derived from, and judging them reports correct files as
+    /// broken.
+    subject: Option<&'a canon_extract::TypeFacts>,
+    strictness: Strictness,
+    /// The counts and the scope they were counted over, rendered once. The
+    /// scope travels with the counts because a bare "47/52" beside a sentence
+    /// about "this directory" invites the reader to count the directory and
+    /// find a different number, the rule having been counted over an ancestor
+    /// of it.
+    evidence: String,
+}
+
+/// Every check a shape rule can make, in the order the reader sees them.
+///
+/// A table rather than a run of `if let` arms in one body. That body had
+/// already been split in two to stay inside the length `clippy::pedantic`
+/// allows, and a function split for its length is a list of independent things
+/// wearing a function's clothes. Each arm now names itself and parses its
+/// statement with the family's own words from [`crate::vocabulary`].
+type ShapeCheck = fn(&Shaped<'_>, &Convention) -> Option<(Claim, Violation)>;
+const SHAPE_CHECKS: &[ShapeCheck] = &[
+    check_module_arity,
+    check_public_arity,
+    check_entrypoint,
+    check_base,
+    check_family,
+    check_mixin,
+    check_contract,
+];
+
 fn check_shape(
     facts: &FileFacts,
     subject: Option<&canon_extract::TypeFacts>,
     convention: &Convention,
     strictness: Strictness,
 ) -> Vec<(Claim, Violation)> {
-    // The scope travels with the counts. A bare "47/52" beside a sentence about
-    // "this directory" invites the reader to check the directory and find a
-    // different number, because the rule may have been counted repository-wide.
-    let evidence = format!(
-        "{}/{} matching {}",
-        convention.agreeing,
-        convention.total,
-        convention.scope.render()
-    );
-    let mut out = Vec::new();
-
-    if let Some(expected) = trailing_count(&convention.statement, "export exactly ") {
-        // Only meaningful for a module with no types, which is how the rule
-        // was derived. A file that introduces a class is a different shape,
-        // not a violation of this one.
-        // A file that declares nothing at all never voted — `gather` drops it
-        // before derivation — so it cannot have broken the rule it produced.
-        if facts.types.is_empty()
-            && !declares_nothing(facts)
-            && facts.free_functions.len() != expected
-        {
-            out.push((
-                ("shape.module-arity", String::new()),
-                Violation {
-                    convention_id: convention.id.clone(),
-                    message: format!(
-                        "this file exports {} function(s); files here export {expected} ({evidence}): {}",
-                        facts.free_functions.len(),
-                        facts.free_functions.join(", ")
-                    ),
-                },
-            ));
-        }
-    }
-
-    // The subject, not every declared type. A namespace module and a small
-    // error class beside the real one are not what the convention was derived
-    // from, and judging them reports correct files as broken.
-    let Some(t) = subject else { return out };
-
-    // Advising on any arity is useful; refusing on a larger one is not. The
-    // rule is derived over types with exactly this many methods, and a type
-    // that carries one more is routinely legitimate: a Rails migration needs
-    // `up` and `down` for an irreversible change, a Go type implements
-    // `fmt.Stringer`, a Ruby object defines `to_s`, a TypeScript class exposes
-    // a getter. Each of those was a hard refusal, and the advice attached to it
-    // told the author to delete a method the language or framework requires.
-    let arity_may_refuse =
-        strictness == Strictness::Advisory || t.public_arity() < expected_arity(convention);
-    if let Some(expected) = trailing_count(&convention.statement, "expose exactly ")
-        && t.public_arity() != expected
-        && arity_may_refuse
-    {
-        out.push((
-            ("shape.public-arity", t.name.clone()),
-            Violation {
-                convention_id: convention.id.clone(),
-                message: format!(
-                    "`{}` exposes {} public method(s); types here expose {expected} ({evidence}): {}",
-                    t.name,
-                    t.public_arity(),
-                    t.public_methods.join(", ")
-                ),
-            },
-        ));
-    }
-
-    // Whatever the arity, when advising. Gating that on a single public method
-    // withheld the rule from exactly the files that broke it hardest: a type
-    // with `up` and `down` was told its count was wrong and never told the
-    // expected name, which is two round trips to fix one file.
-    //
-    // A refusal is gated, because the rule was derived over the files with one
-    // public method and says nothing about the rest.
-    let entrypoint_applies = strictness == Strictness::Advisory || t.public_arity() == 1;
-    if let Some(expected) = backticked(&convention.statement, ENTRYPOINT_PREFIX)
-        && entrypoint_applies
-        && !t.public_methods.is_empty()
-        && !t.public_methods.contains(&expected)
-    {
-        let message = if t.public_arity() == 1 {
-            format!(
-                "`{}` exposes `{}`; the entrypoint here is named `{expected}` ({evidence})",
-                t.name,
-                t.public_methods.first().map_or("", String::as_str)
-            )
-        } else {
-            format!(
-                "`{}` exposes {} but not `{expected}`; the entrypoint here is named `{expected}` ({evidence})",
-                t.name,
-                t.public_methods.join(", ")
-            )
-        };
-        out.push((
-            ("shape.entrypoint", t.name.clone()),
-            Violation { convention_id: convention.id.clone(), message },
-        ));
-    }
-
-    if let Some(expected) = backticked(&convention.statement, BASE_PREFIX) {
-        {
-            // A type may declare several contracts, or embed several types, and
-            // which one landed in `superclass` is decided by source order for
-            // an interface and by an unordered set for an embed. Accepting a
-            // match from either `interfaces` or `mixins` stops a refusal from
-            // depending on where the author put a block or which embedded
-            // field the extractor chose to call the base.
-            match &t.superclass {
-                _ if t.interfaces.contains(&expected) || t.mixins.contains(&expected) => {}
-                Some(actual) if actual == &expected => {}
-                Some(actual) => out.push((
-                    ("shape.base", t.name.clone()),
-                    Violation {
-                        convention_id: convention.id.clone(),
-                        message: format!(
-                            "`{}` inherits from `{actual}`; types here inherit from `{expected}` ({evidence})",
-                            t.name
-                        ),
-                    },
-                )),
-                None => out.push((
-                    ("shape.base", t.name.clone()),
-                    Violation {
-                        convention_id: convention.id.clone(),
-                        message: format!(
-                            "`{}` has no base type; types here inherit from `{expected}` ({evidence})",
-                            t.name
-                        ),
-                    },
-                )),
-            }
-        }
-    }
-
-    out.extend(check_type_relations(t, convention, &evidence));
-
-    out
+    let at = Shaped {
+        facts,
+        subject,
+        strictness,
+        evidence: format!(
+            "{}/{} matching {}",
+            convention.agreeing,
+            convention.total,
+            convention.scope.render()
+        ),
+    };
+    SHAPE_CHECKS.iter().filter_map(|check| check(&at, convention)).collect()
 }
 
-/// [`check_family`], [`check_mixin`] and [`check_contract`], called as one.
+/// "Files here export exactly 1 function."
 ///
-/// [`check_shape`] already sits at the length `clippy::pedantic` allows, so a
-/// third arm calling each check in turn would grow it past that limit; this
-/// exists only to keep the addition to a single line there. Named for what
-/// the three have in common — every one of them checks a type against
-/// something it relates to beyond its own body — rather than "composition",
-/// which `TypeFacts::mixins`'s own doc comment already gives a narrower
-/// meaning.
-fn check_type_relations(
-    t: &canon_extract::TypeFacts,
-    convention: &Convention,
-    evidence: &str,
-) -> Vec<(Claim, Violation)> {
-    check_family(t, convention, evidence)
-        .into_iter()
-        .chain(check_mixin(t, convention, evidence))
-        .chain(check_contract(t, convention, evidence))
-        .collect()
+/// Only meaningful for a module with no types, which is how the rule was
+/// derived: a file that introduces a class is a different shape, not a
+/// violation of this one. A file that declares nothing at all never voted —
+/// `gather` drops it before derivation — so it cannot have broken the rule it
+/// produced.
+fn check_module_arity(at: &Shaped<'_>, convention: &Convention) -> Option<(Claim, Violation)> {
+    let expected = trailing_count(&convention.statement, MODULE_ARITY_PREFIX)?;
+    if !at.facts.types.is_empty()
+        || declares_nothing(at.facts)
+        || at.facts.free_functions.len() == expected
+    {
+        return None;
+    }
+    Some((
+        ("shape.module-arity", String::new()),
+        Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "this file exports {} function(s); files here export {expected} ({}): {}",
+                at.facts.free_functions.len(),
+                at.evidence,
+                at.facts.free_functions.join(", ")
+            ),
+        },
+    ))
+}
+
+/// "Types here expose exactly 1 public method."
+///
+/// Advising on any arity is useful; refusing on a larger one is not. The rule
+/// is derived over types with exactly this many methods, and a type that
+/// carries one more is routinely legitimate: a Rails migration needs `up` and
+/// `down` for an irreversible change, a Go type implements `fmt.Stringer`, a
+/// Ruby object defines `to_s`, a TypeScript class exposes a getter. Each of
+/// those was a hard refusal, and the advice attached to it told the author to
+/// delete a method the language or framework requires.
+fn check_public_arity(at: &Shaped<'_>, convention: &Convention) -> Option<(Claim, Violation)> {
+    let t = at.subject?;
+    let expected = trailing_count(&convention.statement, PUBLIC_ARITY_PREFIX)?;
+    if t.public_arity() == expected {
+        return None;
+    }
+    if at.strictness != Strictness::Advisory && t.public_arity() >= expected {
+        return None;
+    }
+    Some((
+        ("shape.public-arity", t.name.clone()),
+        Violation {
+            convention_id: convention.id.clone(),
+            message: format!(
+                "`{}` exposes {} public method(s); types here expose {expected} ({}): {}",
+                t.name,
+                t.public_arity(),
+                at.evidence,
+                t.public_methods.join(", ")
+            ),
+        },
+    ))
+}
+
+/// "That public method is named `call`."
+///
+/// Stated whatever the arity, when advising. Gating that on a single public
+/// method withheld the rule from exactly the files that broke it hardest: a
+/// type with `up` and `down` was told its count was wrong and never told the
+/// expected name, which is two round trips to fix one file.
+///
+/// A refusal is gated, because the rule was derived over the files with one
+/// public method and says nothing about the rest.
+fn check_entrypoint(at: &Shaped<'_>, convention: &Convention) -> Option<(Claim, Violation)> {
+    let t = at.subject?;
+    let expected = backticked(&convention.statement, ENTRYPOINT_PREFIX)?;
+    if at.strictness != Strictness::Advisory && t.public_arity() != 1 {
+        return None;
+    }
+    if t.public_methods.is_empty() || t.public_methods.contains(&expected) {
+        return None;
+    }
+    let message = if t.public_arity() == 1 {
+        format!(
+            "`{}` exposes `{}`; the entrypoint here is named `{expected}` ({})",
+            t.name,
+            t.public_methods.first().map_or("", String::as_str),
+            at.evidence
+        )
+    } else {
+        format!(
+            "`{}` exposes {} but not `{expected}`; the entrypoint here is named `{expected}` ({})",
+            t.name,
+            t.public_methods.join(", "),
+            at.evidence
+        )
+    };
+    Some((
+        ("shape.entrypoint", t.name.clone()),
+        Violation { convention_id: convention.id.clone(), message },
+    ))
+}
+
+/// "Types here inherit from `ApplicationService`."
+///
+/// A type may declare several contracts, or embed several types, and which one
+/// landed in `superclass` is decided by source order for an interface and by an
+/// unordered set for an embed. Accepting a match from either `interfaces` or
+/// `mixins` stops a refusal from depending on where the author put a block or
+/// which embedded field the extractor chose to call the base.
+fn check_base(at: &Shaped<'_>, convention: &Convention) -> Option<(Claim, Violation)> {
+    let t = at.subject?;
+    let expected = backticked(&convention.statement, BASE_PREFIX)?;
+    if t.interfaces.contains(&expected) || t.mixins.contains(&expected) {
+        return None;
+    }
+    let message = match &t.superclass {
+        Some(actual) if actual == &expected => return None,
+        Some(actual) => format!(
+            "`{}` inherits from `{actual}`; types here inherit from `{expected}` ({})",
+            t.name, at.evidence
+        ),
+        None => format!(
+            "`{}` has no base type; types here inherit from `{expected}` ({})",
+            t.name, at.evidence
+        ),
+    };
+    Some((
+        ("shape.base", t.name.clone()),
+        Violation { convention_id: convention.id.clone(), message },
+    ))
 }
 
 /// "Types here inherit from a `*BaseController`."
 ///
-/// A dedicated function rather than another arm of [`check_shape`]: that
-/// function already carries the `shape.base` arm this sits beside in the
-/// derivation, and folding both into one body reads past the length
-/// `clippy::pedantic` allows.
-///
-/// A type may declare several contracts, or embed several types, and which
-/// one landed in `superclass` is decided by source order for an interface and
-/// by an unordered set for an embed — the same reasoning that lets the
-/// `shape.base` arm accept a match from `interfaces` or `mixins` applies
-/// here.
+/// A type may declare several contracts, or embed several types, and which one
+/// landed in `superclass` is decided by source order for an interface and by
+/// an unordered set for an embed — the same reasoning [`check_base`] applies.
 ///
 /// Claims `shape.base`, not a family of its own. The derivation withholds the
 /// family rule only where the exact one won *at the same scope*, and scopes
@@ -860,11 +849,8 @@ fn check_type_relations(
 /// the narrower one. Two claims let one wrong base produce two lines saying
 /// different things about it; one claim lets the narrower rule win, which is
 /// what the deduplication exists to do.
-fn check_family(
-    t: &canon_extract::TypeFacts,
-    convention: &Convention,
-    evidence: &str,
-) -> Option<(Claim, Violation)> {
+fn check_family(at: &Shaped<'_>, convention: &Convention) -> Option<(Claim, Violation)> {
+    let t = at.subject?;
     let expected = backticked(&convention.statement, FAMILY_PREFIX)?;
     // The statement names a suffix, spelled `*Suffix`, because the family is
     // what several namespaced bases share and the namespace is exactly what
@@ -881,9 +867,10 @@ fn check_family(
         Violation {
             convention_id: convention.id.clone(),
             message: format!(
-                "`{}` inherits from `{}`; types here inherit from a `*{suffix}` ({evidence})",
+                "`{}` inherits from `{}`; types here inherit from a `*{suffix}` ({})",
                 t.name,
-                t.superclass.as_deref().unwrap_or("nothing")
+                t.superclass.as_deref().unwrap_or("nothing"),
+                at.evidence
             ),
         },
     ))
@@ -891,86 +878,52 @@ fn check_family(
 
 /// "Types here include `Sidekiq::Worker`."
 ///
-/// A dedicated function rather than another arm of [`check_shape`], for the
-/// same reason [`check_family`] is: that function already carries the
-/// `shape.base` arm this sits beside in the derivation, and folding every
-/// arm into one body reads past the length `clippy::pedantic` allows.
-///
-/// A Sidekiq worker or a Laravel job declares no superclass at all, so this
-/// asks about `mixins` on its own rather than falling back to `superclass`
-/// the way [`check_family`] does: there is nothing there to fall back to.
-fn check_mixin(
-    t: &canon_extract::TypeFacts,
-    convention: &Convention,
-    evidence: &str,
-) -> Option<(Claim, Violation)> {
-    let expected = backticked(&convention.statement, MIXIN_PREFIX)?;
-    if t.mixins.contains(&expected) {
-        return None;
-    }
-    Some((
-        ("shape.mixin", t.name.clone()),
-        Violation {
-            convention_id: convention.id.clone(),
-            message: format!(
-                "`{}` does not include `{expected}`; types here do ({evidence})",
-                t.name
-            ),
-        },
-    ))
+/// Reads `mixins` on its own rather than falling back to `superclass` the way
+/// [`check_family`] does: a Sidekiq worker or a Laravel job declares no
+/// superclass at all, so there is nothing there to fall back to.
+fn check_mixin(at: &Shaped<'_>, convention: &Convention) -> Option<(Claim, Violation)> {
+    check_declared(at, convention, MIXIN_PREFIX, ("shape.mixin", "include"), |t| &t.mixins)
 }
 
 /// "Types here implement `ShouldQueue`."
 ///
-/// A dedicated function rather than another arm of [`check_shape`], for the
-/// same reason [`check_family`] and [`check_mixin`] are: that function
-/// already carries the `shape.base` arm this sits beside in the derivation,
-/// and folding every arm into one body reads past the length
-/// `clippy::pedantic` allows.
-///
-/// Reads `interfaces` only, never `mixins`. `shape.contract` and
-/// `shape.mixin` state two different facts about a type — what it
-/// implements and what it composes — and checking either against the
-/// other's field would pass a file for implementing an interface it only
-/// included, or fail one for not including an interface it correctly
+/// Reads `interfaces` only, never `mixins`. The two state different facts
+/// about a type — what it declares and what it composes — and checking either
+/// against the other's field would pass a file for implementing an interface
+/// it only included, or fail one for not including an interface it correctly
 /// implements.
-fn check_contract(
-    t: &canon_extract::TypeFacts,
+fn check_contract(at: &Shaped<'_>, convention: &Convention) -> Option<(Claim, Violation)> {
+    check_declared(at, convention, CONTRACT_PREFIX, ("shape.contract", "implement"), |t| {
+        &t.interfaces
+    })
+}
+
+/// [`check_mixin`] and [`check_contract`], which are one check over two fields.
+///
+/// The fields stay apart for the reason [`check_contract`] gives; only the
+/// walk over one of them is shared.
+fn check_declared(
+    at: &Shaped<'_>,
     convention: &Convention,
-    evidence: &str,
+    prefix: &str,
+    (claim, verb): (&'static str, &str),
+    declared: fn(&canon_extract::TypeFacts) -> &Vec<String>,
 ) -> Option<(Claim, Violation)> {
-    let expected = backticked(&convention.statement, CONTRACT_PREFIX)?;
-    if t.interfaces.contains(&expected) {
+    let t = at.subject?;
+    let expected = backticked(&convention.statement, prefix)?;
+    if declared(t).contains(&expected) {
         return None;
     }
     Some((
-        ("shape.contract", t.name.clone()),
+        (claim, t.name.clone()),
         Violation {
             convention_id: convention.id.clone(),
             message: format!(
-                "`{}` does not implement `{expected}`; types here do ({evidence})",
-                t.name
+                "`{}` does not {verb} `{expected}`; types here do ({})",
+                t.name, at.evidence
             ),
         },
     ))
-}
-
-/// The arity a statement asks for, or zero when it asks for none.
-fn expected_arity(convention: &Convention) -> usize {
-    trailing_count(&convention.statement, "expose exactly ").unwrap_or(0)
-}
-
-/// The integer immediately after `prefix`, e.g. `1` in "expose exactly 1 ...".
-fn trailing_count(statement: &str, prefix: &str) -> Option<usize> {
-    let rest = statement.split_once(prefix)?.1;
-    rest.split_whitespace().next()?.parse().ok()
-}
-
-/// The backticked identifier immediately after `prefix`.
-fn backticked(statement: &str, prefix: &str) -> Option<String> {
-    let rest = statement.split_once(prefix)?.1;
-    let inner = rest.strip_prefix('`')?;
-    inner.split_once('`').map(|(name, _)| name.to_string())
 }
 
 /// "Every file here has a test of the same name."
@@ -1597,83 +1550,220 @@ mod tests {
         }
     }
 
-    /// Every statement format in the vocabulary, paired with the prefix its
-    /// check splits it on.
+    /// A file that satisfies a rule of one family, and one that breaks it.
     ///
-    /// `ANNOTATION_PREFIX` carries its own opening backtick and is parsed
-    /// with `strip_prefix` rather than with [`backticked`], so it is listed
-    /// for its statement and skipped when the assertion is about the prefix.
-    const VOCABULARY: &[(&str, &str)] = &[
-        (BASE_PREFIX, "Types here inherit from `ApplicationService`"),
-        (FAMILY_PREFIX, "Types here inherit from a `*BaseController`"),
-        (MIXIN_PREFIX, "Types here include `Sidekiq::Worker`"),
-        (CONTRACT_PREFIX, "Types here implement `ShouldQueue`"),
-        (ENTRYPOINT_PREFIX, "That public method is named `call`"),
-        (IMPORT_PREFIX, "Files here import from `src/config`"),
-        (MACRO_PREFIX, "Files here use `defineProps`"),
-        (NAMESPACE_PREFIX, "Files here declare namespace `App\\Services`"),
-        (FORMAT_PREFIX, "Files here are named `*.html.erb`"),
-        (SUFFIX_PREFIX, "Test files are named `*_spec.rb`"),
-        (ANNOTATION_PREFIX, "Files here carry `@Injectable`"),
+    /// Each row is `(id, the value the statement names, a conforming path and
+    /// body, an offending path and body)`. The statement itself is formatted
+    /// from the family's own [`crate::vocabulary::Spelling`], so a row cannot
+    /// go on testing a sentence the derivation stopped writing.
+    type Case =
+        (&'static str, &'static str, (&'static str, &'static str), (&'static str, &'static str));
+
+    const CASES: &[Case] = &[
+        (
+            "naming.",
+            "snake_case",
+            ("app/services/charge_card.rb", "class ChargeCard\n  def call; end\nend\n"),
+            ("app/services/ChargeCard.rb", "class ChargeCard\n  def call; end\nend\n"),
+        ),
+        (
+            "tests.suffix",
+            "*_spec.rb",
+            ("spec/models/thing_spec.rb", "RSpec.describe Thing do\nend\n"),
+            ("spec/models/thing_test.rb", "RSpec.describe Thing do\nend\n"),
+        ),
+        (
+            "format.",
+            "*.html.erb",
+            ("app/views/orders/show.html.erb", "<h1>x</h1>\n"),
+            ("app/views/orders/show.erb", "<h1>x</h1>\n"),
+        ),
+        (
+            "shape.import",
+            "@repo/ui",
+            (
+                "src/services/charge.ts",
+                "import { x } from '@repo/ui';\nexport function charge() { return x; }\n",
+            ),
+            (
+                "src/services/charge.ts",
+                "import { x } from '@repo/other';\nexport function charge() { return x; }\n",
+            ),
+        ),
+        (
+            "shape.export",
+            "default",
+            ("src/components/Card.tsx", "const Card = () => null;\nexport default Card;\n"),
+            ("src/components/Card.tsx", "export const Card = () => null;\n"),
+        ),
+        (
+            "shape.namespace",
+            "App\\Services",
+            (
+                "src/Services/ChargeCard.php",
+                "<?php\nnamespace App\\Services;\nclass ChargeCard { public function handle() {} }\n",
+            ),
+            (
+                "src/Services/ChargeCard.php",
+                "<?php\nnamespace App\\Other;\nclass ChargeCard { public function handle() {} }\n",
+            ),
+        ),
+        (
+            "shape.annotation",
+            "Injectable",
+            ("src/orders/orders.ts", "@Injectable()\nexport class Orders { list() {} }\n"),
+            ("src/orders/orders.ts", "@Controller()\nexport class Orders { list() {} }\n"),
+        ),
+        (
+            "shape.macros",
+            "add_action",
+            ("src/hooks/setup.php", "<?php\nadd_action('init', 'setup');\n"),
+            ("src/hooks/setup.php", "<?php\nadd_filter('title', 'rewrite');\n"),
+        ),
+        (
+            "shape.module-arity",
+            "1",
+            ("src/hooks/use_thing.ts", "export function useThing() { return 1; }\n"),
+            (
+                "src/hooks/use_thing.ts",
+                "export function useThing() { return 1; }\nexport function useOther() { return 2; }\n",
+            ),
+        ),
+        (
+            "shape.public-arity",
+            "1",
+            ("app/services/create.rb", "class Create\n  def call; end\nend\n"),
+            ("app/services/create.rb", "class Create\n  def call; end\n  def extra; end\nend\n"),
+        ),
+        (
+            "shape.entrypoint",
+            "call",
+            ("app/services/create.rb", "class Create\n  def call; end\nend\n"),
+            ("app/services/create.rb", "class Create\n  def perform; end\nend\n"),
+        ),
+        (
+            "shape.base",
+            "ApplicationService",
+            ("app/services/create.rb", "class Create < ApplicationService\n  def call; end\nend\n"),
+            ("app/services/create.rb", "class Create < Other\n  def call; end\nend\n"),
+        ),
+        (
+            "shape.family",
+            "*BaseController",
+            (
+                "app/controllers/orders_controller.rb",
+                "class OrdersController < Api::V1::BaseController\n  def index; end\nend\n",
+            ),
+            (
+                "app/controllers/orders_controller.rb",
+                "class OrdersController < Other\n  def index; end\nend\n",
+            ),
+        ),
+        (
+            "shape.mixin",
+            "Sidekiq::Worker",
+            (
+                "app/workers/charge_worker.rb",
+                "class ChargeWorker\n  include Sidekiq::Worker\n  def perform; end\nend\n",
+            ),
+            ("app/workers/charge_worker.rb", "class ChargeWorker\n  def perform; end\nend\n"),
+        ),
+        (
+            "shape.contract",
+            "ShouldQueue",
+            (
+                "app/Jobs/ChargeCard.php",
+                "<?php\nclass ChargeCard implements ShouldQueue { public function handle() {} }\n",
+            ),
+            (
+                "app/Jobs/ChargeCard.php",
+                "<?php\nclass ChargeCard { public function handle() {} }\n",
+            ),
+        ),
     ];
 
-    /// The statements that name nothing in backticks. They still have to stay
-    /// out of every prefix's way, and two of them are the reason the guard is
-    /// needed: `Files here use named exports` sits under `MACRO_PREFIX`, and
-    /// `Files here are named in snake_case` under `FORMAT_PREFIX`.
-    const UNBACKTICKED: &[&str] = &[
-        "Files here export a default",
-        "Files here use named exports",
-        "Files here are named in snake_case",
-        "Types here expose exactly 1 public method",
-        "Files here export exactly 1 function",
-        "Files here call `Ledger`",
-        "Every file here has a test of the same name",
+    /// The families [`verify_source`] deliberately never answers for, and why.
+    const UNCHECKED: &[&str] = &[
+        // The one check that cannot be answered from the file alone: it has to
+        // look for a sibling that does not exist yet. See `missing_test`.
+        "tests.colocation",
+        // Derived and deliberately unchecked. A layering rule states who a
+        // directory talks to, and a file that talks to someone else is
+        // describing a different job rather than breaking one.
+        "shape.collaborator",
     ];
+
+    /// A rule of `family` naming `value`, worded the way the derivation words
+    /// one and scoped to the directory the fixture sits in.
+    fn rule_for(family: &crate::vocabulary::Family, value: &str, rel: &str) -> Convention {
+        let statement = match family.spelling {
+            crate::vocabulary::Spelling::Named(p) => format!("{p}`{value}`"),
+            crate::vocabulary::Spelling::Prefixed(p) => format!("{p}{value}`"),
+            crate::vocabulary::Spelling::Counted(p) => {
+                // The noun after the count is the family's own; it is not read
+                // by anything, and `trailing_count` stops at the first word.
+                format!("{p}{value} thing")
+            }
+            crate::vocabulary::Spelling::Labelled(p) => format!("{p}{value}"),
+            crate::vocabulary::Spelling::OneOf(whole) => whole
+                .iter()
+                .find(|s| s.contains(value))
+                .map_or_else(String::new, |s| (*s).to_string()),
+        };
+        let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
+        let mut rule = conv(&format!("{}fixture.{ext}", family.id), &statement);
+        rule.scope = Scope::DirExt(dir.into(), ext.into());
+        rule
+    }
 
     #[test]
-    fn no_statement_parses_under_another_familys_prefix() {
-        // `Types here inherit from ` is a strict prefix of `Types here
-        // inherit from a `, and `Files here use ` of `Files here use named
-        // exports`. Both are safe only because `backticked` requires a
-        // backtick immediately after the prefix it split on, and that one
-        // character is the entire separation between correct behaviour and a
-        // rule that derives, injects and is never checked — a failure that
-        // shipped three times on this branch, once per prefix added, each
-        // time with nothing to say so.
-        for (i, (_, statement)) in VOCABULARY.iter().enumerate() {
-            for (j, (prefix, _)) in VOCABULARY.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-                assert_eq!(
-                    backticked(statement, prefix),
-                    None,
-                    "`{statement}` parses under another family's prefix `{prefix}`"
-                );
-            }
-            for other in UNBACKTICKED {
-                assert_eq!(
-                    backticked(other, VOCABULARY[i].0),
-                    None,
-                    "`{other}` parses under `{}`",
-                    VOCABULARY[i].0
-                );
-            }
-        }
-        // And each family still parses its own, or the guard above is
-        // satisfied by a check that stopped working altogether.
-        for (prefix, statement) in VOCABULARY {
-            if *prefix == ANNOTATION_PREFIX {
-                assert_eq!(
-                    statement.strip_prefix(ANNOTATION_PREFIX).and_then(|r| r.strip_suffix('`')),
-                    Some("Injectable")
-                );
-                continue;
-            }
+    fn every_family_is_checked_against_the_pass_its_facts_come_from() {
+        // The guard both halves of the vocabulary rest on, and the reason it
+        // is executable rather than a list of literals.
+        //
+        // A family whose check no longer parses the sentence the derivation
+        // writes goes silent, with nothing to say so; that shipped three
+        // times, once per prefix added. A family that reads a fact only the
+        // query pass records and is not declared `Reads::Query` does the
+        // opposite and is just as quiet: `extract_structure` leaves the field
+        // empty, so its check reports a violation against every file in scope.
+        // `FileFacts::raises` is extracted, has a pattern in every language's
+        // query and is read by no rule — the next family to use it walks
+        // straight into this.
+        for (id, value, (good_rel, good), (bad_rel, bad)) in CASES {
+            let family =
+                crate::vocabulary::family_of(id).unwrap_or_else(|| panic!("no family for {id}"));
+            let rule = rule_for(family, value, good_rel);
+            let clean = verify_source(good_rel, good, std::slice::from_ref(&rule));
             assert!(
-                backticked(statement, prefix).is_some(),
-                "`{prefix}` no longer finds the name in `{statement}`"
+                clean.is_empty(),
+                "`{}` reports against a file that satisfies it: {clean:#?}",
+                rule.statement
+            );
+
+            let rule = rule_for(family, value, bad_rel);
+            let found = verify_source(bad_rel, bad, std::slice::from_ref(&rule));
+            assert_eq!(
+                found.len(),
+                1,
+                "`{}` said nothing about a file that breaks it, or said it twice: {found:#?}",
+                rule.statement
+            );
+        }
+    }
+
+    #[test]
+    fn every_family_has_a_case_or_a_reason_to_have_none() {
+        // So a family cannot be added to the table without either a fixture
+        // proving its check is live or a written reason there is no check.
+        for family in crate::vocabulary::FAMILIES {
+            let covered =
+                CASES.iter().any(|(id, ..)| *id == family.id) || UNCHECKED.contains(&family.id);
+            assert!(
+                covered,
+                "`{}` is in the vocabulary with neither a case nor a reason",
+                family.id
             );
         }
     }

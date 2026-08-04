@@ -11,6 +11,7 @@ use canon_core::{Confidence, Convention, Enforcement, Evidence, Settings};
 use canon_extract::FileFacts;
 
 use crate::tier0::{id_fragment, scope_for};
+use crate::vocabulary::{self, DEFAULT_EXPORT, NAMED_EXPORTS};
 use crate::walk::FileEntry;
 
 /// Facts for one file, tagged with where it lives and how much it counts.
@@ -193,11 +194,11 @@ fn export_style(
         .collect();
     let (default_export, confidence, agreeing) = majority(&observations, settings)?;
     Some(Convention {
-        id: format!("shape.export.{}.{ext}", id_fragment(dir)),
+        id: format!("{}.{}.{ext}", vocabulary::EXPORT.id, id_fragment(dir)),
         statement: if default_export {
-            "Files here export a default".to_string()
+            DEFAULT_EXPORT.to_string()
         } else {
-            "Files here use named exports".to_string()
+            NAMED_EXPORTS.to_string()
         },
         scope: scope_for(dir, ext),
         confidence,
@@ -239,8 +240,8 @@ fn namespace(
     let (winner, confidence, agreeing) = majority(&observations, settings)?;
     let declared = winner.clone()?;
     Some(Convention {
-        id: format!("shape.namespace.{}.{ext}", id_fragment(dir)),
-        statement: format!("Files here declare namespace `{declared}`"),
+        id: format!("{}.{}.{ext}", vocabulary::NAMESPACE.id, id_fragment(dir)),
+        statement: vocabulary::NAMESPACE.spelling.say(&declared),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
@@ -345,13 +346,12 @@ fn public_arity(
     // suffix — and handed a bare family none of them can fire, so the grade
     // stored in the snapshot disagreed with the one the write path recomputes
     // from the same id.
-    let id = format!("shape.public-arity.{}.{ext}", id_fragment(dir));
+    let id = format!("{}.{}.{ext}", vocabulary::PUBLIC_ARITY.id, id_fragment(dir));
     let scope = scope_for(dir, ext);
     Some(Convention {
-        statement: format!(
-            "Types here expose exactly {arity} public method{}",
-            if arity == 1 { "" } else { "s" }
-        ),
+        statement: vocabulary::PUBLIC_ARITY
+            .spelling
+            .say(&format!("{arity} public method{}", if arity == 1 { "" } else { "s" })),
         confidence,
         agreeing,
         total: observations.len(),
@@ -388,10 +388,10 @@ fn entrypoint_name(
         .collect();
     let (name, confidence, agreeing) = majority(&observations, settings)?;
     // The whole id; see `public_arity`.
-    let id = format!("shape.entrypoint.{}.{ext}", id_fragment(dir));
+    let id = format!("{}.{}.{ext}", vocabulary::ENTRYPOINT.id, id_fragment(dir));
     let scope = scope_for(dir, ext);
     Some(Convention {
-        statement: format!("That public method is named `{name}`"),
+        statement: vocabulary::ENTRYPOINT.spelling.say(&name),
         confidence,
         agreeing,
         total: observations.len(),
@@ -426,10 +426,10 @@ fn base_class(
     // whose base is whichever of several the author wrote first. A bare
     // `shape.base` hides that extension, so a Python rule was stored
     // `Blocking` and recomputed `Advisory` on every write.
-    let id = format!("shape.base.{}.{ext}", id_fragment(dir));
+    let id = format!("{}.{}.{ext}", vocabulary::BASE.id, id_fragment(dir));
     let scope = scope_for(dir, ext);
     Some(Convention {
-        statement: format!("Types here inherit from `{base}`"),
+        statement: vocabulary::BASE.spelling.say(&base),
         confidence,
         agreeing,
         total: observations.len(),
@@ -477,8 +477,8 @@ fn base_family(
     let (winner, confidence, agreeing) = majority(&observations, settings)?;
     let family = winner.clone()?;
     Some(Convention {
-        id: format!("shape.family.{}.{ext}", id_fragment(dir)),
-        statement: format!("Types here inherit from a `*{family}`"),
+        id: format!("{}.{}.{ext}", vocabulary::BASE_FAMILY.id, id_fragment(dir)),
+        statement: vocabulary::BASE_FAMILY.spelling.say(&format!("*{family}")),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
@@ -532,11 +532,10 @@ fn module_arity(
         return None;
     }
     Some(Convention {
-        id: format!("shape.module-arity.{}.{ext}", id_fragment(dir)),
-        statement: format!(
-            "Files here export exactly {count} function{}",
-            if count == 1 { "" } else { "s" }
-        ),
+        id: format!("{}.{}.{ext}", vocabulary::MODULE_ARITY.id, id_fragment(dir)),
+        statement: vocabulary::MODULE_ARITY
+            .spelling
+            .say(&format!("{count} function{}", if count == 1 { "" } else { "s" })),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
@@ -587,8 +586,8 @@ fn collaborator(
         return None;
     }
     Some(Convention {
-        id: format!("shape.collaborator.{}.{ext}", id_fragment(dir)),
-        statement: format!("Files here call `{name}`"),
+        id: format!("{}.{}.{ext}", vocabulary::COLLABORATOR.id, id_fragment(dir)),
+        statement: vocabulary::COLLABORATOR.spelling.say(&name),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
@@ -656,26 +655,7 @@ fn macros(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Op
             (*s, names)
         })
         .collect();
-    let winner = presence_winner(per_file.iter().map(|(s, names)| (names.as_slice(), s.weight)))?;
-
-    let observations: Vec<(bool, f32, &FactSet)> =
-        per_file.iter().map(|(s, names)| (names.contains(&winner), s.weight, *s)).collect();
-    let (agrees, confidence, agreeing) = majority(&observations, settings)?;
-    if !agrees {
-        return None;
-    }
-    Some(Convention {
-        id: format!("shape.macros.{}.{ext}", id_fragment(dir)),
-        statement: format!("Files here use `{winner}`"),
-        scope: scope_for(dir, ext),
-        confidence,
-        agreeing,
-        total: observations.len(),
-        exemplar: exemplar(&observations, &true),
-        evidence: evidence(&observations, &true),
-        sample_roots: Vec::new(),
-        enforcement: Enforcement::Advisory,
-    })
+    agreed_name(&vocabulary::MACROS, dir, ext, &per_file, settings)
 }
 
 /// Whether a receiverless call is a framework macro rather than plumbing.
@@ -766,8 +746,8 @@ fn import_source(
     let (winner, confidence, agreeing) = majority(&observations, settings)?;
     let module = winner.clone()?;
     Some(Convention {
-        id: format!("shape.import.{}.{ext}", id_fragment(dir)),
-        statement: format!("Files here import from `{module}`"),
+        id: format!("{}.{}.{ext}", vocabulary::IMPORT.id, id_fragment(dir)),
+        statement: vocabulary::IMPORT.spelling.say(&module),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
@@ -805,8 +785,32 @@ fn annotation(
         .iter()
         .map(|s| (*s, s.facts.annotations.iter().map(|a| a.name.clone()).collect()))
         .collect();
-    let winner = presence_winner(per_file.iter().map(|(s, names)| (names.as_slice(), s.weight)))?;
+    agreed_name(&vocabulary::ANNOTATION, dir, ext, &per_file, settings)
+}
 
+/// The one name a directory agrees on, out of a list per file.
+///
+/// Four families are this shape and differed only in which list they read and
+/// how the winner is worded: which annotation a file carries, which macro it
+/// calls, which module its type includes, which interface its type declares.
+/// Each collected its own votes, ran the same tally, and rebuilt the same
+/// `Convention` twenty lines at a time.
+///
+/// Counted by presence per file rather than by occurrence, for the reason
+/// [`presence_winner`] gives, and stated in the family's own words from
+/// [`crate::vocabulary`] so the sentence and the check that reads it cannot
+/// drift.
+///
+/// `Advisory` in every case. A directory that agrees on one of these can still
+/// legitimately hold the one file that carries none.
+fn agreed_name(
+    family: &vocabulary::Family,
+    dir: &str,
+    ext: &str,
+    per_file: &[(&FactSet, Vec<String>)],
+    settings: &Settings,
+) -> Option<Convention> {
+    let winner = presence_winner(per_file.iter().map(|(s, names)| (names.as_slice(), s.weight)))?;
     let observations: Vec<(bool, f32, &FactSet)> =
         per_file.iter().map(|(s, names)| (names.contains(&winner), s.weight, *s)).collect();
     let (agrees, confidence, agreeing) = majority(&observations, settings)?;
@@ -814,8 +818,8 @@ fn annotation(
         return None;
     }
     Some(Convention {
-        id: format!("shape.annotation.{}.{ext}", id_fragment(dir)),
-        statement: format!("Files here carry `@{winner}`"),
+        id: format!("{}.{}.{ext}", family.id, id_fragment(dir)),
+        statement: family.spelling.say(&winner),
         scope: scope_for(dir, ext),
         confidence,
         agreeing,
@@ -823,10 +827,20 @@ fn annotation(
         exemplar: exemplar(&observations, &true),
         evidence: evidence(&observations, &true),
         sample_roots: Vec::new(),
-        // Advisory. A directory of decorated classes can still legitimately
-        // gain the one plain helper class that carries nothing.
         enforcement: Enforcement::Advisory,
     })
+}
+
+/// What each member's subject declares in one of its fields.
+///
+/// Only the files with a resolvable subject, the restriction [`base_class`]
+/// applies: a namespace module or an unrelated nested type composes nothing
+/// and declares nothing, and must not vote about what one does.
+fn declared<'a>(
+    members: &[&'a FactSet],
+    field: fn(&canon_extract::TypeFacts) -> &Vec<String>,
+) -> Vec<(&'a FactSet, Vec<String>)> {
+    members.iter().filter_map(|s| Some((*s, field(s.subject()?).clone()))).collect()
 }
 
 /// The name the most members declare, weighted the way [`majority`] weighs a
@@ -884,33 +898,7 @@ fn presence_winner<'a>(lists: impl Iterator<Item = (&'a [String], f32)>) -> Opti
 /// the one [`presence_winner`] finds: the module the most files in the
 /// directory include, not whichever a within-file tie-break prefers.
 fn mixin(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> Option<Convention> {
-    let subjects: Vec<(&FactSet, &canon_extract::TypeFacts)> =
-        members.iter().filter_map(|s| Some((*s, s.subject()?))).collect();
-    let winner = presence_winner(subjects.iter().map(|(s, t)| (t.mixins.as_slice(), s.weight)))?;
-
-    let observations: Vec<(bool, f32, &FactSet)> = subjects
-        .iter()
-        .map(|(s, t)| (t.mixins.iter().any(|m| m == &winner), s.weight, *s))
-        .collect();
-    let (agrees, confidence, agreeing) = majority(&observations, settings)?;
-    if !agrees {
-        return None;
-    }
-    Some(Convention {
-        id: format!("shape.mixin.{}.{ext}", id_fragment(dir)),
-        statement: format!("Types here include `{winner}`"),
-        scope: scope_for(dir, ext),
-        confidence,
-        agreeing,
-        total: observations.len(),
-        exemplar: exemplar(&observations, &true),
-        evidence: evidence(&observations, &true),
-        sample_roots: Vec::new(),
-        // Advisory. A directory that mostly composes one module can still
-        // legitimately hold the one type that opts into another, or into
-        // none at all.
-        enforcement: Enforcement::Advisory,
-    })
+    agreed_name(&vocabulary::MIXIN, dir, ext, &declared(members, |t| &t.mixins), settings)
 }
 
 /// "Types here implement `ShouldQueue`."
@@ -947,34 +935,7 @@ fn contract(dir: &str, ext: &str, members: &[&FactSet], settings: &Settings) -> 
     ) {
         return None;
     }
-    let subjects: Vec<(&FactSet, &canon_extract::TypeFacts)> =
-        members.iter().filter_map(|s| Some((*s, s.subject()?))).collect();
-    let winner =
-        presence_winner(subjects.iter().map(|(s, t)| (t.interfaces.as_slice(), s.weight)))?;
-
-    let observations: Vec<(bool, f32, &FactSet)> = subjects
-        .iter()
-        .map(|(s, t)| (t.interfaces.iter().any(|i| i == &winner), s.weight, *s))
-        .collect();
-    let (agrees, confidence, agreeing) = majority(&observations, settings)?;
-    if !agrees {
-        return None;
-    }
-    Some(Convention {
-        id: format!("shape.contract.{}.{ext}", id_fragment(dir)),
-        statement: format!("Types here implement `{winner}`"),
-        scope: scope_for(dir, ext),
-        confidence,
-        agreeing,
-        total: observations.len(),
-        exemplar: exemplar(&observations, &true),
-        evidence: evidence(&observations, &true),
-        sample_roots: Vec::new(),
-        // Advisory. A directory that agrees on one interface can still
-        // legitimately hold the one type that implements another, or none
-        // at all.
-        enforcement: Enforcement::Advisory,
-    })
+    agreed_name(&vocabulary::CONTRACT, dir, ext, &declared(members, |t| &t.interfaces), settings)
 }
 
 /// Whether this language's base type is one of the contracts the type

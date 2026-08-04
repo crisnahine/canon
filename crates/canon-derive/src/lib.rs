@@ -40,6 +40,7 @@ mod snapshot;
 mod subject;
 mod tier0;
 mod verify;
+mod vocabulary;
 mod walk;
 
 pub use dup::{DuplicateHit, duplicates_against_siblings};

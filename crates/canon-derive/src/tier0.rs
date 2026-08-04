@@ -15,6 +15,7 @@ use canon_core::{Confidence, Convention, Enforcement, Evidence, Scope, Settings}
 
 use crate::Reach;
 use crate::naming::{self, Style};
+use crate::vocabulary;
 use crate::walk::FileEntry;
 
 /// Evidence paths carried per convention. Enough to audit, small enough that a
@@ -91,8 +92,8 @@ fn qualifier_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conven
         let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
 
         out.push(Convention {
-            id: format!("format.{}.{ext}", id_fragment(&dir)),
-            statement: format!("Files here are named `*.{qualifier}.{ext}`"),
+            id: format!("{}{}.{ext}", vocabulary::FORMAT.id, id_fragment(&dir)),
+            statement: vocabulary::FORMAT.spelling.say(&format!("*.{qualifier}.{ext}")),
             scope: crate::scope_reaching(&dir, &ext, reach),
             confidence,
             agreeing,
@@ -155,8 +156,8 @@ fn colocation(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
         let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
 
         out.push(Convention {
-            id: format!("tests.colocation.{}.{ext}", id_fragment(&dir)),
-            statement: "Every file here has a test of the same name".to_string(),
+            id: format!("{}.{}.{ext}", vocabulary::COLOCATION_FAMILY.id, id_fragment(&dir)),
+            statement: vocabulary::COLOCATION.to_string(),
             scope: crate::scope_reaching(&dir, &ext, reach),
             confidence,
             agreeing,
@@ -430,10 +431,10 @@ fn naming_conventions(files: &[FileEntry], settings: &Settings) -> Vec<Conventio
         // rest of it, and handed a bare family none of them can fire, so the
         // grade stored in the snapshot could disagree with the one the write
         // path recomputes from the same id.
-        let id = format!("naming.{}.{ext}", id_fragment(&dir));
+        let id = format!("{}{}.{ext}", vocabulary::NAMING.id, id_fragment(&dir));
         let scope = crate::scope_reaching(&dir, &ext, reach);
         out.push(Convention {
-            statement: format!("Files here are named in {}", style.label()),
+            statement: vocabulary::NAMING.spelling.say(style.label()),
             confidence,
             agreeing,
             total: members.len(),
@@ -494,8 +495,8 @@ fn test_suffix(files: &[FileEntry], settings: &Settings) -> Vec<Convention> {
         let Some(confidence) = Confidence::derive(agreeing, members.len()) else { continue };
 
         out.push(Convention {
-            id: format!("tests.suffix.{ext}"),
-            statement: format!("Test files are named `{}`", marker.glob(&ext)),
+            id: format!("{}.{ext}", vocabulary::SUFFIX.id),
+            statement: vocabulary::SUFFIX.spelling.say(&marker.glob(&ext)),
             scope: Scope::Ext(ext.clone()),
             confidence,
             agreeing,
