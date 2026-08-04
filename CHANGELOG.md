@@ -3,6 +3,116 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A live false refusal, and the five rules that answer why it happened: a base
+class is not how most frameworks say what a file is.
+
+### Fixed
+
+- **A Django view was refused for inheriting from its own mixin.** Python's
+  base list is positional and its frameworks order it mixins-first, so reading
+  the first entry made `class OrderView(LoginRequiredMixin, ListView)` a
+  subclass of `LoginRequiredMixin`. Measured on a Django codebase, the first
+  base ends in `Mixin` in 337 of 754 declarations. The last positional base is
+  the type the class is; everything before it is composition and lands in
+  `shape.mixin` instead. Go's embedded fields are read the same way, having no
+  order at all. A base read from a language that allows several is advisory
+  regardless, for Rust and Python both. The ordering is a convention rather
+  than a fact, and refusing on it is the check being wrong about a correct file.
+
+- **A parameterised base agreed with nothing.** `ActiveRecord::Migration[7.2]`
+  and `ActiveRecord::Migration[6.1]` are one base spelled per Rails version, and
+  compared as written a migrations directory held six of them and agreed on
+  none: the largest single spelling was 445 files of 1,518. `db/migrate` now
+  derives `ActiveRecord::Migration` at 1519/1519. A call expression is still
+  kept whole, because `Struct.new(:street, :city)` builds a different anonymous
+  type per argument list, including when that argument list holds a `[`. That
+  is `class Point(namedtuple('Point', ['x', 'y']))`, and it used to yield the
+  base `namedtuple('Point',`.
+
+- **A qualified base lost its qualifier.** A statement is an instruction, so a
+  directory whose types inherit `models.Model` is told `models.Model`, which is
+  the line to write. Rust trait impls now keep theirs too: `serde::Serialize`,
+  not `Serialize`, which is only correct in a file that already imported it.
+
+- **A Ruby call with a receiver was recorded twice.** Ruby keeps `receiver` and
+  `method` as sibling fields of one node, so the query written for a
+  receiverless call matched a receiver call as well and `Payment.charge(1)`
+  arrived as two facts: one correct, one claiming a receiverless `charge` the
+  source never wrote. Every rule reading a receiverless call saw it, and a
+  Rails repository derived `find`, `create`, `new` and `gsub` as macros whole
+  directories agreed on. No other language keeps the two in one node, and none
+  had the problem.
+
+- **Two rules stated one fact twice.** A Rust type's superclass *is* its first
+  trait impl, so a directory derived both "Types here inherit from `Loggable`"
+  and "Types here implement `Loggable`". Two lines of the injected budget, and
+  two claims the checker could not collapse. The base rule yields to the
+  contract rule there. Separately, the family rule and the base rule are
+  withheld from each other only at the same scope, and scopes nest: a Rails API
+  derives the family rule over `app/controllers` and the exact base over
+  `app/controllers/api/v1`, so one wrong base produced two lines saying
+  different things. The narrower rule now wins.
+
+- **The annotation a directory shares lost to the one that sorted last.** A
+  NestJS controller carries `@Controller` once and `@Get`, `@Post` and
+  `@Delete` once each, so every within-file count ties at one and the tie
+  resolved to whichever name sorted last. Both the annotation and the macro
+  family now count a name once per file that carries it at all.
+
+- **The commit-time walk gave up on a workspace of checkouts.** `head_sha` and
+  `tracked_files` both answer for an `api/ client/ wordpress/` layout through
+  its children; this returned nothing, so every file in every checkout fell
+  back to its mtime, which is one distinct value across a fresh clone. It
+  reads the children now, and reads NUL-separated output, because a path
+  containing a newline is legal and splitting on newlines recorded two paths
+  that do not exist.
+
+- **`reconcile` paid for an unbounded history walk every turn.** The only thing
+  it does with a commit time is order a directory's files before truncating
+  them to a shortlist. It reads the recent commits now; anything older falls
+  back to its mtime. Deriving still reads the whole log, where a commit time is
+  a weight on every vote.
+
+- **A rule's stored grade could disagree with the one recomputed on write.**
+  Four derive sites handed `enforcement_for` the rule family rather than the
+  full id, and its guards read the rest of that id, so a Python base rule at
+  total agreement was stored `Blocking` and recomputed `Advisory`.
+
+- The annotation and macro checks printed a bare "(95/102)". Every other check
+  names the file set behind the number.
+
+### Added
+
+- **Five rule kinds, for what a framework asks for rather than what a class
+  inherits.** `shape.annotation` reads the decorator or attribute a file
+  carries; `shape.macros` a call with no receiver; `shape.mixin` a module or
+  trait a type composes in; `shape.contract` an `implements` clause or a Rust
+  trait impl; `shape.family` the suffix several namespaced bases share, stated
+  only where no single base won.
+
+  Measured, in conventions derived: the Rails API 146 to 262, `pixelfed` 122
+  to 142, `nest` 107 to 136, `wagtail` 74 to 101, `nuxt-ui` 34 to 46,
+  `starship` 7 to 10. The answers matter more than the counts. `app/workers` derives `Sidekiq::Worker`
+  at 485/490, where 485 of those files declare no base at all and every
+  class-shaped rule was silent about them. Pixelfed's `app/Jobs` derives
+  `ShouldQueue` at 119/119 from an `implements` clause the extractor had
+  recorded for its whole life and nothing had ever read. `app/controllers`
+  derives `*BaseController` at 95/102, where the largest single spelling is 53
+  and the exact rule finds no winner.
+
+  All five are advisory. Each is a fact about what a directory mostly does, and
+  each has a legitimate exception: the one plain helper class beside the
+  decorated ones, the one worker that composes something else.
+
+### Changed
+
+- `SNAPSHOT_VERSION` 10 to 14. The snapshot is a cache keyed on the commit, its
+  age and the settings, so a new binary at an unchanged commit goes on serving
+  the old binary's conventions, including, from a version 10 snapshot, the
+  first-positional-base reading that refused a Django view.
+
 ## [0.5.0] — 2026-08-04
 
 Six issues, and the two that changed the most were not what their reports said.

@@ -267,6 +267,51 @@ entirely `.html.erb` can still legitimately gain the one `.json.erb` an
 endpoint needs, and a component directory can gain the one barrel that exports
 no default.
 
+### Rules about what a framework asks for
+
+A base class is not how most frameworks say what a file is. A Sidekiq worker
+declares no superclass and writes `include Sidekiq::Worker`; a Laravel job
+writes `implements ShouldQueue`; a NestJS controller is a plain class with
+`@Controller` on it; a Vue component declares nothing at all and calls
+`defineProps`. Every one of those was invisible, so the directories holding
+them derived nothing about the thing that makes them what they are.
+
+| Rule | Reads | Example |
+|---|---|---|
+| `shape.annotation` | the decorator or attribute a file carries | Files here carry `@Controller` |
+| `shape.macros` | a call with no receiver | Files here use `defineProps` |
+| `shape.mixin` | a module or trait a type composes in | Types here include `Sidekiq::Worker` |
+| `shape.contract` | an `implements` clause or a Rust trait impl | Types here implement `ShouldQueue` |
+| `shape.family` | the suffix several namespaced bases share | Types here inherit from a `*BaseController` |
+
+`shape.family` is the fallback for a directory that agrees on a kind of base
+but not on one base: a Rails API namespaces its controllers, so 95 of 102 files
+inherit something ending `BaseController` while the largest single spelling is
+53, and the exact rule finds no winner at all. It is only stated where the
+exact rule found nothing.
+
+Measured, in conventions derived: the Rails API 146 to 262, `pixelfed` 122 to
+142, `nest` 107 to 136, `wagtail` 74 to 101, `nuxt-ui` 34 to 46, `starship` 7
+to 10. The individual answers matter more than the counts. `db/migrate` derives
+`ActiveRecord::Migration` at 1519/1519 where six version-parameterised
+spellings had agreed on nothing; `app/workers` derives `Sidekiq::Worker` at
+485/490 where 485 files declared no base at all; pixelfed's `app/Jobs` derives
+`ShouldQueue` at 119/119 from an `implements` clause the extractor had been
+recording, and nothing had ever read.
+
+All five are advisory. Each is a fact about what a directory mostly does, and
+each has a legitimate exception: the one plain helper class beside the
+decorated ones, the one worker that composes something else.
+
+The same work fixed a live false refusal. Python's base list is positional and
+its frameworks put mixins first, so reading the first entry made
+`class OrderView(LoginRequiredMixin, ListView)` a subclass of
+`LoginRequiredMixin`. Measured on a Django codebase, the first base ends in
+`Mixin` in 337 of 754 declarations. The last positional base is the type the
+class is; everything before it is composition, and lands in `shape.mixin`
+instead. A base read from a language that allows several is advisory in any
+case, for Rust and Python both.
+
 Adding a language is one module in `crates/canon-extract/src/`, one arm in
 `lang::provider`, and one `queries/<language>/facts.scm`. The match is
 exhaustive, so it will not compile until the capability table is updated.
@@ -326,6 +371,17 @@ this is where you see the files it counted and disagree with it. Then:
 ```toml
 # .canon.toml
 suppress = ["shape.base.app.services.rb"]
+```
+
+An id is `<family>.<directory>.<extension>`, and `*` is allowed, so a whole
+family goes quiet with one line. The families are `naming`, `format`,
+`tests.suffix`, `tests.colocation`, `shape.public-arity`, `shape.entrypoint`,
+`shape.base`, `shape.family`, `shape.mixin`, `shape.contract`,
+`shape.annotation`, `shape.macros`, `shape.collaborator`, `shape.import`,
+`shape.export`, `shape.module-arity` and `shape.namespace`.
+
+```toml
+suppress = ["shape.macros.*", "shape.annotation.src.orders.ts"]
 ```
 
 ## Configuration
