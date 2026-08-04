@@ -246,9 +246,38 @@ fn log_times(root: &Path, limit: Option<usize>, deadline: Instant) -> Option<Has
     if let Some(n) = limit {
         cmd.arg(format!("-n{n}"));
     }
+    // Commits that touched nothing under `root` are not this index's history,
+    // and reading them spends a capped walk's budget on files it will discard.
+    cmd.args(["--", "."]);
     let out = bounded_output(&mut cmd, remaining)?;
-    let times = parse_commit_times(&String::from_utf8_lossy(&out));
+    let times = rebase_on_cwd(parse_commit_times(&String::from_utf8_lossy(&out)), root)?;
     (!times.is_empty()).then_some(times)
+}
+
+/// Respell top-relative log paths the way `ls_files` spells them.
+///
+/// `ls-files` answers relative to the directory git runs in and
+/// `log --name-only` relative to the repository top, and both feed one map
+/// keyed one way and looked up the other. A session started in `crates/cli/`
+/// therefore missed on every file, and a non-empty map of unusable keys is
+/// worse than none: it clamped every file's mtime to a single value.
+///
+/// `None` when the prefix cannot be read, so the caller falls back to mtime
+/// rather than keying the index on a basis it could not confirm.
+fn rebase_on_cwd(times: HashMap<String, u64>, root: &Path) -> Option<HashMap<String, u64>> {
+    let raw = git(root, &["rev-parse", "--show-prefix"])?;
+    // A trailing newline only; a directory name may legitimately end in a
+    // space, and `--show-prefix` writes the path unquoted.
+    let prefix = String::from_utf8(raw).ok()?.trim_end_matches('\n').to_string();
+    if prefix.is_empty() {
+        return Some(times);
+    }
+    Some(
+        times
+            .into_iter()
+            .filter_map(|(rel, at)| rel.strip_prefix(&prefix).map(|r| (r.to_string(), at)))
+            .collect(),
+    )
 }
 
 /// Turn `git log -z --no-renames --format=%ct --name-only` output into each
@@ -521,6 +550,37 @@ mod tests {
         // index is keyed by would never find their own time.
         assert!(times.contains_key("api/app/services/create.rb"), "got {times:?}");
         assert!(times.contains_key("client/src/App.tsx"), "got {times:?}");
+    }
+
+    #[test]
+    fn a_session_started_below_the_repository_top_still_has_commit_times() {
+        // `ls-files` answers relative to the directory it runs in and
+        // `log --name-only` relative to the repository top. Nothing resolved
+        // the top level, so an index built from a subdirectory keyed every
+        // entry one way and looked it up the other: every lookup missed, and
+        // the non-empty map that resulted clamped every file's mtime to a
+        // single value instead.
+        let root = std::env::temp_dir().join("canon-git-subdir-times");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let built = child_repo(
+            &root,
+            "api",
+            &[("app/services/create.rb", "class A; end\n"), ("Rakefile", "task :a\n")],
+        );
+        if !built {
+            return; // no usable git here
+        }
+
+        let sub = root.join("api/app");
+        let files = tracked_files(&sub).expect("a subdirectory lists its own files");
+        assert_eq!(files, vec!["services/create.rb".to_string()]);
+
+        let times = commit_times(&sub).expect("and has a time for each of them");
+        assert!(times.contains_key("services/create.rb"), "got {times:?}");
+        // And nothing from outside the subdirectory, which `ls-files` would
+        // never have named and so could never look up.
+        assert!(!times.keys().any(|k| k.contains("Rakefile")), "got {times:?}");
     }
 
     #[test]

@@ -95,7 +95,7 @@ pub struct FileEntry {
 /// selection falls through to whichever path sorts first. A file with a
 /// commit time uses it in place of its mtime; a file with none — untracked,
 /// git unavailable, or older than a capped walk's window — keeps its mtime,
-/// clamped at the newest commit time this call did find.
+/// clamped at the oldest commit time this call did find.
 ///
 /// The clamp is the fix for a capped walk specifically. `git::recent_commit_times`
 /// bounds how much history it reads, so a file last touched before that
@@ -103,7 +103,12 @@ pub struct FileEntry {
 /// clone, the moment of the clone, later than every commit in `commit_times`
 /// including the newest one. Unclamped, that file would sort as the newest
 /// thing in the directory and win a place in `duplicates_against_siblings`'s
-/// shortlist ahead of files git can actually show were touched recently. A
+/// shortlist ahead of files git can actually show were touched recently.
+///
+/// The ceiling is the oldest stamp found rather than the newest, because a
+/// file the window did not reach was last committed before the window opened
+/// and so is older than everything inside it. Clamped at the newest it still
+/// tied for first place, which is the position the clamp exists to deny it. A
 /// full, uncapped walk has no such file in practice — every tracked file has
 /// at least one commit — so the clamp changes nothing there.
 // The map always comes from `git::commit_times`, built with the standard
@@ -118,7 +123,7 @@ pub fn entries_for(
     commit_times: &HashMap<String, u64>,
 ) -> Vec<FileEntry> {
     let now = unix_now();
-    let newest_commit = commit_times.values().copied().max();
+    let oldest_commit = commit_times.values().copied().min();
     let mut out: Vec<FileEntry> = rels
         .iter()
         .filter_map(|rel| {
@@ -131,7 +136,7 @@ pub fn entries_for(
             if let Some(&committed) = commit_times.get(rel) {
                 entry.modified_unix = committed;
                 entry.weight = recency_weight(now, committed, settings.recency_half_life_days);
-            } else if let Some(cap) = newest_commit
+            } else if let Some(cap) = oldest_commit
                 && entry.modified_unix > cap
             {
                 entry.modified_unix = cap;
@@ -420,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_outside_a_capped_commit_walk_does_not_outrank_the_newest_real_commit() {
+    fn a_file_outside_a_capped_commit_walk_sorts_older_than_every_file_inside_it() {
         // A capped commit-time walk finds nothing for a file older than its
         // window, and that file keeps its filesystem mtime — on a fresh
         // clone, the moment of the clone, which is later than every commit
@@ -428,26 +433,37 @@ mod tests {
         // file git has no recent history for would sort as the newest thing
         // in the repository, ahead of everything git actually knows was
         // touched recently.
+        //
+        // The ceiling is the oldest stamp the walk found, not the newest. A
+        // file the window did not reach was last committed before the window
+        // opened, so it is older than everything inside it by definition, and
+        // clamping to the newest left it tied for first place.
         let root = fixture::build(
             "walk-clamp-mtime",
-            &[("recent.rb", "class Recent; end\n"), ("outside_cap.rb", "class Old; end\n")],
+            &[
+                ("recent.rb", "class Recent; end\n"),
+                ("older.rb", "class Older; end\n"),
+                ("outside_cap.rb", "class Old; end\n"),
+            ],
         );
         let now = unix_now();
         let mut times = HashMap::new();
         // `outside_cap.rb` has no entry at all: the capped walk that produced
         // `times` never reached its commit.
-        times.insert("recent.rb".to_string(), now - 400 * 86_400);
+        times.insert("recent.rb".to_string(), now - 100 * 86_400);
+        times.insert("older.rb".to_string(), now - 400 * 86_400);
         let settings = Settings::default();
-        let rels = vec!["recent.rb".to_string(), "outside_cap.rb".to_string()];
+        let rels = ["recent.rb", "older.rb", "outside_cap.rb"].map(String::from).to_vec();
         let files = entries_for(&root, &settings, &rels, &times);
-        let recent = files.iter().find(|f| f.rel == "recent.rb").expect("recent");
-        let outside = files.iter().find(|f| f.rel == "outside_cap.rb").expect("outside");
+        let at = |rel: &str| {
+            files.iter().find(|f| f.rel == rel).map(|f| f.modified_unix).expect("indexed")
+        };
         assert!(
-            outside.modified_unix <= recent.modified_unix,
-            "a file with no commit time outranked the newest commit the walk found: \
-             outside={}, recent={}",
-            outside.modified_unix,
-            recent.modified_unix
+            at("outside_cap.rb") <= at("older.rb"),
+            "a file the window never reached outranked one it did: outside={}, oldest={}",
+            at("outside_cap.rb"),
+            at("older.rb")
         );
+        assert!(at("outside_cap.rb") < at("recent.rb"));
     }
 }
