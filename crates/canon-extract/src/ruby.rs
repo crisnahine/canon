@@ -311,4 +311,16 @@ mod tests {
             assert_eq!(f(src).types[0].superclass.as_deref(), Some("ActiveRecord::Migration"));
         }
     }
+
+    #[test]
+    fn a_struct_new_superclass_keeps_its_full_call() {
+        // `Struct.new(:street, :city)` builds a new anonymous struct type, and
+        // the argument list is what makes it the class it is: two files
+        // subclassing `Struct.new(:street, :city)` and `Struct.new(:name)`
+        // have different, unrelated parents. Truncating at the `(` the way a
+        // version in `[...]` is truncated would collapse both to `Struct.new`
+        // and state a name nobody can subclass on its own.
+        let facts = f("class Address < Struct.new(:street, :city)\nend\n");
+        assert_eq!(facts.types[0].superclass.as_deref(), Some("Struct.new(:street, :city)"));
+    }
 }

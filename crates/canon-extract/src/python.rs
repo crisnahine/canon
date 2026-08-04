@@ -238,8 +238,8 @@ mod tests {
     fn a_single_base_is_unchanged_by_ordering() {
         // `bare_base` already strips a trailing `[...]`; adding the ordering
         // logic for a multi-base class must not disturb that.
-        let f = f("class P(models.Model):\n    def save(self): pass\n");
-        assert_eq!(f.types[0].superclass.as_deref(), Some("models.Model"));
+        let f = f("class P(BaseService[Order]):\n    def save(self): pass\n");
+        assert_eq!(f.types[0].superclass.as_deref(), Some("BaseService"));
         assert!(f.types[0].interfaces.is_empty());
         assert!(f.types[0].mixins.is_empty());
     }

@@ -96,16 +96,23 @@ pub(crate) fn unquote(raw: &str) -> String {
 
 /// A base type without the parameters attached to it.
 ///
-/// `ActiveRecord::Migration[7.2]`, `Base<Order>`, `Repository(Item)` all name
-/// one type. Compared as written, a Rails migrations directory holds six
-/// different bases across the versions its migrations were written against and
-/// agrees on none of them; the largest single spelling was 445 files of 1,518.
+/// `ActiveRecord::Migration[7.2]` and `Base<Order>` each name one type.
+/// Compared as written, a Rails migrations directory holds six different
+/// bases across the versions its migrations were written against and agrees
+/// on none of them; the largest single spelling was 445 files of 1,518.
+///
+/// The delimiter set is `[` and `<` only, deliberately not `(`. A call
+/// expression as a superclass — `Struct.new(:street, :city)`, `Data.define(x:
+/// Integer)` — builds a distinct anonymous type per argument list, so it is a
+/// different base per file rather than one base spelled several ways.
+/// Truncating at the `(` would merge two files that genuinely subclass
+/// different, unrelated parents into one false rule.
 ///
 /// Applied in the extractor so deriving and checking read the same value
 /// without either knowing the rule exists.
 #[must_use]
 pub(crate) fn bare_type(raw: &str) -> String {
-    raw.split(['[', '<', '(']).next().unwrap_or(raw).trim().to_string()
+    raw.split(['[', '<']).next().unwrap_or(raw).trim().to_string()
 }
 
 #[cfg(test)]
@@ -173,6 +180,13 @@ mod tests {
     fn each_parameter_delimiter_is_stripped() {
         assert_eq!(bare_type("ActiveRecord::Migration[7.2]"), "ActiveRecord::Migration");
         assert_eq!(bare_type("Base<Order>"), "Base");
-        assert_eq!(bare_type("Repository(Item)"), "Repository");
+    }
+
+    #[test]
+    fn a_call_expression_is_not_truncated_at_its_argument_list() {
+        // `Struct.new(:street, :city)` names a distinct anonymous type per
+        // argument list; stripping at `(` the way `[` and `<` are stripped
+        // would merge two files that subclass different, unrelated parents.
+        assert_eq!(bare_type("Struct.new(:street, :city)"), "Struct.new(:street, :city)");
     }
 }
