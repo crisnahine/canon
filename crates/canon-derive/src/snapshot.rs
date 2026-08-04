@@ -23,7 +23,12 @@ use serde::{Deserialize, Serialize};
 /// versions refuse to derive. A `kebab-case` rule pinned by a vendored
 /// `jquery-3.4.1.min.js` was graded `Blocking` from the stored snapshot and
 /// went on refusing writes after the release that stopped deriving it.
-pub const SNAPSHOT_VERSION: u32 = 16;
+pub const SNAPSHOT_VERSION: u32 = 17;
+// 17: a Cypress suite directory is read as a test directory, and a commit time
+//     is keyed the way the index spells the file it belongs to. A v16 snapshot
+//     holds `shape.macros` rules stating Cypress's own vocabulary, and — for
+//     any index built below the repository top — a recency weight computed
+//     from one clamped mtime shared by every file in the tree.
 // 16: a React hook (`useOnboarding`) and Next.js's hyphenated App Router
 //     boundaries (`not-found`, `global-error`) no longer count toward a
 //     naming rule. A v15 snapshot holds rules derived while those names still

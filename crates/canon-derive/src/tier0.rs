@@ -688,8 +688,21 @@ pub(crate) fn is_test_path(rel: &str) -> bool {
 /// on its own: a directory string like `"spec"` has no filename component, and
 /// `is_test_path` reads a bare directory as a name with an empty directory,
 /// answering false about the one case a directory-scoped caller actually asks.
+///
+/// Cypress names its suite for the kind of test it holds rather than for
+/// testing, and `integration`, `e2e`, `component` and `support` are all
+/// ordinary words a source tree uses, so they count only directly under
+/// `cypress`. Left out, a React repository derived six `shape.macros` rules
+/// from `cypress/integration` stating `beforeEach`, `afterEach`, `context` and
+/// `describe` — Cypress's own vocabulary, true of every suite ever written.
+/// `cypress/fixtures` is deliberately not on the list: those are data the
+/// suite reads, with real names and a real naming convention.
 pub(crate) fn is_test_directory(dir: &str) -> bool {
-    dir.split('/').any(|s| matches!(s, "spec" | "test" | "tests" | "__tests__"))
+    let segments: Vec<&str> = dir.split('/').collect();
+    segments.iter().any(|s| matches!(*s, "spec" | "test" | "tests" | "__tests__"))
+        || segments.windows(2).any(|pair| {
+            matches!(pair, ["cypress", "integration" | "e2e" | "component" | "support"])
+        })
 }
 
 /// The most recently modified agreeing file.
@@ -1111,6 +1124,32 @@ mod tests {
         }
         assert!(!is_test_path("app/services/charge_card.rb"));
         assert!(!is_test_path("src/latest.ts"), "`latest` merely contains `test`");
+    }
+
+    #[test]
+    fn a_cypress_suite_directory_is_a_test_directory() {
+        // Cypress names its suite `cypress/integration` before version 10 and
+        // `cypress/e2e` after, and neither segment says "test" on its own. A
+        // real React repository derived six `shape.macros` rules from
+        // `cypress/integration` stating `beforeEach`, `afterEach`, `context`
+        // and `describe` — Cypress's own vocabulary, true of every suite ever
+        // written and nobody's convention.
+        for dir in [
+            "cypress/integration",
+            "cypress/e2e",
+            "cypress/component",
+            "cypress/support",
+            "packages/web/cypress/integration/listing",
+        ] {
+            assert!(is_test_directory(dir), "{dir} is a test suite");
+            assert!(is_test_path(&format!("{dir}/checkout.js")));
+        }
+        // The segment alone is not enough: neither word belongs to Cypress.
+        assert!(!is_test_directory("src/integration"));
+        assert!(!is_test_directory("app/e2e-config"));
+        // And the fixtures beside the suite are data the suite reads, not the
+        // suite. They carry real names and a real naming convention.
+        assert!(!is_test_directory("cypress/fixtures/api/v1"));
     }
 
     #[test]

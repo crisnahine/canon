@@ -1786,6 +1786,16 @@ mod tests {
             violations.iter().any(|v| v.message.contains("carries no `@Injectable`")),
             "the derived statement and the check disagreed on the prefix: {violations:#?}"
         );
+
+        // And the other direction, which nothing asserted: deleting the
+        // conforming half of the check left every test green, and without it
+        // every decorated file is told it carries no annotation.
+        let conforming = "import { Injectable } from '@nestjs/common';\n\n@Injectable()\nexport class Kept {\n  findAll(): void {}\n}\n";
+        let quiet = verify_source("src/orders/kept.ts", conforming, &convs);
+        assert!(
+            !quiet.iter().any(|v| v.message.contains("carries no `@Injectable`")),
+            "a file carrying the annotation was told it carries none: {quiet:#?}"
+        );
     }
 
     #[test]

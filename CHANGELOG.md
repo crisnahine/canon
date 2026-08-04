@@ -10,6 +10,65 @@ class is not how most frameworks say what a file is.
 
 ### Fixed
 
+- **A React hook and a Next.js route boundary were refused for their
+  framework-mandated names.** `useOnboarding.tsx` is valid `camelCase`, so the
+  guard that exempts a name no style admits never saw it, and a `PascalCase`
+  component directory refused it. `not-found.tsx` and `global-error.tsx` are the
+  App Router's own names for a route boundary and the only hyphenated members of
+  its special-file set, so they read as an ordinary two-word `kebab-case` name.
+  None of the three is a name the author chose. All three are now outside the
+  naming vote and outside the check.
+
+- **A Go struct was refused for the order of its embedded fields.** Go's embeds
+  are an unordered set and `superclass` took the first, three lines under a
+  comment saying so. Six structs embedding `sync.Mutex` before a real base
+  derived `` Types here inherit from `sync.Mutex` `` at 6/6, graded Blocking,
+  and a struct embedding only the real base was denied. Rust and Python were
+  already exempt for this reason; Go was the third language that names several
+  bases at once and the only one left able to refuse on the choice between them.
+
+- **Eleven blocking naming rules refused a filename the repository already
+  uses.** `cypress/fixtures/**` in a React repository holds 114 `snake_case`
+  JSON fixtures beside 5 `kebab-case` ones, and eleven per-resource folders five
+  levels down each reached total agreement over its own slice, then refused
+  `exists-false.json`, a name the fixture tree already uses one directory over.
+  A naming rule deeper than four directories, and any rule counted over a
+  directory's own files, now state themselves and never refuse. Both scopes were
+  added to say more about a deep or mixed tree, and every statement they added
+  is kept: the React client keeps its conventions and refuses on the eight rules
+  that were reachable before either change, down from 54. The Rails API is
+  unchanged.
+
+- **A commit time never reached the file it belonged to, below the repository
+  top.** `ls-files` answers relative to the directory git runs in and
+  `log --name-only` relative to the repository top, and both feed one map keyed
+  one way and looked up the other. A session started in a subdirectory missed on
+  every file, and the map of unusable keys was still non-empty, so every file
+  took the clamp branch instead: one identical stamp across the tree, where the
+  mtime it replaced at least varied. The clamp's ceiling is also the oldest
+  stamp the walk found rather than the newest, because a file a capped walk did
+  not reach was last committed before the window opened.
+
+- **`shape.macros` stated Cypress's own vocabulary.** The test-directory guard
+  reads `spec`, `test`, `tests` and `__tests__`, and Cypress names its suite for
+  the kind of test it holds. A React repository derived six rules from
+  `cypress/integration` saying files there use `beforeEach`, `afterEach`,
+  `context` and `describe`. `integration`, `e2e`, `component` and `support` now
+  count as test directories directly under `cypress`, and nowhere else.
+  `cypress/fixtures` deliberately still votes: those are data the suite reads,
+  with real names and a real naming convention.
+
+- **Both replay harnesses reported a clean sweep over zero rules.** Neither
+  called `sys.exit`, so a refusal was report-only, and both ran `inject` with no
+  data directory and no prior index, against which `inject` answers `{}`. Each
+  repository is now indexed into a directory the run owns, every case is checked
+  for a context block, and a run with no blocks at all fails rather than
+  passing. The base-order mutant was also Python-only, which is the one language
+  whose base rule was already advisory, so it measured the exemption; it
+  generates Go mutants too. Real numbers over nine repositories: 20,679 tracked
+  files replayed with 18,694 blocks and no refusals, and 12,323 new files with
+  11,677 blocks and no refusals.
+
 - **A Django view was refused for inheriting from its own mixin.** Python's
   base list is positional and its frameworks order it mixins-first, so reading
   the first entry made `class OrderView(LoginRequiredMixin, ListView)` a
@@ -85,6 +144,16 @@ class is not how most frameworks say what a file is.
 
 ### Added
 
+- **A harness that asks every blocking naming rule to refuse a name the
+  repository already uses.** `tests/naming-already-used.py` proposes, for each
+  such rule, every distinct filename the repository uses for that extension
+  somewhere else, and fails when the name is already in use inside the very
+  directory the rule speaks for. That is a rule contradicting its own evidence.
+  Neither replay can find this: both build their candidates from source files in
+  code directories, and the defect it was written for lived in a tree of JSON
+  fixtures they skip by name. It found four such rules before the fix and none
+  after, across nine repositories.
+
 - **Five rule kinds, for what a framework asks for rather than what a class
   inherits.** `shape.annotation` reads the decorator or attribute a file
   carries; `shape.macros` a call with no receiver; `shape.mixin` a module or
@@ -145,7 +214,7 @@ class is not how most frameworks say what a file is.
   the same derivation cost. Cost is bounded from the other side by `min_files`,
   which derives nothing from a group too small however deep it sits.
 
-- `SNAPSHOT_VERSION` 10 to 15. The snapshot is a cache keyed on the commit, its
+- `SNAPSHOT_VERSION` 10 to 17. The snapshot is a cache keyed on the commit, its
   age and the settings, so a new binary at an unchanged commit goes on serving
   the old binary's conventions, including, from a version 10 snapshot, the
   first-positional-base reading that refused a Django view.
