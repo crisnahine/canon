@@ -404,3 +404,26 @@ fn a_payload_carrying_a_windows_style_path_is_still_valid_json() {
     assert_eq!(parsed["hook_event_name"], "PreToolUse");
     assert!(parsed["tool_input"]["file_path"].is_string());
 }
+
+/// The plugin manifest, read from the repository rather than from memory.
+fn hooks_manifest() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hooks/hooks.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} is not readable: {e}", path.display()));
+    serde_json::from_str(&text).expect("hooks.json is valid JSON")
+}
+
+#[test]
+fn the_session_start_matcher_covers_every_documented_source() {
+    // The docs list five, canon's matcher predates the fifth, and a forked
+    // session (`--fork-session`, `/fork`, `/branch`) therefore gets no
+    // conventions manifest at all. Before v2.1.214 a fork reported `resume`,
+    // which is why this went unnoticed.
+    let manifest = hooks_manifest();
+    let matcher = manifest["hooks"]["SessionStart"][0]["matcher"]
+        .as_str()
+        .expect("SessionStart carries a matcher");
+    for source in ["startup", "resume", "clear", "compact", "fork"] {
+        assert!(matcher.contains(source), "`{source}` is missing from `{matcher}`");
+    }
+}
