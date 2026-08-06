@@ -12,6 +12,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod args;
+mod child;
 mod commands;
 mod config;
 mod git;

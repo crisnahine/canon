@@ -1,4 +1,8 @@
-//! The one place canon shells out.
+//! The one place canon shells out to `git`.
+//!
+//! The bound every spawned child runs under lives in [`crate::child`], which
+//! this module used to own and now shares with the one other thing canon
+//! spawns.
 //!
 //! Only on the cold path. The hot path never calls this: spawning a process
 //! before every write is most of a 50 ms budget, and the answer would be the
@@ -17,11 +21,8 @@
 //! asked instead and their answers are combined under their directory names.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Child directories consulted when the root is not itself a repository.
@@ -126,36 +127,16 @@ fn git_within(root: &Path, args: &[&str], timeout: Duration) -> Option<Vec<u8>> 
 /// mtime for a commit time, to the filesystem walk for a file list.
 const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Run `cmd` and collect its stdout, killing it if it is still running once
-/// `timeout` has passed.
+/// [`crate::child::bounded`] with the answer `git` wants from it.
 ///
-/// `Command::output` blocks until the child exits with no bound of its own,
-/// so this is what stands between a slow subprocess and a session that never
-/// returns. Stdout is drained on its own thread rather than read after the
-/// child exits: a child that fills the pipe buffer before this process gets
-/// around to reading it is not slow, it is deadlocked against a parent that
-/// is waiting for it to finish before reading anything it has written.
+/// A `git` that exited non-zero has said nothing worth reading, so its output
+/// is discarded here rather than in the helper: `curl` needs the opposite,
+/// and the two callers are the reason the helper reports the status instead
+/// of deciding for them.
 fn bounded_output(cmd: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
-    let mut child =
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        let read_ok = stdout.read_to_end(&mut buf).is_ok();
-        let _ = tx.send(read_ok.then_some(buf));
-    });
-
-    let collected = rx.recv_timeout(timeout).ok().flatten();
-    if collected.is_none() {
-        // Either the timeout fired or the reading thread never sent, and
-        // either way the child may still be running. Killing an already-dead
-        // process just errors, which is discarded: there is nothing useful to
-        // do about it here.
-        let _ = child.kill();
-    }
-    let status = child.wait().ok()?;
-    collected.filter(|_| status.success())
+    crate::child::bounded(cmd, timeout, None, usize::MAX)
+        .filter(|out| out.success)
+        .map(|out| out.stdout)
 }
 
 /// When each tracked file was last committed, seconds since the epoch.
@@ -363,6 +344,7 @@ fn child_repos(root: &Path) -> Vec<(String, PathBuf)> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
 
     #[test]
     fn a_directory_that_is_not_a_repository_yields_none() {
@@ -729,23 +711,5 @@ mod tests {
             git_within(here, &["rev-parse", "HEAD"], Duration::ZERO).is_none(),
             "a git call ran past the bound it was given"
         );
-    }
-
-    #[test]
-    fn bounded_output_gives_up_rather_than_waiting_out_a_slow_child() {
-        let start = std::time::Instant::now();
-        let mut cmd = std::process::Command::new("sleep");
-        cmd.arg("5");
-        let result = bounded_output(&mut cmd, Duration::from_millis(200));
-        assert!(result.is_none(), "a killed child must not report success output");
-        assert!(start.elapsed() < Duration::from_secs(3), "took {:?}", start.elapsed());
-    }
-
-    #[test]
-    fn bounded_output_returns_a_fast_childs_stdout() {
-        let mut cmd = std::process::Command::new("printf");
-        cmd.arg("hello");
-        let result = bounded_output(&mut cmd, Duration::from_secs(5));
-        assert_eq!(result.as_deref(), Some(b"hello".as_slice()));
     }
 }
