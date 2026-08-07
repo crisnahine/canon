@@ -78,6 +78,85 @@ fn rev_parse(root: &Path) -> Option<String> {
     (sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit())).then_some(sha)
 }
 
+/// The branch this session is on.
+///
+/// `None` on a detached HEAD, where `rev-parse` answers the literal string
+/// `HEAD`: a bisect, a checkout of a tag, or a CI-shaped checkout carries no
+/// branch and therefore no key.
+pub(crate) fn branch_name(root: &Path) -> Option<String> {
+    let out = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let name = String::from_utf8(out).ok()?.trim().to_string();
+    (!name.is_empty() && name != "HEAD").then_some(name)
+}
+
+/// Subjects of the commits on this branch that are not on the default branch.
+///
+/// The one fallback available before a pull request exists, and it needs a
+/// merge base to be an answer at all. Without one, `git log` reports the
+/// whole history, and a key scraped from somebody else's commit is a wrong
+/// digest, which is the single outcome this design does not permit. So no
+/// default branch means no answer.
+pub(crate) fn branch_subjects(root: &Path) -> Option<Vec<String>> {
+    let base = default_branch(root)?;
+    let out = git(root, &["log", "--format=%s", "-20", "HEAD", "--not", base.as_str()])?;
+    let subjects: Vec<String> = String::from_utf8_lossy(&out)
+        .lines()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!subjects.is_empty()).then_some(subjects)
+}
+
+/// Where `origin/HEAD` points, spelled as a revision `git log` accepts.
+fn default_branch(root: &Path) -> Option<String> {
+    let out = git(root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])?;
+    let name = String::from_utf8(out).ok()?.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The branch name from `.git/HEAD`, with no subprocess.
+///
+/// The write path may not spawn one: `inject` is a file read and a filter,
+/// and the pointer line it can append is not worth a process per write. A
+/// worktree or a submodule spells `.git` as a file holding `gitdir: <path>`,
+/// so both shapes are followed, one level and no further.
+///
+/// `None` on a detached HEAD, which spells itself as a raw object id rather
+/// than as `ref: refs/heads/...`.
+// Task 12 gives `inject` the pointer line that reads this, and that is the first
+// caller anywhere under `main`. Task 10 wires the rest of the tier up but not this
+// one, so the allow outlives Task 10 and Task 12 Step 3 deletes it. It covers
+// `read_small` as well, which nothing else calls: an allowed item is a live root,
+// so what it calls is live with it.
+#[allow(dead_code)]
+pub(crate) fn branch_from_head_file(root: &Path) -> Option<String> {
+    let dot_git = root.join(".git");
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    let git_dir = if meta.is_dir() {
+        dot_git
+    } else {
+        let pointer = read_small(&dot_git)?;
+        let rest = pointer.trim().strip_prefix("gitdir:")?.trim().to_string();
+        let path = PathBuf::from(rest);
+        if path.is_absolute() { path } else { root.join(path) }
+    };
+    let name =
+        read_small(&git_dir.join("HEAD"))?.trim().strip_prefix("ref: refs/heads/")?.to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Read one of git's own small text files, or nothing.
+///
+/// Guarded the way canon's own state files are. A FIFO at this path would
+/// block the hook that read it forever, and `.git/HEAD` is one line.
+fn read_small(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// `-z` matters: a path containing a newline is legal on every platform canon
 /// runs on, and splitting on newlines would silently corrupt the index for the
 /// repository unlucky enough to contain one.
@@ -711,5 +790,52 @@ mod tests {
             git_within(here, &["rev-parse", "HEAD"], Duration::ZERO).is_none(),
             "a git call ran past the bound it was given"
         );
+    }
+
+    #[test]
+    fn a_branch_name_is_read_from_the_head_file_without_spawning_anything() {
+        // The write path may not spawn a process, so the pointer line reads
+        // `.git/HEAD` instead. This asserts the two agree.
+        let root = std::env::temp_dir().join("canon-git-headfile");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        if !child_repo(&root, "api", &[("a.rb", "class A; end\n")]) {
+            assert!(
+                Command::new("git").arg("--version").status().is_err(),
+                "git runs on this machine, so a fixture that cannot make a repository is a test bug"
+            );
+            return;
+        }
+        let repo = root.join("api");
+        let spawned = branch_name(&repo).expect("a branch");
+        assert_eq!(branch_from_head_file(&repo).as_deref(), Some(spawned.as_str()));
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_repository_has_no_branch() {
+        let dir = std::env::temp_dir().join("canon-git-nobranch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(branch_name(&dir), None);
+        assert_eq!(branch_from_head_file(&dir), None);
+        assert_eq!(branch_subjects(&dir), None);
+    }
+
+    #[test]
+    fn a_branch_with_no_default_branch_to_compare_against_has_no_subjects() {
+        // Without a merge base, `git log` reports the whole history, and a key
+        // scraped from somebody else's commit is a wrong digest. A local
+        // repository with no `origin` is exactly that case.
+        let root = std::env::temp_dir().join("canon-git-nobase");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        if !child_repo(&root, "api", &[("a.rb", "class A; end\n")]) {
+            assert!(
+                Command::new("git").arg("--version").status().is_err(),
+                "git runs on this machine, so a fixture that cannot make a repository is a test bug"
+            );
+            return;
+        }
+        assert_eq!(branch_subjects(&root.join("api")), None);
     }
 }

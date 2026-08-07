@@ -18,6 +18,7 @@ mod config;
 mod git;
 mod logging;
 mod paths;
+mod ticket;
 
 use args::Command;
 

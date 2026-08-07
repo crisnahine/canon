@@ -380,7 +380,15 @@ pub(crate) fn check(root: &Path) -> String {
                 if settings.context.enabled { "" } else { "  (reads no ticket)" }
             ));
             out.push_str(&format!("  slack                    {}\n", settings.context.slack));
-            out.push_str(&format!("  key_pattern              {}\n", settings.context.key_pattern));
+            out.push_str(&format!(
+                "  key_pattern              {}{}\n",
+                settings.context.key_pattern,
+                if crate::ticket::KeyPattern::compile(&settings.context.key_pattern).is_some() {
+                    ""
+                } else {
+                    "  (UNSUPPORTED: no key will be found)"
+                }
+            ));
             out.push_str(&format!(
                 "  digest_chars             {}\n",
                 settings.context.digest_chars
