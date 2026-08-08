@@ -3,6 +3,62 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-08
+
+canon now speaks for documents, and says something on a repository it has
+nothing to say about.
+
+### Added
+
+- **Three families for prose**, derived from `.md`, `.mdx`, `.markdown` and
+  `.mdown` without linking a grammar. `docs.frontmatter` states whether
+  documents in a directory open with YAML front matter or with a heading;
+  `docs.heading` states the level they open at; `docs.fence` states whether
+  fenced code blocks name a language, and which one is most common.
+
+  Documentation was the largest class canon could say nothing about. Measured
+  across eight unrelated repositories, `.md` was the most common extension with
+  no rule covering it, and one repository holding 359 markdown files answered
+  `no conventions match` for every one of them. The rule count on those same
+  repositories moved 24 to 27, 32 to 34, 66 to 72, 8 to 13, 1 to 3, and 0 to 2.
+  The last had no rules at all before this.
+
+  All three are advisory and none is checked after the write. `verify_source`
+  answers from what a tree-sitter grammar produced and a document has none, so
+  the reason sits in the `UNCHECKED` list where the guard test can see it.
+
+- **The conventions manifest reaches a forked session.** The `SessionStart`
+  matcher now covers every documented source, so a session resumed or forked
+  from another gets the same manifest a fresh one does.
+
+- **`tests/measure.py`**, the script every convention count in this project's
+  documents comes from. It counts how often a call passes a given argument,
+  from a checkout and a SHA rather than from canon's own snapshot, so a
+  disagreement between the two is a real disagreement.
+
+### Changed
+
+- **A repository below the agreement floor now says so.** It was silent, and
+  silence from a tool someone has just installed reads as broken rather than as
+  correct. The message names how many files were indexed and what the floor is,
+  so a user can tell when it will end. Measured across eight repositories this
+  is the ordinary first run for a small project: a 14-file repository derived
+  nothing at all.
+
+- **The bounded child process moved out of `git.rs`** and can be fed stdin and
+  keep a failed child's output. `git.rs` uses it for every spawn.
+
+### Removed
+
+- **Nothing that ever shipped.** A ticket-and-thread gather was built to the
+  point of a config table and a branch-key reader, then removed before release.
+  It answered a different question from the rest of canon, how good a
+  specification is, and that belongs to whoever briefs the agent rather than to
+  the tool that reads the tree. It was also the one part of canon that named
+  vendors, and a configuration surface cannot carry one company's tools and
+  still be one binary for every team. No product name now appears anywhere in
+  `crates/`.
+
 ## [0.6.0] - 2026-08-04
 
 A live false refusal, and the five rules that answer why it happened: a base

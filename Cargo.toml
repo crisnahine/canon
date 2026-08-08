@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 # Major.minor, not patch. A patch release adds no language feature, so
 # demanding one refuses a toolchain that can build this perfectly well:
@@ -20,10 +20,10 @@ repository = "https://github.com/crisnahine/canon"
 authors = ["Cris Nahine"]
 
 [workspace.dependencies]
-canon-core = { path = "crates/canon-core", version = "0.6.0" }
-canon-extract = { path = "crates/canon-extract", version = "0.6.0" }
-canon-derive = { path = "crates/canon-derive", version = "0.6.0" }
-canon-hook = { path = "crates/canon-hook", version = "0.6.0" }
+canon-core = { path = "crates/canon-core", version = "0.7.0" }
+canon-extract = { path = "crates/canon-extract", version = "0.7.0" }
+canon-derive = { path = "crates/canon-derive", version = "0.7.0" }
+canon-hook = { path = "crates/canon-hook", version = "0.7.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
