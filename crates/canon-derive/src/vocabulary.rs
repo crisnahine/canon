@@ -160,6 +160,10 @@ pub(crate) const BASE_PREFIX: &str = "Types here inherit from ";
 pub(crate) const FAMILY_PREFIX: &str = "Types here inherit from a ";
 pub(crate) const MIXIN_PREFIX: &str = "Types here include ";
 pub(crate) const CONTRACT_PREFIX: &str = "Types here implement ";
+pub(crate) const FRONTMATTER_PRESENT: &str = "Documents here open with YAML front matter";
+pub(crate) const FRONTMATTER_ABSENT: &str = "Documents here open with a heading, not front matter";
+pub(crate) const HEADING_PREFIX: &str = "Documents here open at heading level ";
+pub(crate) const FENCE_PREFIX: &str = "Code blocks here are tagged with a language, such as ";
 
 /// One family per const, so the derivation and the checker name the same row
 /// rather than two copies of it.
@@ -230,6 +234,28 @@ pub(crate) const CONTRACT: Family = Family {
     spelling: Spelling::Named(CONTRACT_PREFIX),
     reads: Reads::Structure,
 };
+/// The three families below speak for prose rather than code.
+///
+/// They exist because documentation was the largest uncovered class measured
+/// across eight unrelated repositories: `.md` was the most common extension
+/// canon could say nothing about, and one repository holding 359 markdown files
+/// answered `no conventions match` for every one of them. A team's documents
+/// carry house style as strictly as its code does, and none of it needs a
+/// grammar to see.
+///
+/// All three read the first lines of a file rather than parsing it. Markdown
+/// has no single grammar worth linking for three facts, and the facts that
+/// matter are all positional: what the file opens with, and how its fenced
+/// blocks are tagged.
+pub(crate) const FRONTMATTER: Family = Family {
+    id: "docs.frontmatter",
+    spelling: Spelling::OneOf(&[FRONTMATTER_PRESENT, FRONTMATTER_ABSENT]),
+    reads: Reads::Path,
+};
+pub(crate) const HEADING: Family =
+    Family { id: "docs.heading", spelling: Spelling::Counted(HEADING_PREFIX), reads: Reads::Path };
+pub(crate) const FENCE: Family =
+    Family { id: "docs.fence", spelling: Spelling::Named(FENCE_PREFIX), reads: Reads::Path };
 
 /// Every family, in the order [`crate::verify`] runs their checks.
 ///
@@ -256,6 +282,9 @@ pub(crate) const FAMILIES: &[Family] = &[
     BASE_FAMILY,
     MIXIN,
     CONTRACT,
+    FRONTMATTER,
+    HEADING,
+    FENCE,
 ];
 
 /// The family a rule belongs to, by its id.

@@ -273,6 +273,32 @@ fn session_start_states_what_the_repository_looks_like() {
 }
 
 #[test]
+fn a_repository_under_the_floor_is_told_why_it_heard_nothing() {
+    // The ordinary first run for a new or small project, and the worst moment
+    // for canon to say nothing at all: measured across eight unrelated
+    // repositories, a 14-file one derived no rules, which is correct behaviour
+    // that is indistinguishable from a broken install. The message has to name
+    // the file count and the floor, or it is just a friendlier silence.
+    let f = Fixture::new("under-the-floor");
+    f.write("only.rb", "class Only\nend\n");
+    let payload = f.session_payload("s1", "SessionStart", &json!({ "source": "startup" }));
+    let parsed = f.json(&["session-start"], &payload);
+
+    assert!(context(&parsed).is_none(), "nothing should be stated to the model: {parsed}");
+    let said = parsed["systemMessage"].as_str().unwrap_or_default();
+    assert!(said.contains("canon"), "canon did not name itself: {parsed}");
+    assert!(said.contains("no conventions"), "the outcome was not stated: {said}");
+    assert!(
+        said.contains(&canon_core::Settings::default().min_files.to_string()),
+        "the floor was not given, so the user cannot tell when this ends: {said}"
+    );
+    assert!(
+        said.contains("Nothing is wrong"),
+        "a correct-but-quiet run must say it is not a failure: {said}"
+    );
+}
+
+#[test]
 fn a_config_that_will_not_load_is_said_out_loud_once() {
     // The setting range narrowed in 0.5.0, so a `.canon.toml` that loaded
     // yesterday can stop loading today. The fallback is every default plus

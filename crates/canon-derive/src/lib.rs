@@ -31,6 +31,7 @@
     )
 )]
 
+mod docs;
 mod dup;
 mod naming;
 mod render;
@@ -214,6 +215,7 @@ pub fn derive_from(
     files: &[FileEntry],
 ) -> Vec<Convention> {
     let mut conventions = tier0::derive(files, settings);
+    conventions.extend(docs::derive(files, root, settings));
     let facts = semantic::gather(files, root);
     conventions.extend(semantic::derive(&facts, settings));
     roll_up_agreeing_siblings(&mut conventions, settings);

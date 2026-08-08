@@ -1691,6 +1691,19 @@ mod tests {
         // directory talks to, and a file that talks to someone else is
         // describing a different job rather than breaking one.
         "shape.collaborator",
+        // The three prose families below are stated and never checked, for one
+        // shared reason: `verify_source` answers from `FileFacts`, which is
+        // what a tree-sitter grammar produced, and a document has none. Their
+        // job is to reach the model before the write, which injection does
+        // without any of them being checkable afterwards.
+        //
+        // The absence costs less here than it would for code. Every one is
+        // Advisory, so nothing they say could refuse a write even with a check
+        // behind it, and each states a fact about how a document opens, which
+        // the model can see in the neighbours it was shown.
+        "docs.frontmatter",
+        "docs.heading",
+        "docs.fence",
     ];
 
     /// A rule of `family` naming `value`, worded the way the derivation words

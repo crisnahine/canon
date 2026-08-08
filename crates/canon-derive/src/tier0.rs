@@ -711,7 +711,7 @@ pub(crate) fn is_test_directory(dir: &str) -> bool {
 /// Recency rather than any other tie-break: an old file encodes a convention
 /// the team has already moved off, and pointing someone at one teaches the
 /// shape they are supposed to be replacing.
-fn exemplar_of(members: &[&FileEntry]) -> Option<String> {
+pub(crate) fn exemplar_of(members: &[&FileEntry]) -> Option<String> {
     members.iter().max_by_key(|f| (f.modified_unix, f.rel.clone())).map(|f| f.rel.clone())
 }
 
@@ -729,7 +729,7 @@ fn exemplar_of(members: &[&FileEntry]) -> Option<String> {
 /// directories and the snapshot is read before every write. Past the cap the
 /// list is emptied, which the check reads as "counted too widely to restrict" —
 /// the right answer for a rule that really is repository-wide.
-fn roots_of(members: &[&FileEntry]) -> Vec<String> {
+pub(crate) fn roots_of(members: &[&FileEntry]) -> Vec<String> {
     const MAX_SAMPLE_DIRS: usize = 96;
     let mut roots: Vec<String> = members.iter().map(|f| f.dir.clone()).collect();
     roots.sort();
@@ -737,7 +737,7 @@ fn roots_of(members: &[&FileEntry]) -> Vec<String> {
     if roots.len() > MAX_SAMPLE_DIRS { Vec::new() } else { roots }
 }
 
-fn evidence_of(members: &[&FileEntry]) -> Vec<Evidence> {
+pub(crate) fn evidence_of(members: &[&FileEntry]) -> Vec<Evidence> {
     let mut sorted: Vec<&&FileEntry> = members.iter().collect();
     sorted.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix).then(a.rel.cmp(&b.rel)));
     sorted

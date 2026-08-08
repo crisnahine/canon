@@ -245,9 +245,9 @@ class is not how most frameworks say what a file is.
   client's TypeScript files lived deeper and could never have a rule of their
   own. The sharpest case is the layout canon documents as a feature. A
   workspace holding several checkouts prefixes every path with the checkout
-  name, so `api/app/services/billing` is already at the cap: opening
-  `empire-flippers/` derived 152 rules where `api` and `client` opened
-  separately derived 285 between them. It now derives 450.
+  name, so `api/app/services/billing` is already at the cap: opening the
+  workspace root derived 152 rules where the two checkouts inside it, opened
+  separately, derived 285 between them. It now derives 450.
 
   Eight by measurement. Against 4, caps of 6, 8 and 10 were measured on eight
   real repositories: 6 recovers most of the loss, 8 recovers effectively all of

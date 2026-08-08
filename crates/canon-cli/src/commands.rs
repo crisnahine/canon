@@ -49,9 +49,25 @@ pub(crate) fn session_start(input: &HookInput) -> HookOutput {
     let snapshot = refresh(&root, &settings, false);
     if snapshot.conventions.is_empty() {
         logging::info("no conventions derived; staying quiet");
+        // Said to the user, once, rather than only to a log whose level
+        // defaults to off. A repository under the floor is the ordinary first
+        // run for a new or small project, and measured across eight unrelated
+        // repositories it is common: a 14-file repository derived nothing at
+        // all. Silence there is canon behaving correctly and looking broken,
+        // which for a tool someone just installed is the same thing. Saying how
+        // many files were seen, and what the floor is, turns a dead install
+        // into a tool that has started.
+        let said = format!(
+            "canon indexed {} files in {} and derived no conventions yet. A rule needs {} files agreeing inside one directory, so a small or new repository states nothing until it grows. Nothing is wrong and nothing needs configuring.",
+            snapshot.file_count,
+            root.display(),
+            settings.min_files,
+        );
         return match unusable {
-            Some(said) => HookOutput::silent().with_system_message(said),
-            None => HookOutput::silent(),
+            // The unusable-config message wins. It reports a file that stopped
+            // parsing, which is actionable now, where this one is a status.
+            Some(problem) => HookOutput::silent().with_system_message(problem),
+            None => HookOutput::silent().with_system_message(said),
         };
     }
     let out = HookOutput::context(Event::SessionStart, manifest(&snapshot));
