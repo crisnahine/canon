@@ -196,28 +196,6 @@ pub(crate) fn apply_env(
                     .collect();
                 Ok(())
             }
-            "CANON_CONTEXT_ENABLED" => {
-                match value.as_str() {
-                    "1" | "true" | "yes" | "on" => settings.context.enabled = true,
-                    "0" | "false" | "no" | "off" => settings.context.enabled = false,
-                    _ => return Err(ConfigError::Env { key: key.clone(), value: value.clone() }),
-                }
-                Ok(())
-            }
-            "CANON_CONTEXT_SLACK" => {
-                match value.as_str() {
-                    "1" | "true" | "yes" | "on" => settings.context.slack = true,
-                    "0" | "false" | "no" | "off" => settings.context.slack = false,
-                    _ => return Err(ConfigError::Env { key: key.clone(), value: value.clone() }),
-                }
-                Ok(())
-            }
-            "CANON_CONTEXT_DIGEST_CHARS" => {
-                value.parse().map(|v| settings.context.digest_chars = v).map_err(|_| ())
-            }
-            "CANON_CONTEXT_FRESHNESS_MINUTES" => {
-                value.parse().map(|v| settings.context.freshness_minutes = v).map_err(|_| ())
-            }
             _ => continue,
         };
         if parsed.is_err() {
@@ -399,34 +377,5 @@ mod tests {
         assert!(load_or_default(&on).0.enforce);
         let off = dir("enforce-off", Some("enforce = false\n"));
         assert!(!load_or_default(&off).0.enforce);
-    }
-
-    #[test]
-    fn the_context_table_can_be_turned_on_from_the_environment() {
-        let mut settings = Settings::default();
-        apply_env(
-            &mut settings,
-            &vars(&[("CANON_CONTEXT_ENABLED", "1"), ("CANON_CONTEXT_DIGEST_CHARS", "1500")]),
-        )
-        .unwrap();
-        assert!(settings.context.enabled);
-        assert_eq!(settings.context.digest_chars, 1_500);
-    }
-
-    #[test]
-    fn an_unreadable_context_switch_is_an_error_not_a_silent_no() {
-        let mut settings = Settings::default();
-        assert!(apply_env(&mut settings, &vars(&[("CANON_CONTEXT_ENABLED", "perhaps")])).is_err());
-    }
-
-    #[test]
-    fn a_context_table_in_a_real_config_file_loads() {
-        let root = dir(
-            "context-table",
-            Some("[context]\nenabled = true\njira_fields = [\"customfield_10050\"]\n"),
-        );
-        let settings = load(&root).unwrap();
-        assert!(settings.context.enabled);
-        assert_eq!(settings.context.jira_fields, vec!["customfield_10050"]);
     }
 }

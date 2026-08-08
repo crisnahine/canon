@@ -30,7 +30,7 @@ mod settings;
 
 pub use confidence::Confidence;
 pub use convention::{Convention, Enforcement, Evidence, ROLLUP_SUFFIX, Scope, enforcement_for};
-pub use settings::{ContextSettings, Settings, SettingsError};
+pub use settings::{Settings, SettingsError};
 
 /// Bytes of convention text injected per write.
 ///
@@ -52,19 +52,3 @@ pub const INJECTION_BUDGET: usize = 3_000;
 /// indistinguishable from a crash on the receiving end, so canon refuses to
 /// emit past this rather than letting the host cut a value in half.
 pub const HOOK_OUTPUT_CAP: usize = 16_384;
-
-/// The host's cap on one `additionalContext` string, in characters.
-///
-/// Different from [`HOOK_OUTPUT_CAP`] in both unit and scope: that one bounds
-/// the whole JSON document in bytes and is canon's own refusal to emit a
-/// value the host would cut in half. This one bounds a single string inside
-/// that document, is counted in characters, and is the host's: a longer
-/// string is not truncated but replaced with a file preview plus a path,
-/// silently.
-pub const HOST_CONTEXT_CHAR_CAP: usize = 10_000;
-
-/// The largest digest anyone may configure.
-///
-/// Well under [`HOST_CONTEXT_CHAR_CAP`], because the digest shares that field
-/// with the conventions manifest and with whatever a later version adds.
-pub const DIGEST_CHAR_CAP: usize = 8_000;

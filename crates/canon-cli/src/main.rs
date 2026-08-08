@@ -18,8 +18,6 @@ mod config;
 mod git;
 mod logging;
 mod paths;
-mod ticket;
-mod tokens;
 
 use args::Command;
 

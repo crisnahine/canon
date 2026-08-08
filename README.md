@@ -400,15 +400,6 @@ Optional, and most repositories should never need it. Layered: defaults, then
 | `suppress` | `[]` | `CANON_SUPPRESS` | convention ids to silence, `*` allowed |
 | `exclude_dirs` | 30 entries | — | directory names never scanned |
 | `log_level` | `off` | `CANON_LOG` | `off`, `error`, `warn`, `info`, `debug`, `trace` |
-| `context.enabled` | `false` | `CANON_CONTEXT_ENABLED` | read the branch's Jira ticket at session start |
-| `context.slack` | `false` | `CANON_CONTEXT_SLACK` | also search Slack for the thread |
-| `context.key_pattern` | `[A-Z][A-Z0-9]+-\d+` | none | how a ticket key is spelled in a branch name |
-| `context.jira_fields` | `[]` | none | custom field ids read alongside the description |
-| `context.slack_channels` | `[]` | none | channels searched before the search widens |
-| `context.exclude_channels` | `["*-bitbucket", "*-github"]` | none | channels never read |
-| `context.deciders` | `[]` | none | whose newer statement outranks an older one |
-| `context.digest_chars` | `2000` | `CANON_CONTEXT_DIGEST_CHARS` | characters of ticket digest injected once per session |
-| `context.freshness_minutes` | `240` | `CANON_CONTEXT_FRESHNESS_MINUTES` | how long a gathered digest is served without a refetch |
 
 `canon check` prints all of these as they are actually resolved, so what is in
 effect is never inferred from a document.

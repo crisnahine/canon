@@ -373,34 +373,6 @@ pub(crate) fn check(root: &Path) -> String {
                     settings.suppress.join(", ")
                 ));
             }
-            out.push_str("\nContext\n");
-            out.push_str(&format!(
-                "  enabled                  {}{}\n",
-                settings.context.enabled,
-                if settings.context.enabled { "" } else { "  (reads no ticket)" }
-            ));
-            out.push_str(&format!("  slack                    {}\n", settings.context.slack));
-            out.push_str(&format!(
-                "  key_pattern              {}{}\n",
-                settings.context.key_pattern,
-                if crate::ticket::KeyPattern::compile(&settings.context.key_pattern).is_some() {
-                    ""
-                } else {
-                    "  (UNSUPPORTED: no key will be found)"
-                }
-            ));
-            out.push_str(&format!(
-                "  digest_chars             {}\n",
-                settings.context.digest_chars
-            ));
-            // Whether the credential is present, never what it is. This is a
-            // command whose output people paste into issues.
-            for key in
-                ["CANON_JIRA_URL", "CANON_JIRA_EMAIL", "CANON_JIRA_TOKEN", "CANON_SLACK_TOKEN"]
-            {
-                let present = std::env::var_os(key).is_some_and(|v| !v.is_empty());
-                out.push_str(&format!("  {key:<24} {}\n", if present { "set" } else { "not set" }));
-            }
         }
         Err(e) => {
             // Not "the defaults": the default is `enforce = true`, and a
